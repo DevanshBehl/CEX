@@ -1,0 +1,47 @@
+# Local development infrastructure (prompt_phase1.md rule 16).
+# Not a deployment topology — Phase 4 addresses real operational segregation.
+name: wallet
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wallet-postgres
+    environment:
+      # Superuser is used only by the init scripts below. The application
+      # connects as wallet_app, which cannot create or drop anything
+      # (prompt_phase1.md rule 109, master-prompt rule 156).
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: wallet
+    ports:
+      # 5433 on the host: 5432 is taken by a local Homebrew Postgres install.
+      - '5433:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d wallet']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: wallet-redis
+    # appendonly keeps rate-limit counters and in-flight WebAuthn challenges
+    # across a restart. Losing a challenge is harmless (the ceremony retries);
+    # losing rate-limit state briefly is not.
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6380:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:
+  redis-data:

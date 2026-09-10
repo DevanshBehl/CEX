@@ -1,0 +1,40 @@
+{
+  "name": "@wallet/root",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0",
+    "pnpm": ">=10.0.0"
+  },
+  "packageManager": "pnpm@11.0.9",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:integration": "turbo run test:integration",
+    "test:e2e": "pnpm --filter @wallet/web test:e2e",
+    "db:generate": "pnpm --filter @wallet/db generate",
+    "db:migrate": "pnpm --filter @wallet/db migrate",
+    "db:migrate:check": "pnpm --filter @wallet/db migrate:check",
+    "db:reset": "pnpm --filter @wallet/db reset",
+    "infra:up": "docker compose -f infra/docker-compose.yml up -d",
+    "infra:down": "docker compose -f infra/docker-compose.yml down",
+    "infra:nuke": "docker compose -f infra/docker-compose.yml down -v",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "9.17.0",
+    "@types/node": "22.10.5",
+    "eslint": "9.17.0",
+    "eslint-plugin-import": "2.31.0",
+    "prettier": "3.4.2",
+    "tsx": "4.19.2",
+    "turbo": "2.3.3",
+    "typescript": "5.7.2",
+    "typescript-eslint": "8.19.0",
+    "vitest": "2.1.8"
+  }
+}

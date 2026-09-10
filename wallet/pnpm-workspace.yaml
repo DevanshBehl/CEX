@@ -1,0 +1,20 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# pnpm 11 build-script approvals. Anything not listed here does not run
+# install scripts (master-prompt rule 156 — least privilege).
+allowBuilds:
+  esbuild: true
+  '@prisma/client': true
+  '@prisma/engines': true
+  prisma: true
+  '@tailwindcss/oxide': true
+  sharp: true
+  unrs-resolver: true
+
+# zod-to-json-schema >=3.25 imports `zod/v3`, an export map that only exists in
+# Zod 4. This monorepo is on Zod 3 (fastify-type-provider-zod@4 requires it),
+# so the transitive dependency is pinned to the last Zod-3-compatible line.
+overrides:
+  zod-to-json-schema: 3.24.5

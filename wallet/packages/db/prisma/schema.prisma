@@ -1,0 +1,189 @@
+// Phase 1 schema (prompt_phase1.md rules 96-109).
+//
+// Deliberately absent: wallets, addresses, balances, deposits, withdrawals,
+// and any monetary column at all (rules 22, 205). Money is designed in Phase 2
+// alongside the ledger that governs it; a `balance` column added here as a
+// shortcut becomes an accounting bug there.
+//
+// Two conventions applied throughout, both chosen with Phase 2 in mind:
+//
+//   snake_case columns   — the ledger will be queried with hand-written SQL for
+//                          reconciliation and invariant checks. Quoted
+//                          "camelCase" identifiers make that miserable.
+//   timestamptz          — every instant is stored with a zone. A ledger that
+//                          records `timestamp without time zone` is one
+//                          deployment-region change away from unexplainable
+//                          ordering, and ordering is what a ledger sells.
+//
+// The Prisma CLI reads MIGRATION_DATABASE_URL from .env directly. This is the
+// one documented exception to rule 56 — a separate process with its own
+// configuration mechanism, no application TypeScript involved.
+// See docs/adr/0003-database-roles.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Migrations run as wallet_owner; the API connects as wallet_app.
+  url       = env("MIGRATION_DATABASE_URL")
+  directUrl = env("MIGRATION_DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  active
+  suspended
+  closed
+}
+
+model User {
+  // UUIDv7 generated in application code (rule 93). Time-ordered, so index
+  // locality is good, without leaking a row count the way a serial does.
+  id              String     @id @db.Uuid
+  // Nullable: a passkey-only account is fully supported (rule 130).
+  email           String?    @unique
+  displayName     String?    @map("display_name")
+  emailVerifiedAt DateTime?  @map("email_verified_at") @db.Timestamptz(3)
+  status          UserStatus @default(active)
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  credentials   Credential[]
+  sessions      Session[]
+  recoveryCodes RecoveryCode[]
+
+  @@map("users")
+}
+
+enum CredentialType {
+  webauthn
+  password
+  totp
+}
+
+/// One table, three shapes (rule 97). The alternative — three tables — turns
+/// "does this user still have any factor left?" into a three-way union, and
+/// that question is asked on every credential revocation (rule 118).
+model Credential {
+  id     String         @id @db.Uuid
+  userId String         @map("user_id") @db.Uuid
+  type   CredentialType
+
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+
+  // --- webauthn (rule 98) ---
+  credentialId Bytes?   @unique @map("credential_id")
+  publicKey    Bytes?   @map("public_key")
+  /// Clone detection: a counter that fails to advance means two authenticators
+  /// share one credential (rules 114-115).
+  signCount    BigInt?  @map("sign_count")
+  transports   String[] @default([])
+  aaguid       String?
+  backedUp     Boolean? @map("backed_up")
+  deviceName   String?  @map("device_name")
+
+  // --- password (rule 99) ---
+  /// argon2id only. Never a reversible encoding.
+  passwordHash String? @map("password_hash")
+
+  // --- totp (rule 100) ---
+  /// AES-256-GCM ciphertext. The plaintext secret exists only in the
+  /// enrollment response and never again (rule 134).
+  totpSecretEncrypted Bytes?    @map("totp_secret_encrypted")
+  totpConfirmedAt     DateTime? @map("totp_confirmed_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@index([userId, revokedAt])
+  @@map("credentials")
+}
+
+/// Server-side and opaque (rules 121-122). A JWT cannot be revoked before it
+/// expires, and master-prompt rule 165 requires revocation.
+model Session {
+  id     String @id @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  /// SHA-256 of the token. The raw token exists only in the cookie (rule 102),
+  /// so a database dump does not hand over live sessions.
+  tokenHash Bytes @unique @map("token_hash")
+
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastSeenAt DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+
+  ip        String?
+  userAgent String? @map("user_agent")
+
+  /// Timestamp of the last successful step-up assertion (rules 135-139).
+  /// null means this session has never stepped up.
+  stepUpAt DateTime? @map("step_up_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// Single-use 2FA recovery codes (rule 133). Hashes only — the plaintext is
+/// displayed exactly once at enrollment and is unrecoverable afterwards.
+model RecoveryCode {
+  id       String    @id @db.Uuid
+  userId   String    @map("user_id") @db.Uuid
+  codeHash Bytes     @unique @map("code_hash")
+  usedAt   DateTime? @map("used_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
+  @@map("recovery_codes")
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+/// APPEND-ONLY (rules 105-108).
+///
+/// There is no updated_at because a row is never updated. This is enforced by
+/// the database: the append_only_audit_log migration revokes UPDATE and DELETE
+/// from wallet_app and installs a trigger, so the guarantee survives a bug, a
+/// bad query, or a well-meaning cleanup script.
+///
+/// Phase 2's ledger_entries reuses this pattern verbatim. Proving it works on a
+/// table where a mistake costs an audit trail rather than someone's balance is
+/// the point of doing it now.
+model AuditLog {
+  id String @id @db.Uuid
+
+  actorUserId String? @map("actor_user_id") @db.Uuid
+  event       String
+  targetType  String? @map("target_type")
+  targetId    String? @map("target_id")
+
+  /// Allowlisted fields only, mirroring @wallet/logger's allowlist (rule 105).
+  metadata Json @default("{}")
+
+  correlationId String? @map("correlation_id")
+  ip            String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([actorUserId, createdAt])
+  @@index([event, createdAt])
+  @@index([createdAt])
+  @@map("audit_log")
+}

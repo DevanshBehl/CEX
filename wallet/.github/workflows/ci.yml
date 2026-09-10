@@ -1,0 +1,174 @@
+# CI gates the merge (prompt_phase1.md rules 17, 193).
+#
+# Every job here corresponds to a Definition-of-Done item. The dependency-
+# boundary job in particular exists to prove the lint rules actually bite
+# (rule 188) — a boundary rule nobody has seen fail is a boundary rule that
+# might not be wired up.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Test-only values. Real secrets never appear in a workflow file
+  # (master-prompt rule 158).
+  DATABASE_URL: postgresql://wallet_app:wallet_app@localhost:5433/wallet
+  MIGRATION_DATABASE_URL: postgresql://wallet_owner:wallet_owner@localhost:5433/wallet
+  REDIS_URL: redis://localhost:6380
+  # `test`, never `development`: a production `next build` that inherits
+  # NODE_ENV=development fails while prerendering /404 with a misleading
+  # "<Html> should not be imported outside of pages/_document". The web build
+  # script pins NODE_ENV=production for exactly this reason.
+  NODE_ENV: test
+  LOG_LEVEL: error
+  WEB_ORIGIN: http://localhost:3000
+  WEBAUTHN_RP_ID: localhost
+  WEBAUTHN_RP_NAME: Wallet
+  WEBAUTHN_ORIGIN: http://localhost:3000
+  SESSION_COOKIE_NAME: wallet_session
+  SESSION_SECRET: ci-only-session-secret-at-least-32-chars-long
+  TOTP_ENCRYPTION_KEY: Y2ktb25seS10b3RwLWtleS0zMi1ieXRlcy0hIQ==
+
+jobs:
+  static:
+    name: Lint, typecheck, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @wallet/db generate
+      - run: pnpm build
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Formatting
+        run: pnpm format:check
+
+  boundaries:
+    name: Architectural boundaries actually bite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @wallet/db generate
+      # rule 188: introduce a deliberate violation and require lint to fail.
+      # A boundary rule that has never been seen to fail may not be wired up.
+      - run: node scripts/verify-boundaries.mjs
+
+  integration:
+    name: Integration tests (real PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: wallet
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d wallet"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6380:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Roles are cluster-scoped and live in the init script; the grants that
+      # depend on them are a migration. See migration 0002 for why.
+      - name: Create database roles
+        run: |
+          PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d wallet \
+            -f infra/postgres-init/01-roles.sql
+          PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d wallet \
+            -c "ALTER ROLE wallet_owner CREATEDB;"
+
+      - run: pnpm --filter @wallet/db generate
+      - run: pnpm build
+      - run: pnpm --filter @wallet/db exec prisma migrate deploy
+
+      # rule 95: the checked-in migrations must fully describe the schema.
+      - name: Migrations match the schema
+        run: pnpm --filter @wallet/db exec prisma migrate diff
+          --from-migrations ./prisma/migrations
+          --to-schema-datamodel ./prisma/schema.prisma
+          --shadow-database-url "$MIGRATION_DATABASE_URL"
+          --exit-code
+
+      - run: pnpm test:integration
+
+  e2e:
+    name: End-to-end journeys
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: wallet
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d wallet"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6380:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Create database roles
+        run: |
+          PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d wallet \
+            -f infra/postgres-init/01-roles.sql
+      - run: pnpm --filter @wallet/db generate
+      - run: pnpm build
+      - run: pnpm --filter @wallet/db exec prisma migrate deploy
+      - run: pnpm --filter @wallet/web exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/

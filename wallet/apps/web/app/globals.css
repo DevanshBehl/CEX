@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface: 255 255 255;
+  --ink: 17 24 39;
+  --muted: 107 114 128;
+  --line: 229 231 235;
+  --accent: 37 99 235;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: 17 24 39;
+    --ink: 243 244 246;
+    --muted: 156 163 175;
+    --line: 55 65 81;
+    --accent: 96 165 250;
+  }
+}
+
+body {
+  background: rgb(var(--surface));
+  color: rgb(var(--ink));
+}

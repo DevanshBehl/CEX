@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.next/
+.turbo/
+coverage/
+*.tsbuildinfo
+
+# Secrets — never commit (master-prompt rule 158)
+.env
+.env.*
+!.env.example
+
+# Local
+.DS_Store
+*.log
+playwright-report/
+test-results/
