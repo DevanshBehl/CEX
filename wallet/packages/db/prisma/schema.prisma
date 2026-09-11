@@ -56,6 +56,7 @@ model User {
   credentials   Credential[]
   sessions      Session[]
   recoveryCodes RecoveryCode[]
+  wallets       Wallet[]
 
   @@map("users")
 }
@@ -186,4 +187,262 @@ model AuditLog {
   @@index([event, createdAt])
   @@index([createdAt])
   @@map("audit_log")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — custody, ledger, and deposits
+//
+// Note what is still absent: any balance column, anywhere. A balance is a
+// projection over ledger_entries (prompt_phase2.md rules 83-85, 196). If one
+// appears here in a later phase, it is a bug, not an optimisation.
+// ---------------------------------------------------------------------------
+
+enum WalletStatus {
+  active
+  frozen
+  closed
+}
+
+/// Custody infrastructure, not a key (master-prompt rule 92).
+///
+/// A wallet groups the addresses held on one chain for one user. It holds no
+/// balance and no key material — it is the thing addresses hang off, so that
+/// "freeze this user's custody" is one row rather than a scan.
+model Wallet {
+  id        String       @id @db.Uuid
+  userId    String       @map("user_id") @db.Uuid
+  chain     String
+  status    WalletStatus @default(active)
+  createdAt DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  addresses Address[]
+  deposits  Deposit[]
+
+  @@unique([userId, chain])
+  @@index([userId])
+  @@map("wallets")
+}
+
+/// Custody tiers (master-prompt rule 96).
+///
+/// Phase 2 writes only `deposit` and implements no behaviour for the others
+/// (prompt_phase2.md rules 35, 122). They exist in the enum so Phase 4 adds
+/// behaviour rather than a migration on a table that by then holds real rows.
+enum CustodyRole {
+  deposit
+  hot
+  warm
+  cold
+}
+
+enum AddressStatus {
+  active
+  retired
+}
+
+/// PUBLIC DATA ONLY (master-prompt rules 94-95, 100).
+///
+/// No private key, no share, no seed. Phase 2 never signs, so no key material
+/// exists to store; `derivationPath` records how the address was produced so
+/// the set is reconstructible from the seed alone (ADR-0004,
+/// prompt_phase2.md rules 106-107) without that seed ever living here.
+model Address {
+  id              String        @id @db.Uuid
+  walletId        String        @map("wallet_id") @db.Uuid
+  chain           String
+  address         String
+  derivationIndex Int           @map("derivation_index")
+  derivationPath  String        @map("derivation_path")
+  custodyRole     CustodyRole   @default(deposit) @map("custody_role")
+  status          AddressStatus @default(active)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  wallet   Wallet          @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  deposits Deposit[]
+  cursor   IndexerCursor?
+
+  @@unique([chain, address])
+  @@unique([chain, derivationIndex])
+  @@index([walletId, status])
+  @@map("addresses")
+}
+
+// ---------------------------------------------------------------------------
+// Ledger
+// ---------------------------------------------------------------------------
+
+enum LedgerAccountType {
+  user_available
+  user_locked
+  chain_assets
+  house_fees
+  house_rent
+  external
+}
+
+/// An account is identified by (owner, asset, type) and holds NO balance.
+///
+/// `ownerId` is null for house and system accounts, which is why the unique key
+/// includes it rather than being (asset, type).
+model LedgerAccount {
+  id      String            @id @db.Uuid
+  ownerId String?           @map("owner_id") @db.Uuid
+  asset   String
+  type    LedgerAccountType
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  entries LedgerEntry[]
+
+  @@unique([ownerId, asset, type])
+  @@index([asset, type])
+  @@map("ledger_accounts")
+}
+
+enum LedgerTransactionKind {
+  deposit
+  withdrawal_lock
+  withdrawal_release
+  withdrawal_settle
+  sweep
+  fee
+  adjustment
+}
+
+/// APPEND-ONLY. No `updatedAt`, because a transaction is never edited.
+///
+/// `referenceType`/`referenceId` tie it to the domain object that caused it, so
+/// "why does this entry exist" is answerable from the ledger alone.
+model LedgerTransaction {
+  id            String                @id @db.Uuid
+  kind          LedgerTransactionKind
+  referenceType String                @map("reference_type")
+  referenceId   String                @map("reference_id")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  entries LedgerEntry[]
+  deposit Deposit?
+
+  @@index([referenceType, referenceId])
+  @@index([kind, createdAt])
+  @@map("ledger_transactions")
+}
+
+enum EntryDirection {
+  debit
+  credit
+}
+
+/// APPEND-ONLY, enforced by the database.
+///
+/// The grants and triggers live in the `ledger_immutability` migration and are
+/// the same mechanism proven on `audit_log` in Phase 1 — which is exactly why
+/// it was built there first, against a table where a mistake cost an audit
+/// trail rather than someone's balance (prompt_phase2.md rules 131-133).
+///
+/// `amount` is NUMERIC(38,0): an integer count of base units. Never a float,
+/// never a JS number (rules 59-63, 130). It is always non-negative; the sign
+/// lives in `direction`.
+model LedgerEntry {
+  id            String         @id @db.Uuid
+  transactionId String         @map("transaction_id") @db.Uuid
+  accountId     String         @map("account_id") @db.Uuid
+  asset         String
+  amount        Decimal        @db.Decimal(38, 0)
+  direction     EntryDirection
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  transaction LedgerTransaction @relation(fields: [transactionId], references: [id])
+  account     LedgerAccount     @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, asset])
+  @@index([transactionId])
+  @@map("ledger_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Deposits
+// ---------------------------------------------------------------------------
+
+enum DepositStatus {
+  /// Seen on-chain but not yet settled enough to credit (ADR-0006).
+  confirming
+  /// Finalized and posted to the ledger.
+  credited
+  /// Detected but deliberately not credited; `reason` says why.
+  ignored
+}
+
+/// One detected incoming transfer.
+///
+/// UNIQUE(chain, tx_signature, instruction_index) IS the idempotency mechanism
+/// (master-prompt rule 130, prompt_phase2.md rules 127-128). A replay is a
+/// caught constraint violation and a no-op — never a read-then-write check,
+/// which has a race between the read and the write that is precisely the case
+/// that matters.
+model Deposit {
+  id        String @id @db.Uuid
+  walletId  String @map("wallet_id") @db.Uuid
+  addressId String @map("address_id") @db.Uuid
+  userId    String @map("user_id") @db.Uuid
+
+  chain            String
+  asset            String
+  /// Total received on-chain, in base units.
+  amount           Decimal @db.Decimal(38, 0)
+  /// The portion immobilised as a rent-exempt minimum, credited to house_rent
+  /// rather than to the user (rules 157-158).
+  rentReserved     Decimal @default(0) @map("rent_reserved") @db.Decimal(38, 0)
+  txSignature      String  @map("tx_signature")
+  instructionIndex Int     @map("instruction_index")
+  /// Chain position (Solana slot). BigInt: slot numbers grow without bound.
+  position         BigInt
+
+  status DepositStatus @default(confirming)
+  reason String?
+
+  ledgerTransactionId String? @unique @map("ledger_transaction_id") @db.Uuid
+
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  creditedAt  DateTime? @map("credited_at") @db.Timestamptz(3)
+
+  wallet            Wallet             @relation(fields: [walletId], references: [id])
+  address           Address            @relation(fields: [addressId], references: [id])
+  ledgerTransaction LedgerTransaction? @relation(fields: [ledgerTransactionId], references: [id])
+
+  @@unique([chain, txSignature, instructionIndex])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@map("deposits")
+}
+
+/// Where the indexer has read up to, per watched address.
+///
+/// Persisted ONLY after the batch it describes has committed
+/// (prompt_phase2.md rules 146-147), so a restart re-processes rather than
+/// skips. Re-processing is a no-op by the deposit uniqueness constraint;
+/// skipping loses a deposit.
+model IndexerCursor {
+  id        String @id @db.Uuid
+  chain     String
+  addressId String @unique @map("address_id") @db.Uuid
+
+  lastSignature String? @map("last_signature")
+  lastPosition  BigInt? @map("last_position")
+
+  lastPolledAt DateTime? @map("last_polled_at") @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  address Address @relation(fields: [addressId], references: [id], onDelete: Cascade)
+
+  @@index([chain, lastPolledAt])
+  @@map("indexer_cursors")
 }

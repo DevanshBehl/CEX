@@ -33,16 +33,34 @@ const CASES = [
     expect: /do not belong in a domain package/,
   },
   {
-    name: 'a Phase 2 package referenced from Phase 1',
+    name: 'a package from a later phase',
     file: 'packages/auth/src/__boundary_probe2.ts',
-    source: "import '@wallet/ledger';\n",
-    expect: /Phase 2\+ package/,
+    source: "import '@wallet/risk';\n",
+    expect: /belongs to a later phase/,
+  },
+  {
+    name: 'the ledger domain reaching for a chain',
+    file: 'packages/ledger/src/__boundary_probe.ts',
+    source: "import '@solana/web3.js';\n",
+    expect: /Only packages\/solana may import a chain SDK/,
+  },
+  {
+    name: 'the ledger domain reaching for persistence',
+    file: 'packages/ledger/src/__boundary_probe2.ts',
+    source: "import '@wallet/db';\n",
+    expect: /must not depend on a chain, a database, or a cache/,
   },
   {
     name: 'fetch outside the typed API client',
     file: 'apps/web/features/auth/__boundary_probe.ts',
     source: 'export const bad = () => fetch("/anything");\n',
     expect: /may only be called from apps\/web\/lib\/api/,
+  },
+  {
+    name: 'a chain SDK outside packages/solana',
+    file: 'apps/api/src/__boundary_probe_chain.ts',
+    source: "import '@solana/web3.js';\n",
+    expect: /Only packages\/solana may import a chain SDK/,
   },
   {
     name: 'Prisma imported outside @wallet/db',

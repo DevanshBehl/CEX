@@ -1,6 +1,7 @@
 import { Redis } from 'ioredis';
 import type { FastifyInstance } from 'fastify';
 import { loadApiConfigOrExit, parseEnv, toApiConfig } from '@wallet/config';
+import type { ChainAdapter } from '@wallet/blockchain';
 import { createPrismaClient, newId } from '@wallet/db';
 import { createCapturingLogger, type CapturedLogger } from '@wallet/logger';
 import { buildServer } from '../src/server.js';
@@ -14,13 +15,24 @@ export interface Harness {
   createdUserIds: string[];
 }
 
-export async function startHarness(): Promise<Harness> {
+export async function startHarness(
+  options: { chainAdapter?: ChainAdapter } = {},
+): Promise<Harness> {
   const config = toApiConfig(parseEnv(process.env));
   const logs = createCapturingLogger('trace');
   const db = createPrismaClient({ url: config.database.url });
   const redis = new Redis(config.redis.url, { maxRetriesPerRequest: 3 });
 
-  const app = await buildServer({ config, logger: logs.logger, db, redis });
+  const app = await buildServer({
+    config,
+    logger: logs.logger,
+    db,
+    redis,
+    ...(options.chainAdapter !== undefined ? { chainAdapter: options.chainAdapter } : {}),
+    // Tests drive `runOnce()` by hand. A timer-driven indexer would poll in the
+    // background and make "what happened after N cycles" unanswerable.
+    startIndexer: false,
+  });
   await app.ready();
 
   const createdUserIds: string[] = [];
@@ -31,6 +43,11 @@ export async function startHarness(): Promise<Harness> {
     createdUserIds,
     async cleanup() {
       if (createdUserIds.length > 0) {
+        // Ledger entries are append-only by design, so test data is cleaned by
+        // dropping the user and cascading — the entries stay, which is correct:
+        // history is not deletable, and the accounts they reference are keyed
+        // by a user id that no longer resolves.
+        await db.deposit.deleteMany({ where: { userId: { in: createdUserIds } } });
         await db.user.deleteMany({ where: { id: { in: createdUserIds } } });
       }
       await app.close();
@@ -89,3 +106,28 @@ export async function seedSession(
 }
 
 export { loadApiConfigOrExit };
+
+/** Gives a seeded user a wallet and one deposit address. */
+export async function seedDepositAddress(
+  harness: Harness,
+  userId: string,
+): Promise<{ walletId: string; addressId: string; address: string }> {
+  const response = await harness.app.inject({
+    method: 'POST',
+    url: '/wallets/addresses',
+    headers: browserHeaders(await cookieFor(harness, userId)),
+  });
+  if (response.statusCode !== 200) {
+    throw new Error(`could not create deposit address: ${response.body}`);
+  }
+  const body = response.json() as { walletId: string; address: { id: string; address: string } };
+  return { walletId: body.walletId, addressId: body.address.id, address: body.address.address };
+}
+
+async function cookieFor(harness: Harness, userId: string): Promise<string> {
+  const issued = await harness.app.appDeps.sessions.issue({ userId, ip: '127.0.0.1' });
+  const cookieName = process.env.SESSION_COOKIE_NAME ?? 'wallet_session';
+  return `${cookieName}=${issued.token}`;
+}
+
+export { cookieFor };

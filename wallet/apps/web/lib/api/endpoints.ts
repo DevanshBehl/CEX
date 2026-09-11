@@ -18,6 +18,16 @@ import {
   type RegistrationResponse,
   type TotpEnrollResponse,
   type TotpVerifyResponse,
+  depositAddressResponseSchema,
+  depositResponseSchema,
+  listAddressesResponseSchema,
+  listBalancesResponseSchema,
+  listDepositsResponseSchema,
+  type DepositAddressResponse,
+  type DepositResponse,
+  type ListAddressesResponse,
+  type ListBalancesResponse,
+  type ListDepositsResponse,
 } from '@wallet/types';
 import { request } from './client';
 
@@ -125,4 +135,29 @@ export const api = {
 
   updateMe: (body: { displayName?: string; email?: string }): Promise<MeResponse> =>
     request({ method: 'PATCH', path: '/me', body, schema: meResponseSchema }),
+
+  // --- custody (Phase 2) ---
+  getDepositAddress: (): Promise<DepositAddressResponse> =>
+    request({
+      method: 'POST',
+      path: '/wallets/addresses',
+      body: {},
+      schema: depositAddressResponseSchema,
+    }),
+
+  listAddresses: (walletId: string): Promise<ListAddressesResponse> =>
+    request({
+      method: 'GET',
+      path: `/wallets/${walletId}/addresses`,
+      schema: listAddressesResponseSchema,
+    }),
+
+  listBalances: (): Promise<ListBalancesResponse> =>
+    request({ method: 'GET', path: '/balances', schema: listBalancesResponseSchema }),
+
+  listDeposits: (): Promise<ListDepositsResponse> =>
+    request({ method: 'GET', path: '/deposits', schema: listDepositsResponseSchema }),
+
+  getDeposit: (id: string): Promise<DepositResponse> =>
+    request({ method: 'GET', path: `/deposits/${id}`, schema: depositResponseSchema }),
 };

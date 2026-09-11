@@ -11,6 +11,32 @@ import tseslint from 'typescript-eslint';
  * has watched fail is indistinguishable from one that is misconfigured.
  */
 
+/**
+ * Packages that do not exist yet. Importing one is a phase-ordering mistake,
+ * and the error should say so rather than "cannot find module".
+ *
+ * Remove an entry when its phase arrives — @wallet/ledger, @wallet/blockchain
+ * and @wallet/solana came off this list when Phase 2 started.
+ */
+const FUTURE_PACKAGES = ['@wallet/risk'];
+
+/**
+ * The domain packages that must stay free of chain, persistence, and framework
+ * dependencies.
+ *
+ * `packages/ledger` is here because master-prompt rule 25 (dependency
+ * inversion) and rule 196 (a second chain reuses the same ledger, risk and
+ * custody abstractions) both depend on the accounting domain never learning
+ * what a lamport is. `packages/risk` joins it in Phase 3.
+ */
+const CHAIN_FREE_PACKAGES = ['packages/ledger/**/*.ts', 'packages/risk/**/*.ts'];
+
+/**
+ * The only package allowed to import a Solana SDK (prompt_phase2.md rule 101).
+ * Everything else depends on the @wallet/blockchain interfaces.
+ */
+const CHAIN_ADAPTER_PACKAGES = ['packages/solana/**/*.ts'];
+
 /** Applies everywhere outside @wallet/db. */
 const SHARED_IMPORT_PATTERNS = [
   {
@@ -19,14 +45,18 @@ const SHARED_IMPORT_PATTERNS = [
       'Deep imports are banned. Import from the package barrel only (prompt_phase1.md rules 26-27).',
   },
   {
-    group: ['@wallet/ledger', '@wallet/risk', '@wallet/blockchain', '@wallet/solana'],
-    message: 'Phase 2+ package. Phase 1 must not depend on it (prompt_phase1.md rules 19-20).',
-  },
-  {
-    group: ['@solana/*'],
-    message: 'No chain dependencies in Phase 1 (prompt_phase1.md rule 21).',
+    group: FUTURE_PACKAGES,
+    message:
+      'That package belongs to a later phase and does not exist yet (prompt_phase2.md rule 30).',
   },
 ];
+
+/** Chain SDKs, banned everywhere except the adapter package. */
+const CHAIN_SDK_PATTERN = {
+  group: ['@solana/*', '@solana-program/*'],
+  message:
+    'Only packages/solana may import a chain SDK. Depend on the @wallet/blockchain interfaces instead (prompt_phase2.md rules 98-101).',
+};
 
 /** Additionally applies to packages/, which must stay framework-free. */
 const PACKAGE_ONLY_IMPORT_PATTERNS = [
@@ -41,6 +71,13 @@ const PACKAGE_ONLY_IMPORT_PATTERNS = [
       'Framework imports do not belong in a domain package. Keep HTTP concerns out of domain logic (master-prompt rule 82).',
   },
 ];
+
+/** The accounting and risk domains additionally reject persistence. */
+const DOMAIN_PURITY_PATTERN = {
+  group: ['@wallet/db', '@wallet/solana', 'ioredis', '@prisma/*'],
+  message:
+    'The accounting and risk domains must not depend on a chain, a database, or a cache. They take data as arguments and return decisions (prompt_phase2.md rules 56-58).',
+};
 
 export default tseslint.config(
   {
@@ -132,20 +169,16 @@ export default tseslint.config(
   // ---------------------------------------------------------------------------
   // Import boundaries.
   //
-  // IMPORTANT: all of these live in ONE `no-restricted-imports` entry per file
-  // scope. ESLint flat config REPLACES a rule's options when a later block
-  // configures the same rule — it does not merge them. Splitting these across
-  // two blocks silently disabled the first set for every file the second block
-  // matched, and `scripts/verify-boundaries.mjs` is what caught it.
-  //
-  //   Rule 89     only @wallet/db may touch Prisma
-  //   Rules 26-27 no deep imports across a package boundary
-  //   Rules 19-21 no Phase 2+ packages, no chain dependencies
-  //   Rule 143    a package never imports an app, or a framework
+  // IMPORTANT: each file scope gets ONE `no-restricted-imports` entry. ESLint
+  // flat config REPLACES a rule's options when a later block configures the
+  // same rule for the same file — it does not merge them. Splitting these
+  // across blocks silently disabled the first set, and
+  // `scripts/verify-boundaries.mjs` is what caught it.
   // ---------------------------------------------------------------------------
+
+  // Apps: no chain SDK, no Prisma, no future packages.
   {
-    files: ['apps/**/*.ts', 'apps/**/*.tsx', 'packages/**/*.ts'],
-    ignores: ['packages/db/**'],
+    files: ['apps/**/*.ts', 'apps/**/*.tsx'],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -157,15 +190,16 @@ export default tseslint.config(
                 'Only @wallet/db may import @prisma/client. Use a repository from @wallet/db (prompt_phase1.md rule 89).',
             },
           ],
-          patterns: [...SHARED_IMPORT_PATTERNS],
+          patterns: [...SHARED_IMPORT_PATTERNS, CHAIN_SDK_PATTERN],
         },
       ],
     },
   },
 
+  // Packages generally: also no frameworks and no reaching back into an app.
   {
     files: ['packages/**/*.ts'],
-    ignores: ['packages/db/**'],
+    ignores: ['packages/db/**', ...CHAIN_FREE_PACKAGES, ...CHAIN_ADAPTER_PACKAGES],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -176,7 +210,38 @@ export default tseslint.config(
               message: 'Only @wallet/db may import @prisma/client (prompt_phase1.md rule 89).',
             },
           ],
+          patterns: [...SHARED_IMPORT_PATTERNS, ...PACKAGE_ONLY_IMPORT_PATTERNS, CHAIN_SDK_PATTERN],
+        },
+      ],
+    },
+  },
+
+  // The chain adapter: may use the SDK, still may not use a framework or an app.
+  {
+    files: CHAIN_ADAPTER_PACKAGES,
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
           patterns: [...SHARED_IMPORT_PATTERNS, ...PACKAGE_ONLY_IMPORT_PATTERNS],
+        },
+      ],
+    },
+  },
+
+  // The accounting and risk domains: the strictest scope in the repo.
+  {
+    files: CHAIN_FREE_PACKAGES,
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            ...SHARED_IMPORT_PATTERNS,
+            ...PACKAGE_ONLY_IMPORT_PATTERNS,
+            CHAIN_SDK_PATTERN,
+            DOMAIN_PURITY_PATTERN,
+          ],
         },
       ],
     },

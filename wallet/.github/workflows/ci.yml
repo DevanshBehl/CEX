@@ -35,6 +35,15 @@ env:
   SESSION_COOKIE_NAME: wallet_session
   SESSION_SECRET: ci-only-session-secret-at-least-32-chars-long
   TOTP_ENCRYPTION_KEY: Y2ktb25seS10b3RwLWtleS0zMi1ieXRlcy0hIQ==
+  # Phase 2. Deposit-address derivation only — Phase 2 never signs.
+  DEPOSIT_SEED: Y2ktb25seS1kZXBvc2l0LXNlZWQtZm9yLXRlc3RzLW5vdC1yZWFsLW1vbmV5LTEyMzQ1Njc4OQ==
+  SOLANA_RPC_URL: http://127.0.0.1:8899
+  SOLANA_NETWORK: localnet
+  SOLANA_COMMITMENT: finalized
+  SUPPORTED_ASSETS: SOL
+  # Tests drive the indexer by hand; a background timer would make
+  # "what happened after N cycles" unanswerable.
+  INDEXER_ENABLED: 'false'
 
 jobs:
   static:
@@ -126,6 +135,68 @@ jobs:
           --exit-code
 
       - run: pnpm test:integration
+
+  localnet:
+    name: Against a real Solana validator
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: wallet
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d wallet"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6380:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Create database roles
+        run: |
+          PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d wallet \
+            -f infra/postgres-init/01-roles.sql
+          PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d wallet \
+            -c "ALTER ROLE wallet_owner CREATEDB;"
+      - run: pnpm --filter @wallet/db generate
+      - run: pnpm build
+      - run: pnpm --filter @wallet/db exec prisma migrate deploy
+
+      - name: Install the Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Start a validator
+        run: |
+          solana-test-validator --reset --quiet --ledger /tmp/test-ledger &
+          # The localnet suites skip when no validator answers, so without this
+          # wait the job would pass by skipping everything it exists to run.
+          for i in $(seq 1 60); do
+            if curl -s -X POST -H 'Content-Type: application/json' \
+                 -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
+                 http://127.0.0.1:8899 | grep -q ok; then
+              echo "validator healthy"; exit 0
+            fi
+            sleep 2
+          done
+          echo "validator never became healthy"; exit 1
+
+      - run: pnpm --filter @wallet/solana test:integration
+      - run: pnpm --filter @wallet/api test:integration
 
   e2e:
     name: End-to-end journeys

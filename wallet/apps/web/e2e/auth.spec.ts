@@ -116,13 +116,16 @@ test.describe('security properties visible from the browser', () => {
     }
   });
 
-  test('empty states are honest — no fabricated balances (rules 156-157)', async ({ page }) => {
+  test('a new account shows nothing it does not have (rules 156-157)', async ({ page }) => {
+    // Phase 1 asserted "no balances yet", because there was no ledger. Phase 2
+    // shows real balances, so the wording changed — but the property under
+    // test did not: a new account must never display a number it does not own.
     await addVirtualAuthenticator(page);
     await page.goto('/register');
     await page.getByRole('button', { name: /create account with a passkey/i }).click();
     await expect(page).toHaveURL(/\/dashboard/);
 
-    await expect(page.getByText(/no balances yet/i)).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
 
     // innerText of <main>, not textContent of <body>: textContent includes the
     // contents of <script> tags, and Next.js inlines its RSC payload there —

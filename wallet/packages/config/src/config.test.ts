@@ -11,6 +11,9 @@ const valid = {
   WEBAUTHN_ORIGIN: 'http://localhost:3000',
   SESSION_SECRET: 'x'.repeat(32),
   TOTP_ENCRYPTION_KEY: 'y'.repeat(44),
+  // Phase 2 (ADR-0004, ADR-0008).
+  SOLANA_RPC_URL: 'http://127.0.0.1:8899',
+  DEPOSIT_SEED: 'z'.repeat(44),
 } as const;
 
 describe('parseEnv', () => {
@@ -39,6 +42,8 @@ describe('parseEnv', () => {
       'WEBAUTHN_ORIGIN',
       'SESSION_SECRET',
       'TOTP_ENCRYPTION_KEY',
+      'SOLANA_RPC_URL',
+      'DEPOSIT_SEED',
     ]) {
       expect(named).toContain(required);
     }
@@ -86,6 +91,30 @@ describe('parseEnv', () => {
   it('requires https origins in production', () => {
     expect(() => parseEnv({ ...valid, NODE_ENV: 'production' })).toThrow(ConfigValidationError);
   });
+
+  it('refuses a sub-final commitment in production (ADR-0006)', () => {
+    // Crediting below finality is a double-credit vector. A test environment
+    // may loosen it; production may not.
+    const productionish = {
+      ...valid,
+      NODE_ENV: 'production',
+      WEB_ORIGIN: 'https://app.example.com',
+      WEBAUTHN_ORIGIN: 'https://app.example.com',
+      WEBAUTHN_RP_ID: 'example.com',
+    };
+    expect(() => parseEnv({ ...productionish, SOLANA_COMMITMENT: 'finalized' })).not.toThrow();
+    expect(() => parseEnv({ ...productionish, SOLANA_COMMITMENT: 'confirmed' })).toThrow(
+      ConfigValidationError,
+    );
+  });
+
+  it('parses the asset allowlist (ADR-0008)', () => {
+    expect(parseEnv(valid).SUPPORTED_ASSETS).toEqual(['SOL']);
+    expect(parseEnv({ ...valid, SUPPORTED_ASSETS: 'SOL, USDC' }).SUPPORTED_ASSETS).toEqual([
+      'SOL',
+      'USDC',
+    ]);
+  });
 });
 
 describe('publicConfig', () => {
@@ -97,6 +126,9 @@ describe('publicConfig', () => {
       env.TOTP_ENCRYPTION_KEY,
       env.DATABASE_URL,
       env.REDIS_URL,
+      // The deposit seed can regenerate every deposit key (ADR-0005) and must
+      // never reach the browser bundle.
+      env.DEPOSIT_SEED,
     ]) {
       expect(serialized).not.toContain(secret);
     }

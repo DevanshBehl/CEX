@@ -50,6 +50,48 @@ export const envSchema = z
 
     RATE_LIMIT_AUTH_PER_IP_PER_MINUTE: z.coerce.number().int().positive().default(20),
     RATE_LIMIT_AUTH_PER_ACCOUNT_PER_MINUTE: z.coerce.number().int().positive().default(10),
+
+    // --- Phase 2: chain and custody -----------------------------------------
+    SOLANA_RPC_URL: z.string().url(),
+    SOLANA_NETWORK: z.enum(['localnet', 'devnet', 'testnet', 'mainnet-beta']).default('localnet'),
+    /**
+     * ADR-0006. `finalized` is the only value that may be used to credit —
+     * anything below it can be rolled back on a fork. Configurable so a test
+     * harness can run against a local validator, and validated in superRefine
+     * so a production deployment cannot weaken it.
+     */
+    SOLANA_COMMITMENT: z.enum(['processed', 'confirmed', 'finalized']).default('finalized'),
+    SOLANA_RPC_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
+    SOLANA_RPC_MAX_RETRIES: z.coerce.number().int().min(0).max(10).default(3),
+
+    /**
+     * Master seed for deposit-address derivation (ADR-0004), base64, >=32 bytes.
+     *
+     * Phase 2 derives ADDRESSES only and never signs, so no private key is
+     * persisted anywhere. This value is nonetheless the most sensitive one in
+     * the system — it can regenerate every deposit key — and Phase 4 moves it
+     * behind the MPC boundary (ADR-0005).
+     */
+    DEPOSIT_SEED: z.string().min(44),
+
+    /** ADR-0008: the asset allowlist. SOL only in Phase 2. */
+    SUPPORTED_ASSETS: z
+      .string()
+      .default('SOL')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((asset) => asset.trim())
+          .filter(Boolean),
+      ),
+
+    INDEXER_ENABLED: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((value) => value === 'true'),
+    INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().min(500).default(5_000),
+    INDEXER_PAGE_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
+    INDEXER_MAX_ADDRESSES_PER_CYCLE: z.coerce.number().int().positive().default(200),
   })
   // -------------------------------------------------------------------------
   // Cross-field invariants. These catch the misconfigurations that otherwise
@@ -82,6 +124,25 @@ export const envSchema = z
           message: `must equal the WEBAUTHN_ORIGIN host or be a registrable suffix of it (host is "${originHost}")`,
         });
       }
+    }
+
+    // ADR-0006: crediting below finality is a double-credit vector. A
+    // non-production environment may loosen it to test against a validator
+    // that does not finalize quickly; production may not.
+    if (env.NODE_ENV === 'production' && env.SOLANA_COMMITMENT !== 'finalized') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SOLANA_COMMITMENT'],
+        message: 'must be "finalized" in production (ADR-0006)',
+      });
+    }
+
+    if (env.SUPPORTED_ASSETS.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SUPPORTED_ASSETS'],
+        message: 'must list at least one asset',
+      });
     }
 
     if (env.NODE_ENV === 'production') {

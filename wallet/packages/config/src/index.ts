@@ -46,6 +46,21 @@ export interface ApiConfig {
     readonly authPerIpPerMinute: number;
     readonly authPerAccountPerMinute: number;
   };
+  readonly chain: {
+    readonly rpcUrl: string;
+    readonly network: Env['SOLANA_NETWORK'];
+    readonly commitment: Env['SOLANA_COMMITMENT'];
+    readonly rpcTimeoutMs: number;
+    readonly rpcMaxRetries: number;
+    readonly depositSeed: string;
+    readonly supportedAssets: readonly string[];
+  };
+  readonly indexer: {
+    readonly enabled: boolean;
+    readonly pollIntervalMs: number;
+    readonly pageSize: number;
+    readonly maxAddressesPerCycle: number;
+  };
 }
 
 /**
@@ -115,6 +130,21 @@ export function toApiConfig(env: Env): ApiConfig {
     rateLimit: Object.freeze({
       authPerIpPerMinute: env.RATE_LIMIT_AUTH_PER_IP_PER_MINUTE,
       authPerAccountPerMinute: env.RATE_LIMIT_AUTH_PER_ACCOUNT_PER_MINUTE,
+    }),
+    chain: Object.freeze({
+      rpcUrl: env.SOLANA_RPC_URL,
+      network: env.SOLANA_NETWORK,
+      commitment: env.SOLANA_COMMITMENT,
+      rpcTimeoutMs: env.SOLANA_RPC_TIMEOUT_MS,
+      rpcMaxRetries: env.SOLANA_RPC_MAX_RETRIES,
+      depositSeed: env.DEPOSIT_SEED,
+      supportedAssets: Object.freeze([...env.SUPPORTED_ASSETS]),
+    }),
+    indexer: Object.freeze({
+      enabled: env.INDEXER_ENABLED,
+      pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
+      pageSize: env.INDEXER_PAGE_SIZE,
+      maxAddressesPerCycle: env.INDEXER_MAX_ADDRESSES_PER_CYCLE,
     }),
   });
 }

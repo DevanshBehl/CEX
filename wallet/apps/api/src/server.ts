@@ -6,6 +6,7 @@ import {
 } from 'fastify-type-provider-zod';
 import { Redis } from 'ioredis';
 import type { ApiConfig } from '@wallet/config';
+import type { ChainAdapter } from '@wallet/blockchain';
 import {
   createRedisChallengeStore,
   createEncryptor,
@@ -23,12 +24,26 @@ import {
   type PrismaClient,
 } from '@wallet/db';
 import { createLogger, type Logger } from '@wallet/logger';
+import {
+  createSolanaAdapter,
+  createSolanaAddressDeriver,
+  createSolanaAddressValidator,
+  NATIVE_ASSET,
+  NATIVE_DECIMALS,
+  SOLANA_CHAIN_ID,
+} from '@wallet/solana';
 
 import { requestContextPlugin } from './plugins/request-context.js';
 import { securityPlugin } from './plugins/security.js';
 import { registerErrorHandler } from './errors/handler.js';
 import { createCsrfGuard, createSessionGuard, createStepUpGuard } from './middleware/guards.js';
 import { createAuthControllers } from './controllers/auth.controller.js';
+import { createCustodyControllers } from './controllers/custody.controller.js';
+import { createCustodyService } from './services/custody.service.js';
+import { createDepositPipeline } from './services/deposit.service.js';
+import { createReconciliationService } from './services/reconciliation.service.js';
+import { createIndexer, type Indexer } from './workers/indexer.js';
+import { createCustodyRoutes } from './routes/custody.routes.js';
 import { createAccountService } from './services/account.service.js';
 import { createHealthService } from './services/health.service.js';
 import { createLoginService } from './services/login.service.js';
@@ -44,6 +59,8 @@ declare module 'fastify' {
   interface FastifyInstance {
     log2: Logger;
     appDeps: AppDeps;
+    indexer: Indexer | null;
+    reconcile: () => Promise<unknown>;
     shutdown: () => Promise<void>;
   }
 }
@@ -54,6 +71,14 @@ export interface BuildServerOptions {
   readonly logger?: Logger;
   readonly db?: PrismaClient;
   readonly redis?: Redis;
+  /**
+   * Injected by tests so the deposit pipeline can be driven without a
+   * validator (prompt_phase2.md rule 147 needs deterministic restart points).
+   * Production builds a real Solana adapter.
+   */
+  readonly chainAdapter?: ChainAdapter;
+  /** Tests drive the indexer by hand rather than on a timer. */
+  readonly startIndexer?: boolean;
 }
 
 /**
@@ -124,6 +149,44 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   const totp = createTotpEnrollmentService(appDeps);
   const health = createHealthService(db, redis);
 
+  // --- Chain and custody (Phase 2) -----------------------------------------
+  const chainAdapter =
+    options.chainAdapter ??
+    createSolanaAdapter({
+      endpoint: config.chain.rpcUrl,
+      commitment: config.chain.commitment,
+      requestTimeoutMs: config.chain.rpcTimeoutMs,
+      maxRetries: config.chain.rpcMaxRetries,
+      pageSize: config.indexer.pageSize,
+    });
+
+  const custodyService = createCustodyService({
+    db,
+    // Phase 2 derives addresses only; no private key is stored (ADR-0005).
+    deriver: createSolanaAddressDeriver(Buffer.from(config.chain.depositSeed, 'base64')),
+    validator: createSolanaAddressValidator(),
+    chain: SOLANA_CHAIN_ID,
+    assets: config.chain.supportedAssets,
+    logger,
+  });
+
+  const depositPipeline = createDepositPipeline({ db, logger });
+  const reconciliation = createReconciliationService({
+    db,
+    reader: chainAdapter,
+    chain: SOLANA_CHAIN_ID,
+    logger,
+  });
+
+  const custodyControllers = createCustodyControllers({
+    db,
+    custody: custodyService,
+    chain: SOLANA_CHAIN_ID,
+    network: config.chain.network,
+    nativeAsset: NATIVE_ASSET,
+    decimals: { [NATIVE_ASSET]: NATIVE_DECIMALS },
+  });
+
   const controllers = createAuthControllers({
     app: appDeps,
     registration,
@@ -192,8 +255,39 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await app.register(
     createMeRoutes({ account, sessionGuard: sessionGuard as never, csrfGuard: csrfGuard as never }),
   );
+  await app.register(
+    createCustodyRoutes({
+      controllers: custodyControllers,
+      sessionGuard: sessionGuard as never,
+      csrfGuard: csrfGuard as never,
+    }),
+  );
+
+  // --- Workers --------------------------------------------------------------
+  const indexer = createIndexer({
+    db,
+    adapter: chainAdapter,
+    pipeline: depositPipeline,
+    logger,
+    options: {
+      chain: SOLANA_CHAIN_ID,
+      pollIntervalMs: config.indexer.pollIntervalMs,
+      pageSize: config.indexer.pageSize,
+      maxAddressesPerCycle: config.indexer.maxAddressesPerCycle,
+    },
+  });
+
+  app.decorate('indexer', indexer);
+  app.decorate('reconcile', () => reconciliation.run());
+
+  // Tests drive `runOnce()` by hand; production runs it on a timer.
+  const shouldStart = options.startIndexer ?? config.indexer.enabled;
+  if (shouldStart) indexer.start();
 
   app.decorate('shutdown', async () => {
+    // The indexer stops first so no cycle is mid-transaction when the
+    // connection closes.
+    await indexer.stop();
     await db.$disconnect();
     redis.disconnect();
   });

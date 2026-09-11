@@ -37,7 +37,11 @@
         "ARGON2_*",
         "RATE_LIMIT_*",
         "API_PORT",
-        "API_HOST"
+        "API_HOST",
+        "SOLANA_*",
+        "DEPOSIT_SEED",
+        "SUPPORTED_ASSETS",
+        "INDEXER_*"
       ]
     },
     "dev": {

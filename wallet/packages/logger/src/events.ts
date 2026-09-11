@@ -32,6 +32,19 @@ export const SECURITY_EVENTS = [
   'totp.disabled',
   'totp.verification_failed',
   'ratelimit.exceeded',
+
+  // --- Phase 2: custody and deposits ---
+  // Identifiers and outcomes only. Amounts, addresses, and transaction
+  // signatures are NOT loggable (prompt_phase2.md rules 41, 223) — adding one
+  // means editing the allowlist in ./allowlist.ts on purpose.
+  'address.assigned',
+  'deposit.detected',
+  'deposit.credited',
+  'deposit.ignored',
+  'indexer.poll_failed',
+  'indexer.cursor_advanced',
+  'reconciliation.completed',
+  'reconciliation.drift_detected',
 ] as const;
 
 export type SecurityEvent = (typeof SECURITY_EVENTS)[number];
@@ -40,6 +53,8 @@ export type Outcome = 'success' | 'failure';
 
 export interface SecurityEventFields {
   readonly outcome: Outcome;
+  /** A count of things acted on. Never an amount of money. */
+  readonly count?: number;
   readonly userId?: string;
   readonly sessionId?: string;
   readonly credentialId?: string;

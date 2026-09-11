@@ -60,8 +60,15 @@ export interface RequestOptions<TResponse> {
   readonly method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   readonly path: string;
   readonly body?: unknown;
-  /** Every response is parsed, never cast (rule 162). */
-  readonly schema: z.ZodType<TResponse>;
+  /**
+   * Every response is parsed, never cast (rule 162).
+   *
+   * The input type is `unknown` because branded schemas transform on parse:
+   * `baseUnitsSchema` accepts a plain string and produces a branded one, so a
+   * schema's input and output types differ and the default `z.ZodType<T>`
+   * (which assumes they match) would not accept it.
+   */
+  readonly schema: z.ZodType<TResponse, z.ZodTypeDef, unknown>;
 }
 
 export async function request<TResponse>(options: RequestOptions<TResponse>): Promise<TResponse> {

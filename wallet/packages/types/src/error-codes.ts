@@ -30,9 +30,13 @@ export const ERROR_CODES = [
   'DEPENDENCY_UNAVAILABLE',
   'INTERNAL_ERROR',
 
-  // Reserved for later phases (prompt_phase1.md rules 81-82).
-  // Declared now so the union is stable and clients can be written against it;
-  // no Phase 1 code path emits these.
+  // Custody and ledger (Phase 2).
+  'ASSET_NOT_SUPPORTED',
+  'ADDRESS_INVALID',
+
+  // Reserved for later phases.
+  // INSUFFICIENT_FUNDS gains its meaning in Phase 2's ledger and its first
+  // caller in Phase 3's withdrawal path; the other two are still unemitted.
   'INSUFFICIENT_FUNDS',
   'POLICY_DENIED',
   'CHAIN_ERROR',

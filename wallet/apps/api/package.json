@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "lint": "eslint src",
     "test": "vitest run",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "reconcile": "tsx src/scripts/reconcile.ts"
   },
   "dependencies": {
     "@fastify/cookie": "11.0.2",
@@ -19,10 +20,13 @@
     "@fastify/helmet": "13.0.1",
     "@fastify/rate-limit": "10.2.2",
     "@wallet/auth": "workspace:*",
+    "@wallet/blockchain": "workspace:*",
     "@wallet/config": "workspace:*",
     "@wallet/db": "workspace:*",
     "@wallet/errors": "workspace:*",
+    "@wallet/ledger": "workspace:*",
     "@wallet/logger": "workspace:*",
+    "@wallet/solana": "workspace:*",
     "@wallet/types": "workspace:*",
     "fastify": "5.2.1",
     "fastify-plugin": "5.0.1",

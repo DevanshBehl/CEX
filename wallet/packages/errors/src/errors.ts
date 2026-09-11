@@ -149,6 +149,26 @@ export class InternalError extends AppError {
   }
 }
 
+/** Phase 2 — the asset allowlist rejected this (ADR-0008). */
+export class AssetNotSupportedError extends AppError {
+  readonly code: ErrorCode = 'ASSET_NOT_SUPPORTED';
+  readonly httpStatus = 400;
+  constructor(asset: string) {
+    super(`That asset is not supported: ${asset}`);
+  }
+}
+
+/** Phase 2 — address failed validation (prompt_phase2.md rules 108-110). */
+export class AddressInvalidError extends AppError {
+  readonly code: ErrorCode = 'ADDRESS_INVALID';
+  readonly httpStatus = 400;
+  readonly reason: string;
+  constructor(reason: string) {
+    super('That address is not valid for this network');
+    this.reason = reason;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Reserved for later phases (prompt_phase1.md rules 81-82).
 //

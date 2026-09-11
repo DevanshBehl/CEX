@@ -27,3 +27,32 @@ export {
   sanitizeMetadata,
   type AuditLogRepository,
 } from './repositories/audit-log.repository.js';
+
+// --- Phase 2 ---------------------------------------------------------------
+export {
+  createLedgerRepository,
+  type AccountRefInput,
+  type AssetTotalsRow,
+  type EntryDirection,
+  type EntryInput,
+  type LedgerAccountType,
+  type LedgerRepository,
+  type LedgerTransactionKind,
+  type PostTransactionInput,
+  type UserBalanceRow,
+} from './repositories/ledger.repository.js';
+export {
+  createCustodyRepository,
+  type AddressRecord,
+  type CustodyRepository,
+  type WalletRecord,
+  type WatchedAddress,
+} from './repositories/custody.repository.js';
+export {
+  createDepositRepository,
+  type DepositRecord,
+  type DepositRepository,
+  type RecordDepositInput,
+  type RecordDepositResult,
+} from './repositories/deposit.repository.js';
+export { createCursorRepository, type CursorRepository } from './repositories/cursor.repository.js';
