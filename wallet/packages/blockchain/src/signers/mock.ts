@@ -56,7 +56,15 @@ export interface MockSignerOptions {
 
 export interface MockSigner extends Signer {
   readonly kind: 'mock';
-  injectFault(requestId: string, fault: MockFault): void;
+  /**
+   * Queue a fault for a request.
+   *
+   * Matches by PREFIX, because a caller's request id is structured and a test
+   * usually cannot know all of it in advance. The withdrawal worker keys on
+   * `withdrawal:{id}:{nonce}`, and the nonce is leased inside the operation
+   * being tested — so a test can only name `withdrawal:{id}`.
+   */
+  injectFault(requestIdPrefix: string, fault: MockFault): void;
   clearFaults(): void;
   /** How many distinct signing rounds ran. Proves idempotency held. */
   roundCount(): number;
@@ -134,8 +142,19 @@ export function createMockSigner(options: MockSignerOptions = {}): MockSigner {
       calls += 1;
       announce(request.requestId);
 
-      const fault = faults.get(request.requestId);
-      if (fault !== undefined) faults.delete(request.requestId);
+      // Longest prefix wins, so a fault aimed at one exact request beats a
+      // broader one aimed at the withdrawal.
+      let faultKey: string | undefined;
+      for (const key of faults.keys()) {
+        if (
+          request.requestId.startsWith(key) &&
+          (faultKey === undefined || key.length > faultKey.length)
+        ) {
+          faultKey = key;
+        }
+      }
+      const fault = faultKey === undefined ? undefined : faults.get(faultKey);
+      if (faultKey !== undefined) faults.delete(faultKey);
 
       if (fault === 'fail') {
         throw new Error(`mock signer: injected failure for ${request.requestId}`);

@@ -23,7 +23,10 @@
     "infra:down": "docker compose -f infra/docker-compose.yml down",
     "infra:nuke": "docker compose -f infra/docker-compose.yml down -v",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test:rust": "cd services/mpc && cargo test",
+    "build:rust": "cd services/mpc && cargo build --release",
+    "mpc": "cd services/mpc && cargo run --release"
   },
   "devDependencies": {
     "@eslint/js": "9.17.0",

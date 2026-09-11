@@ -141,9 +141,31 @@ export const envSchema = z
      * below refuses it in production, and MockSigner itself refuses to
      * construct there — two independent guards, because this one matters.
      */
-    // `real` has no implementation until Phase 4; it exists now so a
-    // production configuration is expressible and the guard below is testable.
+    /**
+     * `mock` produces signatures that verify against nothing, and is refused in
+     * production by the guard below AND by MockSigner itself (ADR-0013).
+     * `real` speaks to `services/mpc`.
+     */
     SIGNER_KIND: z.enum(['mock', 'real']).default('mock'),
+    MPC_ENDPOINT: z.string().url().default('http://127.0.0.1:7070'),
+    /**
+     * The caller's Ed25519 private key, PEM, base64-encoded.
+     *
+     * The MPC service holds only the public half, so compromising the service
+     * does not yield the ability to impersonate this caller.
+     */
+    MPC_CLIENT_PRIVATE_KEY: z.string().default(''),
+    MPC_CALLER_NAME: z.string().default('wallet-api'),
+    /**
+     * The approval authority's Ed25519 private key (PEM, base64).
+     *
+     * Separate from MPC_CLIENT_PRIVATE_KEY on purpose: the caller key proves
+     * who is asking, this one proves the request was approved. Compromising the
+     * first lets an attacker ask; this is what stops asking from being enough
+     * (ADR-0015).
+     */
+    MPC_APPROVAL_PRIVATE_KEY: z.string().default(''),
+    MPC_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
     SIGNER_KEY_REF: z.string().min(1).default('treasury-hot-1'),
     /**
      * The address withdrawals are paid from, and the nonce authority.
@@ -234,6 +256,17 @@ export const envSchema = z
     // The mock signer produces signatures that verify against nothing. This is
     // the outer of two guards; MockSigner also refuses to construct in
     // production (prompt_phase3.md rules 125, 227).
+    // A `real` signer with no client key cannot authenticate, so the service
+    // would refuse every request — better to fail at boot than at first
+    // withdrawal.
+    if (env.SIGNER_KIND === 'real' && env.MPC_CLIENT_PRIVATE_KEY.trim() === '') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['MPC_CLIENT_PRIVATE_KEY'],
+        message: 'is required when SIGNER_KIND is "real"',
+      });
+    }
+
     if (env.NODE_ENV === 'production' && env.SIGNER_KIND === 'mock') {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

@@ -16,6 +16,11 @@ export interface Harness {
   createdUserIds: string[];
 }
 
+/** True when the suite should use the signer `SIGNER_KIND` names. */
+export function usesConfiguredSigner(): boolean {
+  return process.env.USE_CONFIGURED_SIGNER === 'true';
+}
+
 export interface HarnessOptions {
   chainAdapter?: ChainAdapter;
   signer?: Signer;
@@ -44,7 +49,18 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     db,
     redis,
     ...(options.chainAdapter !== undefined ? { chainAdapter: options.chainAdapter } : {}),
-    ...(options.signer !== undefined ? { signer: options.signer } : {}),
+    /**
+     * The suite normally injects a MockSigner, because most of what it tests —
+     * the retry, timeout and expiry paths — needs a signer that can be made to
+     * fail on demand.
+     *
+     * `USE_CONFIGURED_SIGNER=true` suppresses that injection so the server
+     * builds whatever `SIGNER_KIND` names. That is what makes
+     * prompt_phase4.md rule 67 checkable rather than assumed: the first run
+     * against the real signer passed 111 tests without a single request
+     * reaching the service, because every one of them had injected the mock.
+     */
+    ...(options.signer !== undefined && !usesConfiguredSigner() ? { signer: options.signer } : {}),
     ...(options.nonceManager !== undefined ? { nonceManager: options.nonceManager } : {}),
     ...(options.broadcaster !== undefined ? { broadcaster: options.broadcaster } : {}),
     // Tests drive the withdrawal workers by hand, so "what happened after N

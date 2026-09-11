@@ -1,0 +1,61 @@
+[package]
+name = "wallet-mpc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+publish = false
+description = "Signing boundary for the wallet. Holds key material; nothing else does."
+
+[lib]
+name = "wallet_mpc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wallet-mpc"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tower-http = { version = "0.5", features = ["trace"] }
+
+# Cryptography. Vetted implementations only — master-prompt rule 106 forbids
+# writing curve arithmetic, and that includes "just this one helper".
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+aes-gcm = "0.10"
+rand = "0.8"
+sha2 = "0.10"
+subtle = "2.6"
+
+# TLS. rustls rather than OpenSSL: no system dependency, and a memory-safe
+# implementation for the one process that holds key material.
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Serialisation and encoding
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+hex = "0.4"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Errors and time
+thiserror = "1"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
+
+[profile.release]
+# A signing service should abort rather than unwind: a panic mid-round is a
+# state we have not reasoned about, and continuing is worse than stopping.
+panic = "abort"

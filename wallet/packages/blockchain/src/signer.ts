@@ -36,6 +36,15 @@ export interface AuthorizationProof {
   readonly approvedAt: string;
   readonly policyVersion: string;
   readonly reference: string;
+  /**
+   * base64 Ed25519 signature by the approval authority, over the proof bound
+   * to the payload hash (see `signAuthorization`).
+   *
+   * Optional in the type so a development deployment without an approval key
+   * still type-checks; the signing service REQUIRES it whenever one is
+   * configured, and warns on every request when one is not.
+   */
+  readonly signature?: string;
 }
 
 export interface SignRequest {

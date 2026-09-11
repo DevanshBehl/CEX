@@ -13,6 +13,11 @@ import { defineConfig } from 'vitest/config';
 // a `??=`. Rate-limit state also lives in Redis and persists between runs, so a
 // realistic limit makes the suite fail depending on what ran before it.
 process.env.RATE_LIMIT_WITHDRAWAL_PER_MINUTE = '1000000';
+// The global ceiling too: rate-limit state lives in Redis and persists between
+// runs, so two suite runs back to back exhaust a realistic limit and the
+// failures point at the endpoints rather than at the limit.
+process.env.RATE_LIMIT_GLOBAL_PER_MINUTE = '1000000';
+process.env.RATE_LIMIT_AUTH_PER_IP_PER_MINUTE = '1000000';
 process.env.WITHDRAWAL_WORKER_BATCH_SIZE = '100';
 
 export default defineConfig({

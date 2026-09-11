@@ -15,3 +15,8 @@ coverage/
 *.log
 playwright-report/
 test-results/
+
+# Rust
+services/mpc/target/
+services/mpc/*.sqlite
+services/mpc/*.sqlite-*

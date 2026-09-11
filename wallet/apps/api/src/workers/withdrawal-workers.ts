@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import type { Signer } from '@wallet/blockchain';
+import { randomUUID, type KeyObject } from 'node:crypto';
+import { signAuthorization, type Signer } from '@wallet/blockchain';
 import {
   createLedgerRepository,
   createNonceAccountRepository,
@@ -33,6 +33,13 @@ export interface WithdrawalWorkerDeps {
   readonly keyRefId: string;
   readonly budgets: RetryBudgets;
   readonly batchSize: number;
+  /**
+   * The approval authority's key, used to sign the proof the signer verifies.
+   *
+   * Absent in development: the signing service then warns on every request that
+   * it is signing without a verified authorization (ADR-0015).
+   */
+  readonly approvalKey?: KeyObject | undefined;
 }
 
 export interface WithdrawalWorkers {
@@ -143,19 +150,44 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
       });
 
       /**
-       * The withdrawal id IS the signing idempotency key.
+       * The idempotency key is (withdrawal, nonce), not the withdrawal alone.
        *
-       * The same withdrawal must never start a second signing round: under
-       * threshold signing that is a nonce-reuse hazard, not merely waste
-       * (rules 123-124).
+       * THE BUG THIS FIXES, which only the real signer surfaced:
+       *
+       * After EXPIRED the withdrawal leases a FRESH nonce and rebuilds, so the
+       * transaction bytes change. Keyed on the withdrawal id alone, the second
+       * signing request carried the same id over different bytes — and
+       * `MockSigner` cheerfully returned its cached signature, which is a
+       * signature over the OLD transaction. It would have been attached to the
+       * new one and broadcast, and would have failed on-chain as an invalid
+       * signature. The fake broadcaster does not verify signatures, so every
+       * test passed.
+       *
+       * `services/mpc` refuses it outright: reusing an id with new bytes is an
+       * attempt to spend one authorisation twice (ADR-0013).
+       *
+       * Keying on the nonce is also exactly the property FROST needs in 4b —
+       * one signing round per nonce, never two (ADR-0015).
        */
-      const requestId = `withdrawal:${claimed.id}`;
-      const authorization = {
+      const requestId = `withdrawal:${claimed.id}:${state.nonce}`;
+      const unsignedAuthorization = {
         approvedBy: 'risk-engine',
         approvedAt: claimed.createdAt.toISOString(),
         policyVersion: '1',
         reference: claimed.id,
       };
+
+      /**
+       * Sign the proof, binding it to THESE bytes.
+       *
+       * Without the binding, a genuine approval for one withdrawal could be
+       * replayed onto another — which is the attack the payload hash in
+       * `authorizationMessage` exists to stop (ADR-0015).
+       */
+      const authorization =
+        deps.approvalKey === undefined
+          ? unsignedAuthorization
+          : signAuthorization(unsignedAuthorization, unsigned.message, deps.approvalKey);
 
       const alreadyOpen = await signingRequests.findByRequestId(requestId);
       if (!alreadyOpen) {
@@ -164,7 +196,7 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
           requestId,
           keyRef: deps.keyRefId,
           signerKind: deps.signer.kind ?? 'unknown',
-          authorization,
+          authorization: { ...authorization },
         });
       }
 
@@ -218,7 +250,10 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
        * history, which is append-only, so it is worth being deliberate about.
        */
       const reason = describeFailure(error);
-      await signingRequests.fail(`withdrawal:${claimed.id}`, reason);
+      // The request id includes the nonce, which may not have been leased yet
+      // if the failure happened before that. Failing by withdrawal is the
+      // reliable shape here.
+      await signingRequests.failForWithdrawal(claimed.id, reason);
       await withdrawals.transition({
         withdrawalId: claimed.id,
         from: 'SIGNING',

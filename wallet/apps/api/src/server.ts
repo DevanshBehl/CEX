@@ -6,7 +6,13 @@ import {
 } from 'fastify-type-provider-zod';
 import { Redis } from 'ioredis';
 import type { ApiConfig } from '@wallet/config';
-import { createMockSigner, type ChainAdapter, type Signer } from '@wallet/blockchain';
+import { createPrivateKey } from 'node:crypto';
+import {
+  createMockSigner,
+  createRustSigner,
+  type ChainAdapter,
+  type Signer,
+} from '@wallet/blockchain';
 import {
   createRedisChallengeStore,
   createEncryptor,
@@ -105,6 +111,11 @@ export interface BuildServerOptions {
   readonly startWithdrawalWorkers?: boolean;
 }
 
+/** A signer that can report its own liveness. Only the real one can. */
+function isHealthCheckable(signer: Signer): signer is Signer & { isHealthy(): Promise<boolean> } {
+  return typeof (signer as { isHealthy?: unknown }).isHealthy === 'function';
+}
+
 /**
  * Choose a signer from configuration.
  *
@@ -115,10 +126,16 @@ export interface BuildServerOptions {
  */
 function buildSigner(config: ApiConfig): Signer {
   if (config.withdrawal.signerKind === 'real') {
-    throw new Error(
-      'SIGNER_KIND=real is not implemented until Phase 4. The Rust threshold ' +
-        'signer arrives with services/mpc; there is no fallback.',
-    );
+    // Phase 4a. Key generation, storage, signing and idempotency all live in
+    // services/mpc; this is transport (ADR-0013).
+    return createRustSigner({
+      endpoint: config.withdrawal.mpc.endpoint,
+      clientPrivateKey: createPrivateKey(
+        Buffer.from(config.withdrawal.mpc.clientPrivateKey, 'base64').toString('utf8'),
+      ),
+      callerName: config.withdrawal.mpc.callerName,
+      requestTimeoutMs: config.withdrawal.mpc.timeoutMs,
+    });
   }
   return createMockSigner({ nodeEnv: config.shared.nodeEnv, seed: config.session.secret });
 }
@@ -189,7 +206,11 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   const stepUp = createStepUpService(appDeps);
   const account = createAccountService(appDeps);
   const totp = createTotpEnrollmentService(appDeps);
-  const health = createHealthService(db, redis);
+  const signer = options.signer ?? buildSigner(config);
+
+  const health = createHealthService(db, redis, [
+    ...(isHealthCheckable(signer) ? [{ name: 'mpc', check: () => signer.isHealthy() }] : []),
+  ]);
 
   // --- Chain and custody (Phase 2) -----------------------------------------
   const chainAdapter =
@@ -233,8 +254,6 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
    * SIGNER_KIND=mock there. Two independent guards, because a mock signature
    * verifies against nothing and the failure would be silent.
    */
-  const signer = options.signer ?? buildSigner(config);
-
   const withdrawalService = createWithdrawalService({
     db,
     validator: createSolanaAddressValidator(),
@@ -263,6 +282,13 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     keyRefId: config.withdrawal.signerKeyRef,
     budgets: config.withdrawal.budgets,
     batchSize: config.withdrawal.workerBatchSize,
+    ...(config.withdrawal.mpc.approvalPrivateKey.trim() !== ''
+      ? {
+          approvalKey: createPrivateKey(
+            Buffer.from(config.withdrawal.mpc.approvalPrivateKey, 'base64').toString('utf8'),
+          ),
+        }
+      : {}),
   });
 
   const withdrawalControllers = createWithdrawalControllers({

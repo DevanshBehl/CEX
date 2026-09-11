@@ -484,11 +484,19 @@ leaves. Then `RustSingleKeySigner` behind the existing `Signer` interface, and
 **every Phase 3 test must pass unchanged above that interface**. That is the
 proof the abstraction held.
 
-**4b — threshold signing.** FROST-Ed25519 (RFC 9591) via an established Rust
-implementation, never a hand-rolled scheme. It produces an ordinary Ed25519
-signature, so nothing on-chain changes. Participants are entities distinct from
-application users, each its own process, with distributed key generation and
-explicit handling of unavailability and round timeouts.
+**4b — threshold signing.** **3-of-5 FROST-Ed25519** (RFC 9591) via
+`frost-ed25519`, never a hand-rolled scheme — see
+[ADR-0015](./docs/adr/0015-threshold-parameters.md). It produces an ordinary
+Ed25519 signature, so nothing on-chain changes. Tolerates two participants being
+unavailable; requires three to collude.
+
+Two things in that ADR matter more than the parameters. **A participant is a
+separate host**, because five processes on one machine are five copies of one
+blast radius — the threshold is arithmetic, the independence is the security.
+And **each participant independently verifies the `AuthorizationProof`** before
+contributing a share: one that blindly signs whatever the coordinator hands it
+protects against key theft and nothing else, since a compromised API could
+simply ask for a signature paying an attacker.
 
 Also Phase 4: SPL tokens with their ATA rent and fee funding, sweeps and custody
 tiers, reconciliation as a scheduled job with alerting, metrics and health

@@ -16,6 +16,10 @@ report.md
 prompt_phase1.md
 prompt_phase2.md
 prompt_phase3.md
+prompt_phase4.md
 
 # Next.js rewrites this file's `include` array during build.
 apps/web/tsconfig.json
+
+# Rust
+services/mpc/

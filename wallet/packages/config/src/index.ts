@@ -76,6 +76,13 @@ export interface ApiConfig {
     readonly stepUpMaxAgeSeconds: number;
     readonly signerKind: Env['SIGNER_KIND'];
     readonly signerKeyRef: string;
+    readonly mpc: {
+      readonly endpoint: string;
+      readonly clientPrivateKey: string;
+      readonly callerName: string;
+      readonly approvalPrivateKey: string;
+      readonly timeoutMs: number;
+    };
     readonly treasuryAddress: string | undefined;
     readonly noncePoolSize: number;
     readonly workersEnabled: boolean;
@@ -188,6 +195,13 @@ export function toApiConfig(env: Env): ApiConfig {
       stepUpMaxAgeSeconds: env.WITHDRAWAL_STEP_UP_MAX_AGE_SECONDS,
       signerKind: env.SIGNER_KIND,
       signerKeyRef: env.SIGNER_KEY_REF,
+      mpc: Object.freeze({
+        endpoint: env.MPC_ENDPOINT,
+        clientPrivateKey: env.MPC_CLIENT_PRIVATE_KEY,
+        callerName: env.MPC_CALLER_NAME,
+        approvalPrivateKey: env.MPC_APPROVAL_PRIVATE_KEY,
+        timeoutMs: env.MPC_TIMEOUT_MS,
+      }),
       treasuryAddress: env.TREASURY_ADDRESS,
       noncePoolSize: env.NONCE_POOL_SIZE,
       workersEnabled: env.WITHDRAWAL_WORKERS_ENABLED,

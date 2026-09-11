@@ -210,6 +210,149 @@ jobs:
       - run: pnpm --filter @wallet/solana test:integration
       - run: pnpm --filter @wallet/api test:integration
 
+  rust:
+    name: MPC service (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/mpc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/mpc
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  signer-swap:
+    name: Phase 3 suite against the real signer
+    runs-on: ubuntu-latest
+    # THE exit criterion for Phase 4a (prompt_phase4.md rule 176): the whole
+    # Phase 3 suite must pass against RustSingleKeySigner with no changes above
+    # the Signer interface.
+    #
+    # It runs in CI because the first local attempt reported 111 tests passing
+    # while sending ZERO requests to the service — every test had injected the
+    # mock. `USE_CONFIGURED_SIGNER=true` suppresses that injection, and the
+    # assertion below checks the service actually signed.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: wallet
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d wallet"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6380:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/mpc
+
+      - run: pnpm install --frozen-lockfile
+      - name: Create database roles
+        run: |
+          PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d wallet \
+            -f infra/postgres-init/01-roles.sql
+          PGPASSWORD=postgres psql -h localhost -p 5433 -U postgres -d wallet \
+            -c "ALTER ROLE wallet_owner CREATEDB;"
+      - run: pnpm --filter @wallet/db generate
+      - run: pnpm build
+      - run: pnpm --filter @wallet/db exec prisma migrate deploy
+
+      - name: Generate a caller keypair and a KEK
+        id: keys
+        run: |
+          node -e "
+            const { generateKeyPairSync } = require('node:crypto');
+            const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+            const pem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+            const raw = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
+            console.log('priv=' + Buffer.from(pem).toString('base64'));
+            console.log('pub=' + raw.toString('base64'));
+            const approval = generateKeyPairSync('ed25519');
+            const apem = approval.privateKey.export({ type: 'pkcs8', format: 'pem' });
+            const araw = approval.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
+            console.log('approvalpriv=' + Buffer.from(apem).toString('base64'));
+            console.log('approvalpub=' + araw.toString('base64'));
+          " >> "$GITHUB_OUTPUT"
+          echo "kek=$(openssl rand -base64 32)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate a TLS certificate
+        run: |
+          openssl req -x509 -newkey rsa:2048 -keyout /tmp/mpc-key.pem \
+            -out /tmp/mpc-cert.pem -days 1 -nodes -subj "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+
+      - name: Build and start the MPC service
+        env:
+          MPC_KEK: ${{ steps.keys.outputs.kek }}
+          MPC_CALLER_PUBLIC_KEY: ${{ steps.keys.outputs.pub }}
+          MPC_APPROVAL_PUBLIC_KEY: ${{ steps.keys.outputs.approvalpub }}
+          MPC_DATABASE_PATH: /tmp/mpc-ci.sqlite
+          MPC_BOOTSTRAP_KEY_REF: treasury-hot-1
+          MPC_BIND: 127.0.0.1:7070
+          # CI runs the deployed shape: TLS on, and authorization proofs
+          # cryptographically verified.
+          MPC_TLS_CERT: /tmp/mpc-cert.pem
+          MPC_TLS_KEY: /tmp/mpc-key.pem
+        run: |
+          cargo build --release --manifest-path services/mpc/Cargo.toml
+          ./services/mpc/target/release/wallet-mpc &
+          for i in $(seq 1 30); do
+            if curl -skf https://127.0.0.1:7070/v1/health | grep -q '"status":"ok"'; then
+              echo "mpc service healthy"; exit 0
+            fi
+            sleep 1
+          done
+          echo "mpc service never became healthy"; exit 1
+
+      - name: Run the Phase 3 suite against the real signer
+        env:
+          SIGNER_KIND: real
+          USE_CONFIGURED_SIGNER: 'true'
+          MPC_CLIENT_PRIVATE_KEY: ${{ steps.keys.outputs.priv }}
+          MPC_APPROVAL_PRIVATE_KEY: ${{ steps.keys.outputs.approvalpriv }}
+          MPC_ENDPOINT: https://127.0.0.1:7070
+          # A self-signed certificate, for a service on loopback in CI.
+          NODE_TLS_REJECT_UNAUTHORIZED: '0'
+        run: pnpm --filter @wallet/api exec vitest run --config vitest.integration.config.ts
+
+      - name: Assert the service actually signed
+        # Without this the job is green when the suite silently falls back to
+        # the mock — which is exactly how the first local run fooled me.
+        run: |
+          SIGNED=$(python3 -c "
+          import sqlite3
+          c = sqlite3.connect('/tmp/mpc-ci.sqlite')
+          print(c.execute(\"SELECT count(*) FROM signing_requests WHERE outcome='succeeded'\").fetchone()[0])
+          ")
+          echo "signatures produced: $SIGNED"
+          if [ "$SIGNED" -lt 1 ]; then
+            echo "The suite passed without the MPC service signing anything."
+            exit 1
+          fi
+
   e2e:
     name: End-to-end journeys
     runs-on: ubuntu-latest

@@ -22,6 +22,13 @@ export interface SigningRequestRepository {
   ): Promise<string>;
   succeed(requestId: string, tx?: Executor): Promise<void>;
   fail(requestId: string, reason: string, tx?: Executor): Promise<void>;
+  /**
+   * Fail whatever is still open for a withdrawal.
+   *
+   * The request id includes the nonce, which may not exist yet when signing
+   * fails early — so the withdrawal is the reliable handle at that point.
+   */
+  failForWithdrawal(withdrawalId: string, reason: string, tx?: Executor): Promise<void>;
   findByRequestId(
     requestId: string,
     tx?: Executor,
@@ -58,6 +65,13 @@ export function createSigningRequestRepository(db: Executor): SigningRequestRepo
     async fail(requestId, reason, tx) {
       await exec(tx).signingRequest.updateMany({
         where: { requestId },
+        data: { outcome: 'failed', failureReason: reason, completedAt: new Date() },
+      });
+    },
+
+    async failForWithdrawal(withdrawalId, reason, tx) {
+      await exec(tx).signingRequest.updateMany({
+        where: { withdrawalId, outcome: 'requested' },
         data: { outcome: 'failed', failureReason: reason, completedAt: new Date() },
       });
     },

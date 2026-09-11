@@ -14,7 +14,16 @@ export interface HealthService {
  * `{healthy: boolean}` would have to be redesigned the first time something
  * else needed checking, and it never tells an operator WHICH thing is down.
  */
-export function createHealthService(db: PrismaClient, redis: Redis): HealthService {
+export interface HealthProbe {
+  readonly name: string;
+  readonly check: () => Promise<boolean>;
+}
+
+export function createHealthService(
+  db: PrismaClient,
+  redis: Redis,
+  extra: readonly HealthProbe[] = [],
+): HealthService {
   return {
     async ready() {
       const dependencies = await Promise.all([
@@ -24,6 +33,14 @@ export function createHealthService(db: PrismaClient, redis: Redis): HealthServi
         probe('redis', async () => {
           await redis.ping();
         }),
+        // Phase 4 adds the MPC service here (master-prompt rule 170). The array
+        // shape was designed for exactly this in Phase 1 — the contract does
+        // not change to accommodate it.
+        ...extra.map((entry) =>
+          probe(entry.name, async () => {
+            if (!(await entry.check())) throw new Error('unhealthy');
+          }),
+        ),
       ]);
 
       const status: ReadyResponse['status'] = dependencies.every((d) => d.status === 'up')

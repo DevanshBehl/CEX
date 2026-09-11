@@ -18,8 +18,16 @@ import {
   seedNonceAccounts,
   seedSession,
   startHarness,
+  usesConfiguredSigner,
   type Harness,
 } from './helpers.js';
+
+/**
+ * Fault injection requires a MockSigner and cannot apply to the real one
+ * (prompt_phase4.md rule 70). Everything else in this file runs against
+ * whichever signer is configured.
+ */
+const mockOnly = usesConfiguredSigner() ? describe.skip : describe;
 
 let h: Harness;
 let nonces: FakeNonceManager;
@@ -175,12 +183,24 @@ describe('the full lifecycle', () => {
       where: { withdrawalId: id },
     });
     expect(request?.outcome).toBe('succeeded');
-    expect(request?.signerKind).toBe('mock');
+    // Whichever signer is configured — the assertion is that the record names
+    // it, not that it is any particular one.
+    expect(request?.signerKind).toBe(usesConfiguredSigner() ? 'rust-single-key' : 'mock');
 
     const serialized = JSON.stringify(request);
-    // It records that a request was made, by whom, under what authorization —
-    // never the signature or anything secret.
-    expect(serialized).not.toMatch(/privateKey|share|secret|signature/i);
+
+    // Never key material.
+    expect(serialized).not.toMatch(/privateKey|secretKey|keyShare|seed|mnemonic/i);
+    // Never the transaction signature: the record says a request was made and
+    // what happened, not what was produced.
+    expect(request).not.toHaveProperty('signature');
+    expect(serialized).not.toContain(
+      Buffer.from((await withdrawals().findById(id))!.signedTransaction!).toString('base64'),
+    );
+
+    // The authorization IS recorded, and once an approval key is configured it
+    // carries its own signature — an attestation, not a secret, and the thing
+    // the signer verifies (ADR-0015).
     expect(request?.authorization).toBeTruthy();
   });
 
@@ -203,31 +223,80 @@ describe('the full lifecycle', () => {
 // Signing idempotency and faults
 // ---------------------------------------------------------------------------
 
-describe('signing', () => {
-  it('never starts a second signing round for one withdrawal (rules 123-124)', async () => {
+describe('signing idempotency (both signers)', () => {
+  /**
+   * The idempotency key is (withdrawal, nonce), not the withdrawal alone.
+   *
+   * This test originally asserted the opposite — that a re-sign after EXPIRED
+   * reused the cached signature — and passed against the mock, which happily
+   * returned a signature over the OLD transaction. It would have been attached
+   * to the new one and rejected on-chain; the fake broadcaster does not verify
+   * signatures, so nothing caught it. The real signer refused outright, which
+   * is how the bug surfaced.
+   *
+   * Counted from `signing_requests`, which both signers write, so the assertion
+   * means the same thing either way.
+   */
+  const signingRequestCount = async (withdrawalId: string): Promise<number> =>
+    h.app.appDeps.db.signingRequest.count({ where: { withdrawalId } });
+
+  it('signs once per nonce, however many times a cycle runs', async () => {
     const { id } = await lockedWithdrawal();
-    const before = signer.roundCount();
 
     await h.app.withdrawalWorkers.runSigningCycle();
-    const afterFirst = signer.roundCount();
-    expect(afterFirst).toBe(before + 1);
+    expect(await signingRequestCount(id)).toBe(1);
 
-    // Force it back through the signer. Under threshold signing a duplicate
-    // round is a nonce-reuse hazard, not merely waste.
+    // Back through the signer WITHOUT changing the nonce: the same
+    // (withdrawal, nonce) pair, so no second signing operation.
+    await withdrawals().transition({ withdrawalId: id, from: 'SIGNED', to: 'BROADCAST' });
+    await withdrawals().transition({
+      withdrawalId: id,
+      from: 'BROADCAST',
+      to: 'BROADCAST_FAILED',
+      reason: 'test',
+    });
+    await withdrawals().transition({
+      withdrawalId: id,
+      from: 'BROADCAST_FAILED',
+      to: 'FUNDS_LOCKED',
+    });
+    await h.app.withdrawalWorkers.runSigningCycle();
+
+    expect(await signingRequestCount(id)).toBe(1);
+    if (!usesConfiguredSigner()) expect(signer.roundCount()).toBeGreaterThan(0);
+  });
+
+  it('signs AGAIN on a fresh nonce, because the bytes are different', async () => {
+    const { id } = await lockedWithdrawal();
+    await h.app.withdrawalWorkers.runSigningCycle();
+    const first = await withdrawals().findById(id);
+    expect(await signingRequestCount(id)).toBe(1);
+
+    // EXPIRED drops the lease, so the retry leases a fresh nonce and rebuilds.
+    // Reusing the old signature here would broadcast a signature over a
+    // transaction that no longer exists.
     await withdrawals().transition({ withdrawalId: id, from: 'SIGNED', to: 'BROADCAST' });
     await withdrawals().transition({
       withdrawalId: id,
       from: 'BROADCAST',
       to: 'EXPIRED',
-      reason: 'test',
+      reason: 'nonce_advanced',
     });
-    await withdrawals().transition({ withdrawalId: id, from: 'EXPIRED', to: 'FUNDS_LOCKED' });
+    await h.app.withdrawalWorkers.runSigningCycle();
     await h.app.withdrawalWorkers.runSigningCycle();
 
-    // The same requestId, so the signer returned its cached result.
-    expect(signer.roundCount()).toBe(afterFirst);
+    const second = await withdrawals().findById(id);
+    expect(second?.status).toBe('SIGNED');
+    expect(second?.nonceValue).not.toBe(first?.nonceValue);
+    // A genuinely new signing operation, over the new bytes.
+    expect(await signingRequestCount(id)).toBe(2);
+    expect(Buffer.from(second!.signedTransaction!)).not.toEqual(
+      Buffer.from(first!.signedTransaction!),
+    );
   });
+});
 
+mockOnly('signing faults (mock only)', () => {
   it('moves to SIGN_FAILED when the signer fails, keeping the funds locked', async () => {
     const { id, userId } = await lockedWithdrawal();
     signer.injectFault(`withdrawal:${id}`, 'fail');

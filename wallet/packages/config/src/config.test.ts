@@ -101,9 +101,12 @@ describe('parseEnv', () => {
       WEB_ORIGIN: 'https://app.example.com',
       WEBAUTHN_ORIGIN: 'https://app.example.com',
       WEBAUTHN_RP_ID: 'example.com',
-      // A production config cannot use the mock signer either (ADR-0011), so
-      // this fixture would fail for two reasons without it.
+      // A production config cannot use the mock signer either (ADR-0011), and
+      // a `real` signer needs a client key to authenticate to services/mpc
+      // (ADR-0013) — so this fixture would fail for two other reasons without
+      // both of these.
       SIGNER_KIND: 'real',
+      MPC_CLIENT_PRIVATE_KEY: 'ZmFrZS1wZW0tZm9yLXRlc3Rz',
     };
     expect(() => parseEnv({ ...productionish, SOLANA_COMMITMENT: 'finalized' })).not.toThrow();
     expect(() => parseEnv({ ...productionish, SOLANA_COMMITMENT: 'confirmed' })).toThrow(
@@ -130,6 +133,15 @@ describe('parseEnv', () => {
   it('rejects a risk limit that is not an integer base-unit string', () => {
     expect(() => parseEnv({ ...valid, RISK_DAILY_LIMIT: '1.5' })).toThrow(ConfigValidationError);
     expect(() => parseEnv({ ...valid, RISK_DAILY_LIMIT: '250000000000' })).not.toThrow();
+  });
+
+  it('refuses a real signer with no client key (ADR-0013)', () => {
+    // It could not authenticate, so services/mpc would refuse every request.
+    // Failing at boot beats failing at the first withdrawal.
+    expect(() => parseEnv({ ...valid, SIGNER_KIND: 'real' })).toThrow(ConfigValidationError);
+    expect(() =>
+      parseEnv({ ...valid, SIGNER_KIND: 'real', MPC_CLIENT_PRIVATE_KEY: 'a-key' }),
+    ).not.toThrow();
   });
 
   it('parses the asset allowlist (ADR-0008)', () => {
