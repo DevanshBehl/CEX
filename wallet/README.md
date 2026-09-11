@@ -1,19 +1,23 @@
 # MPC Custodial Wallet
 
 An educational custodial Solana wallet platform, built in four phases.
-**Phases 1–3 are complete: identity, custody and money-in, and money-out.**
+**Phases 1–3 are complete: identity, custody and money-in, and money-out.
+Phase 4 is partially complete** — see [Where Phase 4 stands](#where-phase-4-stands).
 
 > Not audited. Not production custody. Never point this at real funds.
 > — master-prompt rules 7–8
 
-| Document                                 | What it is                                                  |
-| ---------------------------------------- | ----------------------------------------------------------- |
-| [`master-prompt.md`](./master-prompt.md) | The 200-rule specification for the whole system             |
-| [`report.md`](./report.md)               | The four-phase build plan and system design                 |
-| [`prompt_phase1.md`](./prompt_phase1.md) | The 210-rule implementation contract for Phase 1 (complete) |
-| [`prompt_phase2.md`](./prompt_phase2.md) | The 228-rule implementation contract for Phase 2 (next)     |
-| [`docs/adr/`](./docs/adr)                | Decisions and the trade-offs behind them                    |
-| [`docs/runbooks/`](./docs/runbooks)      | Local setup, secret rotation                                |
+| Document                                                           | What it is                                                  |
+| ------------------------------------------------------------------ | ----------------------------------------------------------- |
+| [`master-prompt.md`](./master-prompt.md)                           | The 200-rule specification for the whole system             |
+| [`report.md`](./report.md)                                         | The four-phase build plan and system design                 |
+| [`prompt_phase1.md`](./prompt_phase1.md)                           | The 210-rule implementation contract for Phase 1 (complete) |
+| [`prompt_phase2.md`](./prompt_phase2.md)                           | The 228-rule implementation contract for Phase 2 (complete) |
+| [`prompt_phase3.md`](./prompt_phase3.md)                           | The 233-rule implementation contract for Phase 3 (complete) |
+| [`prompt_phase4.md`](./prompt_phase4.md)                           | The 267-rule implementation contract for Phase 4 (partial)  |
+| [`docs/adr/`](./docs/adr)                                          | Decisions and the trade-offs behind them                    |
+| [`docs/runbooks/`](./docs/runbooks)                                | Incident procedures and local setup                         |
+| [`docs/security/threat-model.md`](./docs/security/threat-model.md) | What is defended, and what is not                           |
 
 ## What works today
 
@@ -27,23 +31,45 @@ shown honestly.
 All of it recorded in a double-entry ledger the database itself refuses to let
 anyone falsify.
 
-## What it deliberately does NOT do
+## Where Phase 4 stands
 
-**The signer is a mock.** It produces signatures that verify against nothing, it
-announces itself on every call, and it refuses to start when `NODE_ENV` is
-`production` — twice over, since the config refuses `SIGNER_KIND=mock` there as
-well.
+**Signing is real, and it is a single key.**
 
-That is the shape of Phase 3 on purpose. The retry, timeout, expiry and
-ambiguous-broadcast paths are where withdrawals actually go wrong, and they are
-nearly impossible to provoke against real MPC. A mock can be told to fail, hang,
-or return the same signature twice, inside a test. Phase 4 replaces it with a
-Rust threshold implementation, and if that replacement requires editing anything
-above the `Signer` interface, the abstraction leaked.
+`services/mpc` is a separate Rust process holding the signing key, reached over
+an authenticated channel. It verifies an approval proof bound to the exact
+payload before it will sign, enforces per-request idempotency, and enforces
+custody-tier authority requirements. The key never leaves it: no endpoint
+returns it, no log prints it, and the type that holds it has no accessor.
 
-Also absent, by design: SPL tokens (ADR-0008), sweeps from deposit addresses
-into a hot wallet, hot/warm/cold segregation, and an operator role model. All
-Phase 4.
+**It is not threshold signing.** ADR-0015 specifies 3-of-5 FROST-Ed25519 across
+independent failure domains. What exists is one key in one process. That
+delivers the process boundary and the authorization check — most of the
+architectural value — and **none** of the key-compromise resistance. One host
+compromise yields the treasury key.
+
+| Phase 4 area                      | State                                                                                    |
+| --------------------------------- | ---------------------------------------------------------------------------------------- |
+| Rust signing service (4a)         | **done** — TLS, authenticated, idempotent, tier-aware                                    |
+| 3-of-5 FROST threshold (4b)       | **not started**                                                                          |
+| SPL token allowlist and deposits  | **done** — mints allowlisted, unknown mints recorded not credited                        |
+| SPL token withdrawals and sweeps  | **not started** — fee funding and the sweep lifecycle remain                             |
+| Custody tiers                     | **policy done and enforced in the signer**; no tier addresses yet                        |
+| Per-asset risk limits             | **done** — an asset with no configured limits is not withdrawable                        |
+| Reconciliation as a job           | **done** — scheduled, covers nonce accounts and the treasury, alerts on persistent drift |
+| Metrics and dead-letter queue     | **done** — operator endpoints, no user ids or amounts as labels                          |
+| Threat model and dependency audit | **done** — [threat model](./docs/security/threat-model.md), enforced audit policy        |
+| Secret manager, operator roles    | **not started** — `.env` and a list of user ids                                          |
+
+Still absent by design: a second chain (ADR-0019 describes what one would
+touch, and nothing implements it).
+
+The mock signer still exists for tests. It announces itself on every call and
+refuses to construct when `NODE_ENV` is `production` — twice over, since the
+config refuses `SIGNER_KIND=mock` there as well. The retry, timeout, expiry and
+ambiguous-broadcast paths are where withdrawals actually go wrong and are nearly
+impossible to provoke against a real signer, so the mock earns its place. CI
+runs the entire Phase 3 suite against the **real** service as well, and fails if
+that service signed nothing.
 
 ## Quick start
 
@@ -463,9 +489,12 @@ pages/_document` — naming a file this project does not have. Diagnosis was
   Recovery codes cover the TOTP factor only. This must be built before the
   system holds anything valuable.
 - **`TOTP_ENCRYPTION_KEY` cannot be rotated.** No re-encryption tooling exists;
-  changing it orphans every enrolled authenticator.
-- **Secrets live in `.env` locally.** A real secret manager is Phase 4
-  (master-prompt rule 157).
+  changing it orphans every enrolled authenticator. Accepted and recorded rather
+  than fixed (prompt_phase4.md rule 167).
+- **Secrets live in `.env`.** A real secret manager remains unbuilt
+  (master-prompt rule 157). The deposit master seed is the sharpest edge here:
+  it can regenerate every deposit key and lives in the API process's
+  environment. See the [threat model](./docs/security/threat-model.md).
 - **`NODE_ENV` must not be `development` for a production build.** The web
   build script pins `NODE_ENV=production`; without it, Next.js fails while
   prerendering `/404` with an error that names `pages/_document`, a file this
@@ -473,36 +502,35 @@ pages/_document` — naming a file this project does not have. Diagnosis was
 
 ## Next
 
-Phase 4 — real MPC, SPL tokens, and operational hardening. See
-[`report.md`](./report.md) §5.
+**What remains of Phase 4**, in the order `prompt_phase4.md` rule 16 recommends
+— everything else before 4b, because the single-key service already delivers the
+process boundary and blocking tokens and operations behind threshold crypto
+stalls everything on the hardest piece.
 
-Split it in two and do not attempt both at once:
+1. **SPL token withdrawals and sweeps.** Deposits work; money-out does not. A
+   token cannot pay its own fee, so a funding step must precede any token
+   movement out of a deposit address (ADR-0016), and a sweep reuses the
+   withdrawal lifecycle rather than duplicating it (ADR-0017).
+2. **Custody tier addresses.** The policy is written and enforced in the signing
+   service; hot, warm and cold have no addresses or rebalancing yet (ADR-0018).
+3. **Secret manager and an operator role model.** `.env` and
+   `OPERATOR_USER_IDS` are what exist. The deposit master seed and the KEK move
+   first — they are the values that regenerate everything else.
+4. **4b — threshold signing.** **3-of-5 FROST-Ed25519** (RFC 9591) via
+   `frost-ed25519`, never a hand-rolled scheme — see
+   [ADR-0015](./docs/adr/0015-threshold-parameters.md). It produces an ordinary
+   Ed25519 signature, so nothing on-chain changes. Tolerates two participants
+   being unavailable; requires three to collude.
 
-**4a — a Rust service holding a single key.** A real process boundary, its own
-datastore, mutual-TLS or signed-request authentication, key material that never
-leaves. Then `RustSingleKeySigner` behind the existing `Signer` interface, and
-**every Phase 3 test must pass unchanged above that interface**. That is the
-proof the abstraction held.
-
-**4b — threshold signing.** **3-of-5 FROST-Ed25519** (RFC 9591) via
-`frost-ed25519`, never a hand-rolled scheme — see
-[ADR-0015](./docs/adr/0015-threshold-parameters.md). It produces an ordinary
-Ed25519 signature, so nothing on-chain changes. Tolerates two participants being
-unavailable; requires three to collude.
-
-Two things in that ADR matter more than the parameters. **A participant is a
+Two things in ADR-0015 matter more than the parameters. **A participant is a
 separate host**, because five processes on one machine are five copies of one
 blast radius — the threshold is arithmetic, the independence is the security.
 And **each participant independently verifies the `AuthorizationProof`** before
 contributing a share: one that blindly signs whatever the coordinator hands it
 protects against key theft and nothing else, since a compromised API could
-simply ask for a signature paying an attacker.
+simply ask for a signature paying an attacker. That verification is already
+implemented in the single-key service, ahead of 4b, because it has exactly the
+same exposure.
 
-Also Phase 4: SPL tokens with their ATA rent and fee funding, sweeps and custody
-tiers, reconciliation as a scheduled job with alerting, metrics and health
-checks across every dependency, a real operator role model, and a secret manager
-in place of `.env`.
-
-If 4b stalls, **ship 4a plus everything else** rather than blocking tokens,
-reconciliation and observability behind it. The single-key Rust service already
-delivers the process boundary, which is most of the architectural value.
+A second chain is **design only** and stays that way
+([ADR-0019](./docs/adr/0019-second-chain-seams.md)).

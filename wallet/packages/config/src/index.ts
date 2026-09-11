@@ -1,3 +1,12 @@
+import { createAssetRegistry, NATIVE_ASSET_KEY, type AssetRegistry } from '@wallet/types';
+
+/**
+ * Display fallback for the native asset. Config must not import a chain
+ * package, so this is stated rather than imported from `packages/solana`
+ * (where `NATIVE_DECIMALS` is the same value). It is metadata; nothing
+ * computes with it.
+ */
+const NATIVE_ASSET_DECIMALS = 9;
 import { readProcessEnv, type RawEnv } from './env.js';
 import { envSchema, type Env } from './schema.js';
 import { ConfigValidationError, type ConfigIssue } from './errors.js';
@@ -56,6 +65,12 @@ export interface ApiConfig {
     readonly rpcMaxRetries: number;
     readonly depositSeed: string;
     readonly supportedAssets: readonly string[];
+    /**
+     * The allowlist, resolved (ADR-0016). Lookup is by ledger asset key —
+     * `SOL`, or a mint address — because that is what the ledger stores and
+     * what arrives on a withdrawal request.
+     */
+    readonly assets: AssetRegistry;
   };
   readonly indexer: {
     readonly enabled: boolean;
@@ -63,7 +78,29 @@ export interface ApiConfig {
     readonly pageSize: number;
     readonly maxAddressesPerCycle: number;
   };
+  readonly reconciliation: {
+    readonly enabled: boolean;
+    readonly intervalMs: number;
+    readonly alertAfterCycles: number;
+  };
   readonly risk: {
+    /**
+     * Per-asset limits keyed by ledger asset key (ADR-0016, rule 127).
+     *
+     * The native asset is always present, from the `RISK_*` variables. A mint
+     * appears only if `RISK_ASSET_LIMITS` names it — and one that does not
+     * appear is not withdrawable, which is the safe reading of a gap.
+     */
+    readonly assetLimits: Readonly<
+      Record<
+        string,
+        {
+          readonly perTransactionLimit: string;
+          readonly dailyLimit: string;
+          readonly manualReviewAbove: string;
+        }
+      >
+    >;
     readonly perTransactionLimit: string;
     readonly dailyLimit: string;
     readonly velocityWindowMinutes: number;
@@ -175,6 +212,15 @@ export function toApiConfig(env: Env): ApiConfig {
       rpcMaxRetries: env.SOLANA_RPC_MAX_RETRIES,
       depositSeed: env.DEPOSIT_SEED,
       supportedAssets: Object.freeze([...env.SUPPORTED_ASSETS]),
+      assets: createAssetRegistry({
+        // Native decimals are a display fallback only; see `assets.ts`.
+        nativeDecimals: NATIVE_ASSET_DECIMALS,
+        tokens: env.TOKEN_MINTS.map((token) => ({
+          symbol: token.symbol,
+          mint: token.mint,
+          decimals: Number(token.decimals),
+        })),
+      }),
     }),
     indexer: Object.freeze({
       enabled: env.INDEXER_ENABLED,
@@ -182,7 +228,30 @@ export function toApiConfig(env: Env): ApiConfig {
       pageSize: env.INDEXER_PAGE_SIZE,
       maxAddressesPerCycle: env.INDEXER_MAX_ADDRESSES_PER_CYCLE,
     }),
+    reconciliation: Object.freeze({
+      enabled: env.RECONCILIATION_ENABLED,
+      intervalMs: env.RECONCILIATION_INTERVAL_MS,
+      alertAfterCycles: env.RECONCILIATION_ALERT_AFTER_CYCLES,
+    }),
     risk: Object.freeze({
+      assetLimits: Object.freeze({
+        // The native asset keeps the variables it has always had.
+        [NATIVE_ASSET_KEY]: Object.freeze({
+          perTransactionLimit: env.RISK_PER_TRANSACTION_LIMIT,
+          dailyLimit: env.RISK_DAILY_LIMIT,
+          manualReviewAbove: env.RISK_MANUAL_REVIEW_ABOVE,
+        }),
+        ...Object.fromEntries(
+          env.RISK_ASSET_LIMITS.map((limit) => [
+            limit.asset,
+            Object.freeze({
+              perTransactionLimit: limit.perTransactionLimit,
+              dailyLimit: limit.dailyLimit,
+              manualReviewAbove: limit.manualReviewAbove,
+            }),
+          ]),
+        ),
+      }),
       perTransactionLimit: env.RISK_PER_TRANSACTION_LIMIT,
       dailyLimit: env.RISK_DAILY_LIMIT,
       velocityWindowMinutes: env.RISK_VELOCITY_WINDOW_MINUTES,

@@ -70,6 +70,21 @@ export const SECURITY_EVENTS = [
   'nonce.leased',
   'nonce.released',
   'nonce.pool_exhausted',
+
+  // --- Phase 4: jobs and sweeps ---
+  // `deposit.ignored` and the reconciliation events already exist above.
+  /** A job exhausted its retry budget and was parked (rule 153). */
+  'job.dead_lettered',
+  'job.retried',
+  'job.retry_failed',
+  'nonce.provisioned',
+  'sweep.started',
+  'sweep.completed',
+  'sweep.failed',
+  /** Drift that has persisted across cycles, not a single reading (rule 144). */
+  'reconciliation.drift_persisted',
+  /** A negative residual with no withdrawals in flight (rule 148). */
+  'reconciliation.negative_residual',
 ] as const;
 
 export type SecurityEvent = (typeof SECURITY_EVENTS)[number];

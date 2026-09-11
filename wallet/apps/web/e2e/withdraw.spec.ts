@@ -83,10 +83,21 @@ test.describe('withdrawal journey', () => {
     await expect(page.getByText(/no withdrawals yet/i)).toBeVisible();
   });
 
-  test('the dashboard says signing is still a mock', async ({ page }) => {
+  test('the dashboard states what signing actually is, whichever it is', async ({ page }) => {
     await register(page);
-    // master-prompt rule 8: never let anyone assume this is production-safe.
-    await expect(page.locator('main')).toContainText(/signing is not real yet/i);
+
+    /**
+     * Either copy is acceptable; a claim of being audited or production-safe
+     * is not (master-prompt rule 8).
+     *
+     * Asserting the exact mock wording would make this test fail the moment a
+     * real signer shipped — which is backwards, since that is when the copy
+     * most needs to be right. What must hold is that the page says something
+     * true about signing and never overstates it.
+     */
+    const main = page.locator('main');
+    await expect(main).toContainText(/signing is (not real yet|real, and it is a single key)/i);
+    await expect(main).not.toContainText(/production[- ]safe|audited and secure/i);
   });
 
   test('the operator queue is not reachable by an ordinary user', async ({ page }) => {

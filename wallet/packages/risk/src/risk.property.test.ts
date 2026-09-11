@@ -24,6 +24,20 @@ const ONE_SOL = 1_000_000_000n;
 
 const POLICY: RiskPolicy = {
   supportedAssets: [SOL, 'USDC'],
+  assetLimits: {
+    [SOL]: {
+      perTransactionLimit: 100n * ONE_SOL,
+      dailyLimit: 250n * ONE_SOL,
+      manualReviewAbove: 25n * ONE_SOL,
+    },
+    USDC: {
+      // Six decimals, not nine. The point of per-asset limits: these numbers
+      // are a thousand times smaller and mean the same thing to a user.
+      perTransactionLimit: 100_000_000n,
+      dailyLimit: 250_000_000n,
+      manualReviewAbove: 25_000_000n,
+    },
+  },
   perTransactionLimit: 100n * ONE_SOL,
   dailyLimit: 250n * ONE_SOL,
   velocityWindowMinutes: 60,

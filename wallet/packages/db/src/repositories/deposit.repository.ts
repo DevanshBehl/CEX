@@ -42,6 +42,17 @@ export type RecordDepositResult =
 export interface DepositRepository {
   record(input: RecordDepositInput, tx?: Executor): Promise<RecordDepositResult>;
   markCredited(id: string, ledgerTransactionId: string, tx?: Executor): Promise<void>;
+  /**
+   * Record a detected transfer that will never be credited (ADR-0016).
+   *
+   * An unrecognised mint arriving at a custody address is routine, not
+   * exceptional. Dropping it leaves a user's "where is my token" question
+   * unanswerable; crediting it creates a liability in an asset the platform
+   * cannot value. The row is the third option: attributable, auditable, and
+   * carrying no ledger entries, because it is an observation about the chain
+   * rather than an accounting event (rules 124-125).
+   */
+  markIgnored(id: string, reason: string, tx?: Executor): Promise<void>;
   findById(id: string, tx?: Executor): Promise<DepositRecord | null>;
   findByChainReference(
     chain: string,
@@ -106,6 +117,13 @@ export function createDepositRepository(db: Executor): DepositRepository {
 
       const created = await exec(tx).deposit.findUniqueOrThrow({ where: { id } });
       return { outcome: 'created', deposit: toRecord(created) };
+    },
+
+    async markIgnored(id, reason, tx) {
+      await exec(tx).deposit.update({
+        where: { id },
+        data: { status: 'ignored', reason },
+      });
     },
 
     async markCredited(id, ledgerTransactionId, tx) {

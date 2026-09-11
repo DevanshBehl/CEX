@@ -11,6 +11,9 @@ import {
 } from '@wallet/db';
 import { postWithdrawalSettlement, toAmount, toBaseUnits } from '@wallet/ledger';
 import { logSecurityEvent, runWithContext, type Logger } from '@wallet/logger';
+import { isTerminal } from '@wallet/types';
+import type { DeadLetterQueue, JobQueue } from '../observability/dead-letter.js';
+import type { WalletMetrics } from '../observability/metrics.js';
 import type { NonceManager, WithdrawalBroadcaster } from '@wallet/solana';
 import { attachSignature, buildWithdrawalTransaction } from '@wallet/solana';
 import { releaseLock } from '../services/withdrawal.service.js';
@@ -40,9 +43,33 @@ export interface WithdrawalWorkerDeps {
    * it is signing without a verified authorization (ADR-0015).
    */
   readonly approvalKey?: KeyObject | undefined;
+  /**
+   * Where a job goes when it has exhausted its budget (rule 153).
+   *
+   * Optional so a test harness need not supply one; when absent, the withdrawal
+   * still transitions to FAILED and is still logged — the queue adds an
+   * operator surface, it is not part of the correctness of giving up.
+   */
+  readonly deadLetters?: DeadLetterQueue | undefined;
+  readonly metrics?: WalletMetrics | undefined;
 }
 
 export interface WithdrawalWorkers {
+  /**
+   * Re-run the lifecycle for one withdrawal, for the dead-letter retry surface
+   * (master-prompt rule 173, prompt_phase4.md rules 153-154).
+   *
+   * A TERMINAL withdrawal is NOT resurrected. When a withdrawal exhausts its
+   * retry budget it transitions to FAILED and its locked funds are released
+   * back to the user (ADR-0012) — so "retrying" it would re-lock money the
+   * user has already been given back, and spend against an authorisation that
+   * was abandoned. The correct recovery is a new withdrawal request, made by
+   * the user, with a fresh risk decision.
+   *
+   * Throws in that case so the retry surface reports `failed` and the operator
+   * learns why, rather than silently doing nothing and appearing to succeed.
+   */
+  retry(withdrawalId: string): Promise<void>;
   runSigningCycle(): Promise<number>;
   runBroadcastCycle(): Promise<number>;
   runConfirmationCycle(): Promise<number>;
@@ -98,6 +125,35 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
       targetId: withdrawal.id,
       reason,
     });
+
+    deps.metrics?.failures.inc({ stage: queueFor(from) });
+    deps.metrics?.withdrawals.inc({ asset: withdrawal.asset, state: 'FAILED' });
+
+    /**
+     * Parked for an operator even though the withdrawal is now terminal and
+     * the user has their funds back.
+     *
+     * The value is visibility, not resurrection: a run of budget exhaustions
+     * on one queue is how an RPC outage or a dry nonce pool announces itself,
+     * and `retry` deliberately refuses a terminal withdrawal. The idempotency
+     * key is the withdrawal id, which is what every downstream operation is
+     * already keyed on.
+     */
+    deps.deadLetters?.record({
+      queue: queueFor(from),
+      reference: withdrawal.id,
+      idempotencyKey: `withdrawal:${withdrawal.id}`,
+      attempts: deps.budgets.sign,
+      errorName: reason,
+      correlationId,
+    });
+  }
+
+  /** Which queue a give-up belongs to, for the operator's view. */
+  function queueFor(status: WithdrawalRecord['status']): JobQueue {
+    if (status === 'BROADCAST_FAILED') return 'withdrawal_broadcast';
+    if (status === 'EXPIRED') return 'withdrawal_expiry';
+    return 'withdrawal_sign';
   }
 
   // -------------------------------------------------------------------------
@@ -175,6 +231,14 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
         approvedAt: claimed.createdAt.toISOString(),
         policyVersion: '1',
         reference: claimed.id,
+        /**
+         * Ordinary user withdrawals are served from the working float
+         * (ADR-0018). One that hot cannot cover is an operational event
+         * handled before a withdrawal reaches signing, not a tier the worker
+         * silently escalates to — escalating here would make routine traffic
+         * reach into a tier whose whole value is being rarely touched.
+         */
+        tier: 'hot' as const,
       };
 
       /**
@@ -563,6 +627,25 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
   }
 
   return {
+    async retry(withdrawalId) {
+      const withdrawal = await withdrawals.findById(withdrawalId);
+      if (!withdrawal) {
+        throw new Error(`withdrawal ${withdrawalId} no longer exists`);
+      }
+      if (isTerminal(withdrawal.status)) {
+        throw new Error(
+          `withdrawal ${withdrawalId} is terminal (${withdrawal.status}); ` +
+            'its funds were already released and it cannot be retried',
+        );
+      }
+
+      // Nothing bespoke: the ordinary cycles claim by state, and this simply
+      // runs them now instead of waiting for the next tick. A retry path that
+      // did its own signing would be a second implementation of the thing
+      // most worth having only one of.
+      await this.runAllCycles();
+    },
+
     async runSigningCycle() {
       const correlationId = randomUUID();
       return runWithContext({ correlationId, route: 'worker:signer' }, async () => {

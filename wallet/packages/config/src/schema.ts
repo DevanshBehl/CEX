@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { tokenAssetSchema } from '@wallet/types';
 
 const nodeEnv = z.enum(['development', 'test', 'production']);
 const logLevel = z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']);
@@ -93,7 +94,15 @@ export const envSchema = z
      */
     DEPOSIT_SEED: z.string().min(44),
 
-    /** ADR-0008: the asset allowlist. SOL only in Phase 2. */
+    /**
+     * ADR-0016: the SPL mint allowlist, `SYMBOL:MINT:DECIMALS` comma-separated.
+     *
+     * Empty by default, so an existing deployment keeps behaving exactly as it
+     * did before tokens existed. Adding a mint is a deliberate act.
+     */
+    TOKEN_MINTS: tokenAssetSchema.default(''),
+
+    /** ADR-0008: the native asset allowlist. SOL only; mints live above. */
     SUPPORTED_ASSETS: z
       .string()
       .default('SOL')
@@ -112,6 +121,23 @@ export const envSchema = z
     INDEXER_PAGE_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
     INDEXER_MAX_ADDRESSES_PER_CYCLE: z.coerce.number().int().positive().default(200),
 
+    /** Reconciliation as a scheduled job (prompt_phase4.md rule 140). */
+    RECONCILIATION_ENABLED: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((value) => value === 'true'),
+    /** Default 15 minutes: frequent enough to catch drift, cheap enough to run. */
+    RECONCILIATION_INTERVAL_MS: z.coerce.number().int().min(60_000).default(900_000),
+    /**
+     * Consecutive drifting cycles before an alert (rule 144).
+     *
+     * Three, because a residual is the normal steady state whenever a deposit
+     * is between detection and finality. One cycle would alert on every busy
+     * minute; three means the drift outlived ~45 minutes of finality, which
+     * timing cannot explain.
+     */
+    RECONCILIATION_ALERT_AFTER_CYCLES: z.coerce.number().int().min(1).default(3),
+
     // --- Phase 3: risk policy (ADR-0010) ------------------------------------
     // Base units. Educational-project defaults, chosen so every rule is
     // reachable in testing rather than to model a real institution's appetite.
@@ -125,6 +151,63 @@ export const envSchema = z
       .default('true')
       .transform((v) => v === 'true'),
     RISK_KNOWN_DESTINATION_WINDOW_DAYS: z.coerce.number().int().positive().default(90),
+
+    /**
+     * Per-asset withdrawal limits, `ASSET:PER_TX:DAILY:REVIEW_ABOVE`,
+     * comma-separated (prompt_phase4.md rule 127, ADR-0016).
+     *
+     *   RISK_ASSET_LIMITS=EPjF...Dt1v:1000000000:5000000000:250000000
+     *
+     * `ASSET` is the ledger asset key — a mint address for a token. The native
+     * asset's limits keep their own `RISK_*` variables, so an existing
+     * deployment is unchanged.
+     *
+     * An allowlisted mint absent from this list is not withdrawable. That is
+     * deliberate: the fallback would be a limit denominated in 10^9 units
+     * applied to an asset denominated in 10^6.
+     */
+    RISK_ASSET_LIMITS: z
+      .string()
+      .default('')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      )
+      .pipe(
+        z.array(
+          z.string().superRefine((entry, ctx) => {
+            const parts = entry.split(':');
+            if (parts.length !== 4) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `"${entry}" must be ASSET:PER_TX:DAILY:REVIEW_ABOVE`,
+              });
+              return;
+            }
+            for (const [index, part] of parts.slice(1).entries()) {
+              if (!/^\d+$/.test(part)) {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  message: `"${parts[0] ?? ''}" field ${String(index + 2)} must be base units`,
+                });
+              }
+            }
+          }),
+        ),
+      )
+      .transform((entries) =>
+        entries.map((entry) => {
+          const [asset = '', perTx = '0', daily = '0', review = '0'] = entry.split(':');
+          return {
+            asset,
+            perTransactionLimit: perTx,
+            dailyLimit: daily,
+            manualReviewAbove: review,
+          };
+        }),
+      ),
 
     // --- Phase 3: step-up tiering (ADR-0011) --------------------------------
     /** Freshness demanded for a withdrawal at or above the review threshold. */
@@ -251,6 +334,65 @@ export const envSchema = z
         path: ['SUPPORTED_ASSETS'],
         message: 'must list at least one asset',
       });
+    }
+
+    /**
+     * Cross-field checks only. Per-entry shape — base58, decimals, the three
+     * fields — belongs to `tokenAssetSchema` and has already run.
+     *
+     * Zod runs an object-level `superRefine` even when a field's own schema
+     * failed, handing it the PARTIALLY parsed value — here, an array of raw
+     * strings rather than of `TokenAsset`. Reading `.mint` off those throws a
+     * TypeError that replaces the real, useful validation message with a
+     * stack trace. Hence the shape guard rather than `Array.isArray` alone.
+     */
+    const tokens = Array.isArray(env.TOKEN_MINTS)
+      ? env.TOKEN_MINTS.filter(
+          (token): token is (typeof env.TOKEN_MINTS)[number] =>
+            typeof token === 'object' && token !== null && 'mint' in token && 'symbol' in token,
+        )
+      : [];
+
+    {
+      const seenMints = new Set<string>();
+      const seenSymbols = new Set<string>();
+
+      for (const [index, token] of tokens.entries()) {
+        const path = ['TOKEN_MINTS', index] as const;
+
+        // Two entries for one mint means two ledger asset keys for one asset,
+        // which splits a user's balance in half without telling anyone.
+        if (seenMints.has(token.mint)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [...path, 'mint'],
+            message: 'is listed more than once',
+          });
+        }
+        seenMints.add(token.mint);
+
+        // Symbols are display-only, but a duplicate makes the interface lie
+        // about which asset a balance belongs to.
+        const symbol = token.symbol.toUpperCase();
+        if (seenSymbols.has(symbol)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [...path, 'symbol'],
+            message: 'is listed more than once',
+          });
+        }
+        seenSymbols.add(symbol);
+
+        // A mint calling itself SOL would collide with the native asset key in
+        // the ledger — the exact confusion the allowlist exists to prevent.
+        if (env.SUPPORTED_ASSETS.some((asset) => asset.toUpperCase() === symbol)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [...path, 'symbol'],
+            message: 'collides with a native asset symbol',
+          });
+        }
+      }
     }
 
     // The mock signer produces signatures that verify against nothing. This is

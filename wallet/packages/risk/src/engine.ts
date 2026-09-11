@@ -3,6 +3,7 @@ import { accountStateRule } from './rules/account.js';
 import { destinationRule } from './rules/destination.js';
 import {
   amountRule,
+  assetLimitsConfiguredRule,
   dailyLimitRule,
   manualReviewThresholdRule,
   perTransactionLimitRule,
@@ -21,6 +22,7 @@ export const RULES: readonly Rule[] = [
   accountStateRule,
   amountRule,
   destinationRule,
+  assetLimitsConfiguredRule,
   perTransactionLimitRule,
   dailyLimitRule,
   velocityRule,

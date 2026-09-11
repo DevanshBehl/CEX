@@ -7,6 +7,8 @@ import {
   isBalanced,
   postDeposit,
   postNonceAccountRent,
+  postSweepFee,
+  postTokenAccountRent,
   postWithdrawalLock,
   postWithdrawalRelease,
   postWithdrawalSettlement,
@@ -226,5 +228,100 @@ describe('nonce account rent (ADR-0009)', () => {
     expect(isBalanced(entries)).toBe(true);
     expect(projectUserBalance('u1', SOL, entries).total).toBe(10n * ONE);
     expect(checkAllInvariants(entries)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sweeps and token rent (ADR-0016, ADR-0017, prompt_phase4.md rules 118, 131)
+// ---------------------------------------------------------------------------
+
+describe('sweeps', () => {
+  it('LEAVES USER LIABILITIES BIT-IDENTICAL', () => {
+    // The defining property of a sweep (rule 131). A sweep that moves a user
+    // balance is not a sweep with a bug, it is a different operation.
+    const before = [...funded(), ...houseFunded()];
+    const liabilitiesBefore = projectUserBalance('u1', SOL, before);
+
+    const after = [
+      ...before,
+      ...postSweepFee({ sweepId: 's1', asset: SOL, amount: 5_000n }).entries,
+    ];
+
+    expect(projectUserBalance('u1', SOL, after)).toEqual(liabilitiesBefore);
+  });
+
+  it('posts only the fee, because both addresses map to one chain_assets account', () => {
+    const posting = postSweepFee({ sweepId: 's1', asset: SOL, amount: 5_000n });
+    expect(posting.entries).toHaveLength(2);
+    expect(isBalanced([...posting.entries])).toBe(true);
+  });
+
+  it('draws the fee from house_fees, never from pooled customer funds', () => {
+    const entries = [
+      ...funded(),
+      ...houseFunded(),
+      ...postSweepFee({ sweepId: 's1', asset: SOL, amount: 5_000n }).entries,
+    ];
+
+    const balances = projectAll(entries);
+    // Debit-positive: a credit-normal account projects negative, so the
+    // prepaid balance is read as its magnitude. It fell by exactly the fee.
+    expect(
+      balances.get(accountKey({ ownerId: null, asset: SOL, type: 'house_fees' }))?.balance,
+    ).toBe(-(ONE - 5_000n));
+    expect(checkAllInvariants(entries)).toEqual([]);
+  });
+
+  it('reports a shortfall when the platform sweeps with no prepaid balance', () => {
+    // Unfunded, the fee comes out of the assets backing user balances, and the
+    // invariants must say so rather than quietly allowing it.
+    const entries = [
+      ...funded(),
+      ...postSweepFee({ sweepId: 's1', asset: SOL, amount: 5_000n }).entries,
+    ];
+    expect(checkAllInvariants(entries).length).toBeGreaterThan(0);
+  });
+
+  it('refuses a zero or negative fee', () => {
+    expect(() => postSweepFee({ sweepId: 's1', asset: SOL, amount: 0n })).toThrow(
+      InvalidEntryError,
+    );
+  });
+});
+
+describe('token account rent (rule 118)', () => {
+  it('credits house_rent, never the user', () => {
+    const entries = [
+      ...funded(),
+      ...postTokenAccountRent({ reference: 'ata-1', nativeAsset: SOL, amount: 2_039_280n }).entries,
+    ];
+
+    const balances = projectAll(entries);
+    expect(
+      balances.get(accountKey({ ownerId: null, asset: SOL, type: 'house_rent' }))?.balance,
+    ).toBe(-2_039_280n);
+    // The user gained nothing: they cannot withdraw an account's rent.
+    expect(projectUserBalance('u1', SOL, entries).available).toBe(10n * ONE);
+  });
+
+  it('is denominated in the NATIVE asset even though it creates a token account', () => {
+    // The asymmetry worth a test: posting this against the mint would invent
+    // SOL out of USDC.
+    const posting = postTokenAccountRent({
+      reference: 'ata-1',
+      nativeAsset: SOL,
+      amount: 2_039_280n,
+    });
+    for (const entry of posting.entries) {
+      expect(entry.asset).toBe(SOL);
+    }
+  });
+
+  it('balances', () => {
+    expect(
+      isBalanced([
+        ...postTokenAccountRent({ reference: 'a', nativeAsset: SOL, amount: 1n }).entries,
+      ]),
+    ).toBe(true);
   });
 });

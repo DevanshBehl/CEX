@@ -28,6 +28,13 @@ const NOW = new Date('2026-09-11T12:00:00.000Z');
 
 const POLICY: RiskPolicy = {
   supportedAssets: [SOL],
+  assetLimits: {
+    [SOL]: {
+      perTransactionLimit: 100n * ONE_SOL,
+      dailyLimit: 250n * ONE_SOL,
+      manualReviewAbove: 25n * ONE_SOL,
+    },
+  },
   perTransactionLimit: 100n * ONE_SOL,
   dailyLimit: 250n * ONE_SOL,
   velocityWindowMinutes: 60,
@@ -298,7 +305,18 @@ describe('the engine', () => {
     expect(decision.codes).toContain('ACCOUNT_NOT_ACTIVE');
     expect(decision.codes).toContain('DESTINATION_INVALID');
     expect(decision.codes).toContain('PER_TRANSACTION_LIMIT');
-    expect(decision.evaluatedRules).toHaveLength(7);
+    // Every rule in RULES, asserted by name rather than by count so that
+    // adding one forces a deliberate update here instead of a number change.
+    expect([...decision.evaluatedRules].sort()).toEqual([
+      'account_state',
+      'amount',
+      'asset_limits_configured',
+      'daily_limit',
+      'destination',
+      'manual_review_threshold',
+      'per_transaction_limit',
+      'velocity',
+    ]);
   });
 
   it('lets a denial win over a review', () => {
@@ -363,5 +381,77 @@ describe('client messaging', () => {
     // The operator, by contrast, gets the figures.
     const outcome = decision.outcomes.find((o) => o.rule === 'per_transaction_limit');
     expect(outcome?.detail?.limit).toBe(POLICY.perTransactionLimit.toString());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-asset limits (prompt_phase4.md rule 127, ADR-0016)
+// ---------------------------------------------------------------------------
+
+describe('per-asset limits', () => {
+  const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
+  const withUsdc: RiskPolicy = {
+    ...POLICY,
+    supportedAssets: [SOL, USDC],
+    assetLimits: {
+      ...POLICY.assetLimits,
+      [USDC]: {
+        // Six decimals: 100 USDC, not 100 SOL.
+        perTransactionLimit: 100_000_000n,
+        dailyLimit: 250_000_000n,
+        manualReviewAbove: 25_000_000n,
+      },
+    },
+  };
+
+  it('applies the token limit to the token, not the SOL one', () => {
+    // 200 USDC in base units. Under the SOL limit (100 * 10^9) this sails
+    // through; under the USDC limit (100 * 10^6) it must not.
+    const decision = evaluate(input({ asset: USDC, amount: 200_000_000n }), withUsdc);
+    expect(decision.codes).toContain('PER_TRANSACTION_LIMIT');
+  });
+
+  it('approves an amount within the token limit', () => {
+    const decision = evaluate(input({ asset: USDC, amount: 50_000_000n }), withUsdc);
+    expect(decision.codes).not.toContain('PER_TRANSACTION_LIMIT');
+    expect(decision.codes).not.toContain('DAILY_LIMIT');
+  });
+
+  it('does not let a token withdrawal consume the SOL daily allowance', () => {
+    const decision = evaluate(
+      input({
+        asset: USDC,
+        amount: 10_000_000n,
+        recentWithdrawals: [
+          { asset: SOL, amount: 200n * ONE_SOL, createdAt: new Date(NOW.getTime() - 60_000) },
+        ],
+      }),
+      withUsdc,
+    );
+    expect(decision.codes).not.toContain('DAILY_LIMIT');
+  });
+
+  it('DENIES an allowlisted asset that has no limits configured', () => {
+    // The core of rule 127. Falling back to SOL's numbers would permit a
+    // thousand times the intended value.
+    const noLimits: RiskPolicy = { ...POLICY, supportedAssets: [SOL, USDC] };
+    const decision = evaluate(input({ asset: USDC, amount: 1n }), noLimits);
+
+    expect(decision.verdict).toBe('deny');
+    expect(decision.codes).toContain('ASSET_LIMITS_NOT_CONFIGURED');
+    // And it does not ALSO report a limit breach it could not have measured.
+    expect(decision.codes).not.toContain('PER_TRANSACTION_LIMIT');
+  });
+
+  it('tells the user nothing about which limit or asset', () => {
+    const noLimits: RiskPolicy = { ...POLICY, supportedAssets: [SOL, USDC] };
+    const decision = evaluate(input({ asset: USDC, amount: 1n }), noLimits);
+    expect(toClientMessage(decision.codes)).toBe('That asset is not supported.');
+  });
+
+  it('reviews a large token amount against the token threshold', () => {
+    const decision = evaluate(input({ asset: USDC, amount: 30_000_000n }), withUsdc);
+    expect(decision.codes).toContain('MANUAL_REVIEW_THRESHOLD');
   });
 });

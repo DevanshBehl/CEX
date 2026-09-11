@@ -47,7 +47,10 @@
         "SOLANA_*",
         "DEPOSIT_SEED",
         "SUPPORTED_ASSETS",
-        "INDEXER_*"
+        "INDEXER_*",
+        "MPC_*",
+        "TOKEN_MINTS",
+        "USE_CONFIGURED_SIGNER"
       ]
     },
     "dev": {
@@ -74,7 +77,13 @@
         "TREASURY_ADDRESS",
         "NONCE_POOL_SIZE",
         "OPERATOR_USER_IDS",
-        "MIGRATION_DATABASE_URL"
+        "MIGRATION_DATABASE_URL",
+        "SOLANA_*",
+        "DEPOSIT_SEED",
+        "SUPPORTED_ASSETS",
+        "INDEXER_*",
+        "MPC_*",
+        "TOKEN_MINTS"
       ]
     },
     "generate": {

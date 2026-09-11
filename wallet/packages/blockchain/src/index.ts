@@ -15,3 +15,16 @@ export {
   type MockSigner,
   type MockSignerOptions,
 } from './signers/mock.js';
+export {
+  checkTierAuthorization,
+  CUSTODY_TIERS,
+  parseAuthorities,
+  planRebalance,
+  tierForWithdrawal,
+  TIER_POLICIES,
+  type Authority,
+  type CustodyTier,
+  type RebalancePlan,
+  type TierCheck,
+  type TierPolicy,
+} from './custody.js';

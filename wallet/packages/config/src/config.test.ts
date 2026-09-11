@@ -178,3 +178,69 @@ describe('apiConfig', () => {
     expect(Object.isFrozen(cfg.session)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The mint allowlist (ADR-0016, prompt_phase4.md rules 114, 124)
+// ---------------------------------------------------------------------------
+
+describe('TOKEN_MINTS', () => {
+  const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  const USDT = 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB';
+
+  it('defaults to no tokens, so an existing deployment is unchanged', () => {
+    const config = toApiConfig(parseEnv(valid));
+    expect(config.chain.assets.tokens).toEqual([]);
+    expect(config.chain.assets.keys).toEqual(['SOL']);
+  });
+
+  it('parses SYMBOL:MINT:DECIMALS and keys the registry on the mint', () => {
+    const config = toApiConfig(
+      parseEnv({ ...valid, TOKEN_MINTS: `USDC:${USDC}:6,USDT:${USDT}:6` }),
+    );
+    expect(config.chain.assets.keys).toEqual(['SOL', USDC, USDT]);
+    expect(config.chain.assets.isAllowed(USDC)).toBe(true);
+    expect(config.chain.assets.isAllowed('USDC')).toBe(false);
+  });
+
+  it('rejects a mint that is not a base58 address', () => {
+    expect(() => parseEnv({ ...valid, TOKEN_MINTS: 'USDC:not-an-address-0OIl:6' })).toThrow(
+      ConfigValidationError,
+    );
+  });
+
+  it('rejects an entry that is missing a field', () => {
+    expect(() => parseEnv({ ...valid, TOKEN_MINTS: `USDC:${USDC}` })).toThrow(
+      ConfigValidationError,
+    );
+  });
+
+  it('rejects nonsense decimals', () => {
+    expect(() => parseEnv({ ...valid, TOKEN_MINTS: `USDC:${USDC}:99` })).toThrow(
+      ConfigValidationError,
+    );
+    expect(() => parseEnv({ ...valid, TOKEN_MINTS: `USDC:${USDC}:six` })).toThrow(
+      ConfigValidationError,
+    );
+  });
+
+  it('rejects the same mint listed twice', () => {
+    // Two asset keys for one asset splits a user's balance in half silently.
+    expect(() => parseEnv({ ...valid, TOKEN_MINTS: `USDC:${USDC}:6,USDC2:${USDC}:6` })).toThrow(
+      ConfigValidationError,
+    );
+  });
+
+  it('rejects two mints claiming the same symbol', () => {
+    expect(() => parseEnv({ ...valid, TOKEN_MINTS: `USDC:${USDC}:6,usdc:${USDT}:6` })).toThrow(
+      ConfigValidationError,
+    );
+  });
+
+  it('rejects a mint that claims to be the native asset', () => {
+    // This is the confusion the allowlist exists to prevent, so it must not be
+    // expressible in the first place.
+    expect(() => parseEnv({ ...valid, TOKEN_MINTS: `SOL:${USDC}:9` })).toThrow(
+      ConfigValidationError,
+    );
+  });
+});

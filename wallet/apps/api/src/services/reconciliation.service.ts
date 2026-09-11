@@ -1,6 +1,7 @@
 import type { ChainReader } from '@wallet/blockchain';
 import { createLedgerRepository, type PrismaClient } from '@wallet/db';
 import { logSecurityEvent, type Logger } from '@wallet/logger';
+import { IN_FLIGHT_WITHDRAWAL_STATUSES } from '@wallet/types';
 
 export interface AssetReconciliation {
   readonly asset: string;
@@ -19,12 +20,26 @@ export interface AssetReconciliation {
   readonly residual: string;
   readonly addressesChecked: number;
   readonly explanation: string;
+  /**
+   * True when the residual is negative AND nothing is in flight (rule 148).
+   *
+   * A negative residual means the ledger claims more than the chain holds.
+   * While a withdrawal is mid-flight that is ordinary: the funds have left but
+   * settlement has not posted. With nothing in flight it is not ordinary at
+   * all — it means a credit exists for money that never arrived, or money left
+   * without an entry. Those are the two worst things the books can say.
+   */
+  readonly unexplainedShortfall: boolean;
 }
 
 export interface ReconciliationReport {
   readonly runAt: string;
   readonly assets: readonly AssetReconciliation[];
   readonly healthy: boolean;
+  /** Deposit addresses + nonce accounts + custody tiers (rule 141). */
+  readonly addressesConsidered: number;
+  /** Withdrawals that have left the ledger but not yet settled. */
+  readonly withdrawalsInFlight: number;
 }
 
 export interface ReconciliationDeps {
@@ -32,6 +47,15 @@ export interface ReconciliationDeps {
   readonly reader: ChainReader;
   readonly chain: string;
   readonly logger: Logger;
+  /**
+   * Platform addresses that are not user deposit addresses: the treasury and
+   * each custody tier (rule 141, ADR-0018).
+   *
+   * Phase 3 left these outside the comparison, which made every residual
+   * approximate by exactly the treasury balance — and an approximate
+   * reconciliation cannot distinguish "fine" from "slightly wrong".
+   */
+  readonly platformAddresses?: readonly string[];
 }
 
 /**
@@ -53,9 +77,41 @@ export function createReconciliationService(deps: ReconciliationDeps) {
   return {
     async run(): Promise<ReconciliationReport> {
       const totals = await ledger.getAssetTotals();
-      const addresses = await deps.db.address.findMany({
-        where: { chain: deps.chain, status: 'active' },
-        select: { address: true },
+
+      /**
+       * EVERY platform-owned address (rule 141).
+       *
+       * Three sources, because the platform's funds live in three places:
+       * user deposit addresses, the durable nonce accounts (each holding a
+       * rent-exempt minimum that is real money), and the treasury or custody
+       * tiers. Omitting the nonce accounts was the Phase 3 gap — five accounts
+       * times the rent minimum is a small, permanent, unexplainable residual,
+       * and a permanently non-zero residual trains operators to ignore the
+       * report.
+       */
+      const [depositAddresses, nonceAccounts] = await Promise.all([
+        deps.db.address.findMany({
+          where: { chain: deps.chain, status: 'active' },
+          select: { address: true },
+        }),
+        deps.db.nonceAccount.findMany({
+          where: { chain: deps.chain, status: { not: 'retired' } },
+          select: { address: true },
+        }),
+      ]);
+
+      const addresses = [
+        ...depositAddresses,
+        ...nonceAccounts,
+        ...(deps.platformAddresses ?? []).map((address) => ({ address })),
+      ].filter(
+        // A treasury that is also a configured tier would otherwise be counted
+        // twice, which reads as a surplus exactly the size of the hot wallet.
+        (entry, index, all) => all.findIndex((e) => e.address === entry.address) === index,
+      );
+
+      const withdrawalsInFlight = await deps.db.withdrawal.count({
+        where: { status: { in: [...IN_FLIGHT_WITHDRAWAL_STATUSES] } },
       });
 
       const assets: AssetReconciliation[] = [];
@@ -77,6 +133,7 @@ export function createReconciliationService(deps: ReconciliationDeps) {
 
         const ledgerAssets = BigInt(total.chainAssets);
         const residual = observed - ledgerAssets;
+        const unexplainedShortfall = residual < 0n && withdrawalsInFlight === 0;
 
         assets.push({
           asset: total.asset,
@@ -87,7 +144,8 @@ export function createReconciliationService(deps: ReconciliationDeps) {
           houseFees: total.houseFees,
           residual: residual.toString(),
           addressesChecked: checked,
-          explanation: explain(residual, checked, addresses.length),
+          explanation: explain(residual, checked, addresses.length, withdrawalsInFlight),
+          unexplainedShortfall,
         });
       }
 
@@ -101,12 +159,33 @@ export function createReconciliationService(deps: ReconciliationDeps) {
         { outcome: healthy ? 'success' : 'failure', count: assets.length },
       );
 
-      return { runAt: new Date().toISOString(), assets, healthy };
+      // Rule 148. Escalated separately from ordinary drift because it is a
+      // different severity: ordinary drift is usually timing, this is not.
+      const shortfalls = assets.filter((a) => a.unexplainedShortfall);
+      if (shortfalls.length > 0) {
+        logSecurityEvent(deps.logger, 'reconciliation.negative_residual', {
+          outcome: 'failure',
+          count: shortfalls.length,
+        });
+      }
+
+      return {
+        runAt: new Date().toISOString(),
+        assets,
+        healthy,
+        addressesConsidered: addresses.length,
+        withdrawalsInFlight,
+      };
     },
   };
 }
 
-function explain(residual: bigint, checked: number, total: number): string {
+function explain(
+  residual: bigint,
+  checked: number,
+  total: number,
+  withdrawalsInFlight: number,
+): string {
   if (checked < total) {
     return `${total - checked} of ${total} addresses could not be read; the observed total is a lower bound.`;
   }
@@ -116,7 +195,10 @@ function explain(residual: bigint, checked: number, total: number): string {
     // finality yet, so it is on-chain and not yet in the books.
     return `The chain holds ${residual} base units more than the ledger. Expected when deposits are detected but not yet finalized (ADR-0006); investigate if it persists across cycles.`;
   }
-  // Never expected while Phase 2 cannot send. This means funds left without a
-  // ledger entry, or a credit was posted for money that never arrived.
-  return `The ledger claims ${-residual} base units more than the chain holds. Phase 2 cannot send funds, so this indicates a credit without a corresponding transfer. Investigate immediately.`;
+  if (withdrawalsInFlight > 0) {
+    // Ordinary: the funds have left the chain but settlement has not posted.
+    return `The ledger claims ${-residual} base units more than the chain holds, with ${withdrawalsInFlight} withdrawal(s) in flight. Expected while a broadcast transaction has not settled; investigate if it persists after they finish.`;
+  }
+  // The worst thing the books can say (rule 148).
+  return `The ledger claims ${-residual} base units more than the chain holds, and NOTHING is in flight. A credit exists for money that never arrived, or funds left without an entry. Investigate immediately.`;
 }

@@ -60,8 +60,33 @@ export type DestinationCheck =
   | { readonly ok: true; readonly isPlatformOwned: boolean }
   | { readonly ok: false; readonly reason: 'invalid' | 'not_signable' };
 
+/**
+ * Value limits for ONE asset (prompt_phase4.md rule 127).
+ *
+ * Limits are denominated in an asset's own base units, and base units mean
+ * different things per asset: 1 SOL is 10^9 lamports, 1 USDC is 10^6. A single
+ * number applied to both is wrong by three orders of magnitude — and wrong in
+ * the dangerous direction, because the SOL-shaped number is the larger one.
+ */
+export interface AssetLimits {
+  readonly perTransactionLimit: Amount;
+  readonly dailyLimit: Amount;
+  readonly manualReviewAbove: Amount;
+}
+
 export interface RiskPolicy {
   readonly supportedAssets: readonly string[];
+  /**
+   * Per-asset limits, keyed by ledger asset key (`SOL`, or a mint address).
+   *
+   * An asset absent from this map has NO limits, and a withdrawal of it is
+   * denied rather than falling back to another asset's numbers. Failing closed
+   * is the whole point: an allowlisted mint with no configured limits is a
+   * configuration gap, and the safe reading of a gap is zero, not "whatever
+   * SOL uses".
+   */
+  readonly assetLimits: Readonly<Record<string, AssetLimits>>;
+  /** @deprecated Native-asset limits. Kept so existing callers still compile. */
   readonly perTransactionLimit: Amount;
   readonly dailyLimit: Amount;
   readonly velocityWindowMinutes: number;

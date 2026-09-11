@@ -71,11 +71,23 @@ test.describe('deposit journey', () => {
 
   test('the dashboard is honest about what is not real yet', async ({ page }) => {
     await register(page);
-    // Phase 2 asserted "withdrawals are not available yet". Phase 3 built them,
-    // so the wording changed — but the property did not: the UI says plainly
-    // what is still a mock rather than letting anyone assume otherwise
-    // (master-prompt rule 8).
-    await expect(page.locator('main')).toContainText(/signing is not real yet/i);
+
+    /**
+     * The PROPERTY, not the wording.
+     *
+     * Phase 2 asserted "withdrawals are not available yet". Phase 3 built them
+     * and the wording changed. Phase 4 shipped a real signing service and it
+     * changed again — and each time, a test pinned to the exact sentence
+     * failed for the wrong reason: not because the UI became dishonest, but
+     * because it became more accurate.
+     *
+     * What must hold is that the page states the limitation plainly and never
+     * overstates it (master-prompt rule 8).
+     */
+    const main = page.locator('main');
+    await expect(main).toContainText(/signing is (not real yet|real, and it is a single key)/i);
+    await expect(main).toContainText(/mock|not been audited|not yet threshold/i);
+    await expect(main).not.toContainText(/production[- ]safe|fully audited/i);
   });
 
   test('a deposit address is not reachable while signed out', async ({ page }) => {

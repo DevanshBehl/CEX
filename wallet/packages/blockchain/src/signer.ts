@@ -19,6 +19,8 @@
  * at, and this type deliberately carries no field that could reveal it
  * (master-prompt rules 99-100).
  */
+import type { CustodyTier } from './custody.js';
+
 export interface KeyRef {
   readonly id: string;
 }
@@ -36,6 +38,15 @@ export interface AuthorizationProof {
   readonly approvedAt: string;
   readonly policyVersion: string;
   readonly reference: string;
+  /**
+   * Which custody tier this movement is from (ADR-0018).
+   *
+   * The signing boundary derives the tier's authority requirements from this
+   * and refuses a proof that does not carry them. Absent means the default
+   * tier, which is the working float — the tier every withdrawal came from
+   * before tiers existed.
+   */
+  readonly tier?: CustodyTier;
   /**
    * base64 Ed25519 signature by the approval authority, over the proof bound
    * to the payload hash (see `signAuthorization`).

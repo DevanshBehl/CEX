@@ -26,6 +26,11 @@ export const REASON_CODES = [
   'DAILY_LIMIT',
   'VELOCITY_LIMIT',
   'MANUAL_REVIEW_THRESHOLD',
+  /**
+   * The asset is allowlisted for deposit but has no configured withdrawal
+   * limits. Denied rather than defaulted (prompt_phase4.md rule 127).
+   */
+  'ASSET_LIMITS_NOT_CONFIGURED',
 
   // --- input ---
   'AMOUNT_NOT_POSITIVE',
@@ -73,7 +78,7 @@ export function toClientMessage(codes: readonly ReasonCode[]): string {
   if (codes.includes('AMOUNT_NOT_POSITIVE')) {
     return 'Enter an amount greater than zero.';
   }
-  if (codes.includes('ASSET_NOT_SUPPORTED')) {
+  if (codes.includes('ASSET_NOT_SUPPORTED') || codes.includes('ASSET_LIMITS_NOT_CONFIGURED')) {
     return 'That asset is not supported.';
   }
   // Every limit collapses into one message on purpose.

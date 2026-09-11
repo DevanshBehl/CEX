@@ -6,6 +6,7 @@
 //! making actual requests to it.
 
 pub mod auth;
+pub mod custody;
 pub mod error;
 pub mod http;
 pub mod keystore;

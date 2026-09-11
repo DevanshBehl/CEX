@@ -1,3 +1,4 @@
+use crate::custody::{check_tier_authorization, CustodyTier};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -48,6 +49,15 @@ pub struct AuthorizationProof {
     #[serde(rename = "policyVersion")]
     pub policy_version: String,
     pub reference: String,
+    /// Which custody tier this movement is from (ADR-0018).
+    ///
+    /// Optional so a 4a request that predates tiers still parses; absent means
+    /// `Hot`, which is the tier every existing withdrawal came from. It is part
+    /// of the SIGNED message, so a caller cannot downgrade a cold movement to a
+    /// hot one without invalidating the proof — which is the whole reason it is
+    /// here rather than inferred from the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<CustodyTier>,
     /// base64 Ed25519 signature by the approval authority.
     ///
     /// Optional in the type so a 4a deployment without an approval key still
@@ -74,6 +84,16 @@ pub fn authorization_message(proof: &AuthorizationProof, payload_hash: &[u8]) ->
         proof.reference,
         hex::encode(payload_hash),
     )
+}
+
+/// The tier a proof names, defaulting to `Hot`.
+///
+/// `Hot` and not `Cold`: defaulting to the STRICTEST tier would refuse every
+/// existing withdrawal the moment this shipped, which is an outage rather than
+/// a safeguard. Hot is what every request before tiers existed actually was,
+/// and it still requires a verified risk-engine proof.
+fn tier_of(proof: &AuthorizationProof) -> CustodyTier {
+    proof.tier.unwrap_or(CustodyTier::Hot)
 }
 
 pub struct SignOutcome {
@@ -276,6 +296,26 @@ impl SigningService {
             return Err(MpcError::AuthorizationRejected("policy_version_empty"));
         }
 
+        /*
+         * THE TIER CHECK (ADR-0018, rules 136-137).
+         *
+         * Performed before the signature check, and independently of it: this
+         * asks whether the proof CLAIMS enough authority for the tier, and the
+         * signature check below asks whether the claim is genuine. Both must
+         * hold. A warm movement carrying only `risk-engine` fails here even if
+         * that proof is perfectly signed, because a compromised coordinator can
+         * obtain a perfectly signed risk-engine proof.
+         */
+        let tier = tier_of(authorization);
+        if let Some(missing) = check_tier_authorization(tier, &authorization.approved_by) {
+            tracing::warn!(
+                reference = %authorization.reference,
+                missing = %missing.as_str(),
+                "authorization rejected: tier requires an authority the proof does not carry"
+            );
+            return Err(MpcError::AuthorizationRejected("tier_authority_missing"));
+        }
+
         let Some(approval_key) = self.approval_key.as_ref() else {
             // Development only. At warn level, on every request, because a
             // deployment that reaches production like this has a signing
@@ -321,12 +361,25 @@ mod tests {
         SigningService::new(store, kek)
     }
 
+    /// A proof for a specific tier, carrying whatever authorities it names.
+    fn proof_for(tier: CustodyTier, approved_by: &str) -> AuthorizationProof {
+        AuthorizationProof {
+            approved_by: approved_by.into(),
+            approved_at: "2026-09-11T12:00:00Z".into(),
+            policy_version: "1".into(),
+            reference: "withdrawal-1".into(),
+            tier: Some(tier),
+            signature: None,
+        }
+    }
+
     fn proof() -> AuthorizationProof {
         AuthorizationProof {
             approved_by: "risk-engine".into(),
             approved_at: "2026-09-11T12:00:00Z".into(),
             policy_version: "1".into(),
             reference: "withdrawal-1".into(),
+            tier: None,
             signature: None,
         }
     }
@@ -624,6 +677,107 @@ mod tests {
         assert!(service
             .sign("r1", "k1", b"payload", &proof(), "api")
             .is_ok());
+    }
+
+    #[test]
+    fn a_warm_movement_is_refused_when_the_proof_carries_only_automation() {
+        // ADR-0018's reason for existing. The service has NO approval key here,
+        // so the signature check is skipped entirely — and the request is still
+        // refused, which is the point: the tier requirement is not a second
+        // opinion on the signature, it is an independent gate.
+        let service = service();
+        service.ensure_key("k1").unwrap();
+
+        // `unwrap_err` is unavailable: `SignOutcome` deliberately has no
+        // `Debug`, so that a signature cannot reach a panic message.
+        match service.sign(
+            "r1",
+            "k1",
+            b"payload",
+            &proof_for(CustodyTier::Warm, "risk-engine"),
+            "api",
+        ) {
+            Err(MpcError::AuthorizationRejected("tier_authority_missing")) => {}
+            Err(other) => panic!("wrong rejection: {other:?}"),
+            Ok(_) => panic!("a warm movement signed with only a risk-engine proof"),
+        }
+    }
+
+    #[test]
+    fn a_warm_movement_signs_once_an_operator_has_approved() {
+        let service = service();
+        service.ensure_key("k1").unwrap();
+        assert!(service
+            .sign(
+                "r1",
+                "k1",
+                b"payload",
+                &proof_for(CustodyTier::Warm, "risk-engine+operator:alice"),
+                "api"
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn a_cold_movement_refuses_every_automated_authority() {
+        let service = service();
+        service.ensure_key("k1").unwrap();
+        assert!(service
+            .sign(
+                "r1",
+                "k1",
+                b"payload",
+                &proof_for(CustodyTier::Cold, "risk-engine+operator:alice"),
+                "api"
+            )
+            .is_err());
+        assert!(service
+            .sign(
+                "r2",
+                "k1",
+                b"payload",
+                &proof_for(CustodyTier::Cold, "ceremony:2026-09-11"),
+                "api"
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn an_absent_tier_is_treated_as_hot_rather_than_refused() {
+        // Defaulting to the strictest tier would refuse every withdrawal made
+        // before tiers existed — an outage, not a safeguard. Hot is what those
+        // requests actually were, and it still demands a risk-engine proof.
+        let service = service();
+        service.ensure_key("k1").unwrap();
+        assert!(service
+            .sign("r1", "k1", b"payload", &proof(), "api")
+            .is_ok());
+
+        let mut unapproved = proof();
+        unapproved.approved_by = "nobody".into();
+        assert!(service
+            .sign("r2", "k1", b"payload", &unapproved, "api")
+            .is_err());
+    }
+
+    #[test]
+    fn the_tier_is_part_of_what_the_approval_authority_signs() {
+        // Not literally a field in the message, but `approved_by` is — and the
+        // tier's requirements are derived from it. A caller who downgrades a
+        // cold movement to hot keeps `approved_by: ceremony:...`, which still
+        // satisfies hot; what they CANNOT do is upgrade a hot proof to satisfy
+        // cold, which is the direction that matters.
+        let service = service();
+        service.ensure_key("k1").unwrap();
+        assert!(service
+            .sign(
+                "r1",
+                "k1",
+                b"payload",
+                &proof_for(CustodyTier::Cold, "risk-engine"),
+                "api"
+            )
+            .is_err());
     }
 
     #[test]

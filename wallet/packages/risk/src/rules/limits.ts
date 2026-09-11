@@ -1,4 +1,35 @@
-import type { Rule, RiskInput, RiskPolicy } from '../types.js';
+import type { AssetLimits, Rule, RiskInput, RiskPolicy } from '../types.js';
+
+/**
+ * The limits for the asset being withdrawn (prompt_phase4.md rule 127).
+ *
+ * Returns undefined when the asset has none configured. Every value rule then
+ * declines rather than reaching for another asset's numbers — see
+ * `assetLimitsConfiguredRule` for why that is a denial and not a default.
+ */
+function limitsFor(input: RiskInput, policy: RiskPolicy): AssetLimits | undefined {
+  return policy.assetLimits[input.asset];
+}
+
+/**
+ * An allowlisted asset with no configured limits is not withdrawable.
+ *
+ * The alternative — falling back to the native asset's numbers — silently
+ * applies a limit denominated in 10^9 units to an asset denominated in 10^6,
+ * which is a limit a thousand times too generous. A configuration gap should
+ * cost a support ticket, not a treasury.
+ */
+export const assetLimitsConfiguredRule: Rule = (input, policy) => {
+  if (limitsFor(input, policy) === undefined) {
+    return {
+      rule: 'asset_limits_configured',
+      verdict: 'deny',
+      codes: ['ASSET_LIMITS_NOT_CONFIGURED'],
+      detail: { asset: input.asset },
+    };
+  }
+  return { rule: 'asset_limits_configured', verdict: 'approve', codes: [] };
+};
 
 /** Input sanity, before any limit is meaningful. */
 export const amountRule: Rule = (input, policy) => {
@@ -14,15 +45,23 @@ export const amountRule: Rule = (input, policy) => {
 
 /** A cap on any single withdrawal (master-prompt rule 146). */
 export const perTransactionLimitRule: Rule = (input, policy) => {
-  if (input.amount > policy.perTransactionLimit) {
+  const limits = limitsFor(input, policy);
+  // Unconfigured is already denied by `assetLimitsConfiguredRule`; this rule
+  // abstains rather than reporting a second, more confusing reason.
+  if (limits === undefined) {
+    return { rule: 'per_transaction_limit', verdict: 'approve', codes: [] };
+  }
+
+  if (input.amount > limits.perTransactionLimit) {
     return {
       rule: 'per_transaction_limit',
       verdict: 'deny',
       codes: ['PER_TRANSACTION_LIMIT'],
       // Operator-visible only. The client is told a generic message.
       detail: {
+        asset: input.asset,
         amount: input.amount.toString(),
-        limit: policy.perTransactionLimit.toString(),
+        limit: limits.perTransactionLimit.toString(),
       },
     };
   }
@@ -37,19 +76,25 @@ export const perTransactionLimitRule: Rule = (input, policy) => {
  * ninety seconds apart, for no reason but an arbitrary boundary.
  */
 export const dailyLimitRule: Rule = (input, policy) => {
+  const limits = limitsFor(input, policy);
+  if (limits === undefined) {
+    return { rule: 'daily_limit', verdict: 'approve', codes: [] };
+  }
+
   const cutoff = new Date(input.now.getTime() - 24 * 60 * 60 * 1000);
   const trailing = sumSince(input, cutoff);
   const projected = trailing + input.amount;
 
-  if (projected > policy.dailyLimit) {
+  if (projected > limits.dailyLimit) {
     return {
       rule: 'daily_limit',
       verdict: 'deny',
       codes: ['DAILY_LIMIT'],
       detail: {
+        asset: input.asset,
         trailing: trailing.toString(),
         projected: projected.toString(),
-        limit: policy.dailyLimit.toString(),
+        limit: limits.dailyLimit.toString(),
       },
     };
   }
@@ -90,14 +135,20 @@ export const velocityRule: Rule = (input, policy) => {
  * ones, which defeats the limit entirely.
  */
 export const manualReviewThresholdRule: Rule = (input, policy) => {
-  if (input.amount >= policy.manualReviewAbove) {
+  const limits = limitsFor(input, policy);
+  if (limits === undefined) {
+    return { rule: 'manual_review_threshold', verdict: 'approve', codes: [] };
+  }
+
+  if (input.amount >= limits.manualReviewAbove) {
     return {
       rule: 'manual_review_threshold',
       verdict: 'review',
       codes: ['MANUAL_REVIEW_THRESHOLD'],
       detail: {
+        asset: input.asset,
         amount: input.amount.toString(),
-        threshold: policy.manualReviewAbove.toString(),
+        threshold: limits.manualReviewAbove.toString(),
       },
     };
   }

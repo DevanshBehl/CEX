@@ -76,6 +76,36 @@ jobs:
       - name: Formatting
         run: pnpm format:check
 
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 11 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # prompt_phase4.md rule 164. The policy lives in
+      # docs/security/dependency-exceptions.md and is ENFORCED by the script:
+      # a high or critical advisory fails the build unless that package is
+      # documented there with a reason and a date. A newly introduced
+      # vulnerability is not on the list, so it still breaks CI.
+      #
+      # Deliberately not `pnpm audit --audit-level high || true`. A custody
+      # system whose CI is green with a known-critical dependency is green
+      # about the wrong thing.
+      - name: JavaScript dependencies
+        run: node scripts/audit.mjs
+
+      - name: Rust dependencies
+        run: |
+          cargo install cargo-audit --locked
+          cd services/mpc && cargo audit --deny warnings
+
   boundaries:
     name: Architectural boundaries actually bite
     runs-on: ubuntu-latest
@@ -207,6 +237,9 @@ jobs:
           done
           echo "validator never became healthy"; exit 1
 
+      # Includes the SPL token test, which is the only check that the
+      # hand-written `Transfer` encoding is accepted by the real program. Every
+      # possible mistake in it is silent under unit tests and fatal on-chain.
       - run: pnpm --filter @wallet/solana test:integration
       - run: pnpm --filter @wallet/api test:integration
 

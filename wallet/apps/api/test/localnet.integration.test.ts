@@ -81,35 +81,49 @@ describe('end to end on localnet', () => {
 
     await h.app.indexer!.runOnce();
 
-    // Asserted on THIS user's deposits rather than the cycle's credit count:
-    // the watch set is shared across suites, so a global counter measures
-    // whatever else happens to be pending.
-    expect(await h.app.appDeps.db.deposit.count({ where: { userId: session.userId } })).toBe(1);
-
-    // Visible to the user, minus the rent-exempt minimum the network requires
-    // for the account to exist (rules 157-158).
-    const after = (
-      await h.app.inject({ method: 'GET', url: '/balances', headers: { cookie: session.cookie } })
-    ).json();
-    const sol = after.balances.find((b: { asset: string }) => b.asset === NATIVE_ASSET);
-
-    const credited = BigInt(sol.available);
-    expect(credited).toBeGreaterThan(0n);
-    expect(credited).toBeLessThan(BigInt(2 * LAMPORTS_PER_SOL));
+    /**
+     * Asserted on THIS AIRDROP's signature, not on a count of the user's
+     * deposits.
+     *
+     * Deposit addresses are derived deterministically from `DEPOSIT_SEED` at a
+     * sequential index (ADR-0004). Resetting the database restarts that index
+     * while the validator keeps its ledger, so a re-issued address arrives
+     * carrying every airdrop a previous run sent it — and a per-user count
+     * then grows by one on each run against a long-lived validator.
+     *
+     * The signature is unique to this run, so this asserts the thing the test
+     * is actually about: one transfer produced exactly one deposit.
+     */
+    expect(await h.app.appDeps.db.deposit.count({ where: { txSignature: signature } })).toBe(1);
 
     // The deposit is recorded with its on-chain reference (rule 159).
     const deposits = (
       await h.app.inject({ method: 'GET', url: '/deposits', headers: { cookie: session.cookie } })
     ).json();
-    expect(deposits.deposits[0].txSignature).toBe(signature);
-    expect(deposits.deposits[0].status).toBe('credited');
-    expect(deposits.deposits[0].amount).toBe(String(2 * LAMPORTS_PER_SOL));
+    const deposit = deposits.deposits.find(
+      (d: { txSignature: string }) => d.txSignature === signature,
+    );
+    expect(deposit).toBeDefined();
+    expect(deposit.status).toBe('credited');
+    expect(deposit.amount).toBe(String(2 * LAMPORTS_PER_SOL));
 
-    // amount = creditedAmount + rentReserved, exactly. Nothing is lost.
-    const deposit = deposits.deposits[0];
+    // amount = creditedAmount + rentReserved, exactly. Nothing is lost — any
+    // rent-exempt minimum went to house_rent, not to the user (rules 157-158).
+    // `rentReserved` is zero when the address already existed on chain, which
+    // is the case for a re-issued address, so the identity is what holds here
+    // rather than a positive reservation.
     expect(BigInt(deposit.creditedAmount) + BigInt(deposit.rentReserved)).toBe(
       BigInt(deposit.amount),
     );
+
+    // Visible to the user. Asserted as "at least what this deposit credited"
+    // rather than an exact total, for the address-reuse reason above: a
+    // re-issued address may have carried in older airdrops of its own.
+    const after = (
+      await h.app.inject({ method: 'GET', url: '/balances', headers: { cookie: session.cookie } })
+    ).json();
+    const sol = after.balances.find((b: { asset: string }) => b.asset === NATIVE_ASSET);
+    expect(BigInt(sol.available)).toBeGreaterThanOrEqual(BigInt(deposit.creditedAmount));
   });
 
   it('is idempotent across repeated cycles against the real chain', async () => {
@@ -124,7 +138,9 @@ describe('end to end on localnet', () => {
 
     for (let i = 0; i < 3; i += 1) await h.app.indexer!.runOnce();
 
-    expect(await h.app.appDeps.db.deposit.count({ where: { userId: session.userId } })).toBe(1);
+    // Three cycles over the same transfer, one deposit. Keyed on the
+    // signature for the reason given above.
+    expect(await h.app.appDeps.db.deposit.count({ where: { txSignature: signature } })).toBe(1);
   });
 
   it('reconciles against the real chain with no unexplained residual', async () => {

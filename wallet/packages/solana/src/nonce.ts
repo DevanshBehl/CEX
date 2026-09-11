@@ -133,3 +133,85 @@ export function generateNonceAccountAddress(): { address: string; keypair: Keypa
 }
 
 export { NONCE_ACCOUNT_LENGTH, PublicKey };
+
+/**
+ * The outcome of creating one durable nonce account on chain.
+ *
+ * `nonce` is read back from the initialised account rather than assumed: the
+ * value a withdrawal must be built on is whatever the chain says it is.
+ */
+export interface NonceProvisionResult {
+  readonly address: string;
+  readonly nonce: string;
+  readonly lamports: string;
+  readonly transactionSignature: string;
+}
+
+/**
+ * Create and initialise one durable nonce account, paid for by `payer`.
+ *
+ * WHY THIS LIVES HERE AND NOT IN A SCRIPT
+ *
+ * Creating a nonce account needs two signatures: the payer's, which is custody
+ * key material and therefore only ever produced by the signer behind the MPC
+ * boundary, and the new account's own, which is ephemeral and exists purely to
+ * prove the address was not squatted. Only `packages/solana` may touch the
+ * chain SDK (prompt_phase2.md rules 98-101), so the assembly belongs here and
+ * the caller supplies `signPayer` without learning what signs.
+ *
+ * The ephemeral keypair never leaves this function and is not custody material:
+ * once `nonceInitialize` names `authority`, only the authority can advance or
+ * withdraw from the account.
+ */
+export async function provisionNonceAccount(input: {
+  readonly nonces: NonceManager;
+  readonly broadcast: (signedTransaction: Uint8Array) => Promise<{ signature: string }>;
+  readonly payer: string;
+  readonly authority: string;
+  readonly signPayer: (message: Uint8Array) => Promise<Uint8Array>;
+  /** Polled until the account reports a nonce. Defaults to 60 x 1s. */
+  readonly confirmAttempts?: number;
+  readonly confirmIntervalMs?: number;
+}): Promise<NonceProvisionResult> {
+  const lamports = await input.nonces.getRentExemptMinimum();
+  const { address, keypair } = generateNonceAccountAddress();
+
+  const transaction = await input.nonces.buildCreateTransaction({
+    payer: input.payer,
+    nonceAccount: address,
+    authority: input.authority,
+    lamports,
+  });
+
+  // The new account signs for itself; the payer signs through the MPC
+  // boundary. Both sign the identical message — `serializeMessage` does not
+  // depend on the signatures already attached.
+  transaction.partialSign(keypair);
+  const signature = await input.signPayer(new Uint8Array(transaction.serializeMessage()));
+  if (signature.length !== 64) {
+    throw new ChainError(`Signer returned ${signature.length} bytes, expected 64`);
+  }
+  transaction.addSignature(toPublicKey(input.payer), Buffer.from(signature));
+
+  const { signature: transactionSignature } = await input.broadcast(
+    new Uint8Array(transaction.serialize({ requireAllSignatures: true, verifySignatures: true })),
+  );
+
+  // Read the nonce back rather than trusting the broadcast. Until the account
+  // is finalised there is no nonce to build a withdrawal on, and recording one
+  // that does not exist yet would hand the pool an unusable lease.
+  const attempts = input.confirmAttempts ?? 60;
+  const intervalMs = input.confirmIntervalMs ?? 1_000;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const state = await input.nonces.readNonce(address);
+    if (state !== null) {
+      return { address, nonce: state.nonce, lamports, transactionSignature };
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  throw new ChainError(
+    `Nonce account ${address} did not appear on chain after ${String(attempts)} attempts`,
+  );
+}

@@ -271,3 +271,81 @@ function requirePositive(amount: Amount, reference: string, what: string): void 
     throw new InvalidEntryError(`${what}_amount_not_positive`, { reference });
   }
 }
+
+/**
+ * The network fee a sweep pays (ADR-0017, prompt_phase4.md rule 131).
+ *
+ * WHY A SWEEP POSTS ONLY ITS FEE, AND NOT A TRANSFER
+ *
+ * A sweep moves value from a deposit address to the hot wallet. Both are the
+ * platform's, and the chart of accounts has exactly ONE `chain_assets` account
+ * per asset (`ownerId` is null for it) — there is no per-tier dimension. So
+ * the ledger's answer to "how much does the platform control" is identical
+ * before and after, and a transfer entry would have to debit and credit the
+ * same account, which is not an entry at all.
+ *
+ * Where the money sits is an OPERATIONAL fact, recorded on the address and
+ * withdrawal rows. It is not an accounting fact. This is also what makes
+ * reconciliation work the way it does: it sums every platform address and
+ * compares against one aggregate, and that comparison is correct precisely
+ * because the total does not depend on the tier split.
+ *
+ * What a sweep genuinely does change is that it burns a network fee, which
+ * really does leave the platform. That is this posting, and it is drawn from
+ * the prepaid `house_fees` balance rather than from pooled customer funds —
+ * the Phase 3 lesson, applied to a new caller (rules 121, 132).
+ *
+ * The invariant to test: **total user liabilities are bit-identical across a
+ * sweep.** A sweep that moves a user balance is not a sweep with a bug; it is a
+ * different operation wearing the name.
+ */
+export function postSweepFee(input: {
+  readonly sweepId: string;
+  readonly asset: string;
+  readonly amount: Amount;
+}): LedgerTransaction {
+  requirePositive(input.amount, input.sweepId, 'sweep_fee');
+
+  return buildTransaction({
+    kind: 'fee',
+    referenceType: 'sweep',
+    referenceId: input.sweepId,
+    entries: [
+      // The mirror of postHouseFunding: the prepaid balance is consumed, and
+      // the on-chain total falls by what the validator took.
+      debit(houseFees(input.asset), input.asset, input.amount),
+      credit(chainAssets(input.asset), input.asset, input.amount),
+    ],
+  });
+}
+
+/**
+ * An Associated Token Account's rent-exempt minimum (ADR-0016, rule 118).
+ *
+ * Identical in character to a deposit address's minimum and to a nonce
+ * account's: real lamports, spent by us, held in an account we control, and not
+ * withdrawable by the user. Crediting it to the user would create a SOL
+ * liability they never deposited and cannot ever draw.
+ *
+ * Note the asset asymmetry that makes this easy to get wrong: the rent is
+ * denominated in the NATIVE asset even though the account it creates holds a
+ * token. Posting it against the mint would invent SOL out of USDC.
+ */
+export function postTokenAccountRent(input: {
+  readonly reference: string;
+  /** The NATIVE asset. Never the mint. */
+  readonly nativeAsset: string;
+  readonly amount: Amount;
+}): LedgerTransaction {
+  requirePositive(input.amount, input.reference, 'token_account_rent');
+
+  return buildTransaction({
+    kind: 'fee',
+    referenceType: 'token_account',
+    referenceId: input.reference,
+    entries: [
+      debit(chainAssets(input.nativeAsset), input.nativeAsset, input.amount),
+      credit(houseRent(input.nativeAsset), input.nativeAsset, input.amount),
+    ],
+  });
+}

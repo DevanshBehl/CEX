@@ -69,6 +69,7 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     // Tests drive `runOnce()` by hand. A timer-driven indexer would poll in the
     // background and make "what happened after N cycles" unanswerable.
     startIndexer: false,
+    startReconciliation: false,
   });
   await app.ready();
 

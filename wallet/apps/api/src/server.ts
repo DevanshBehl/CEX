@@ -58,11 +58,18 @@ import { createCustodyControllers } from './controllers/custody.controller.js';
 import { createCustodyService } from './services/custody.service.js';
 import { createDepositPipeline } from './services/deposit.service.js';
 import { createReconciliationService } from './services/reconciliation.service.js';
+import {
+  createReconciliationWorker,
+  type ReconciliationWorker,
+} from './workers/reconciliation-worker.js';
 import { createIndexer, type Indexer } from './workers/indexer.js';
 import { createCustodyRoutes } from './routes/custody.routes.js';
 import { createWithdrawalControllers } from './controllers/withdrawal.controller.js';
 import { createWithdrawalService } from './services/withdrawal.service.js';
 import { createWithdrawalWorkers, type WithdrawalWorkers } from './workers/withdrawal-workers.js';
+import { createWalletMetrics } from './observability/metrics.js';
+import { createDeadLetterQueue } from './observability/dead-letter.js';
+import { createOperationsRoutes } from './routes/operations.routes.js';
 import { createWithdrawalRoutes } from './routes/withdrawal.routes.js';
 import { createAccountService } from './services/account.service.js';
 import { createHealthService } from './services/health.service.js';
@@ -83,6 +90,7 @@ declare module 'fastify' {
     withdrawalWorkers: WithdrawalWorkers;
     signer: Signer;
     reconcile: () => Promise<unknown>;
+    reconciliationWorker: ReconciliationWorker;
     shutdown: () => Promise<void>;
   }
 }
@@ -101,6 +109,12 @@ export interface BuildServerOptions {
   readonly chainAdapter?: ChainAdapter;
   /** Tests drive the indexer by hand rather than on a timer. */
   readonly startIndexer?: boolean;
+  /**
+   * Off in tests by default, like the other timers: a background reconciliation
+   * running mid-assertion reads a half-written ledger and reports drift that
+   * the test itself created.
+   */
+  readonly startReconciliation?: boolean;
   /**
    * Injected so a test can make the signer fail, hang, or return garbage on
    * demand — which is the entire reason the mock exists (rules 127-128).
@@ -206,11 +220,22 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   const stepUp = createStepUpService(appDeps);
   const account = createAccountService(appDeps);
   const totp = createTotpEnrollmentService(appDeps);
-  const signer = options.signer ?? buildSigner(config);
+  /**
+   * Observability, created before anything that records into it
+   * (master-prompt rules 171, 173).
+   *
+   * One registry per server instance rather than a module-level singleton, so
+   * a test harness gets its own and two servers in one process do not share
+   * counters.
+   */
+  const metrics = createWalletMetrics();
+  const deadLetters = createDeadLetterQueue({
+    logger,
+    deadLettered: metrics.deadLettered,
+    queueDepth: metrics.queueDepth,
+  });
 
-  const health = createHealthService(db, redis, [
-    ...(isHealthCheckable(signer) ? [{ name: 'mpc', check: () => signer.isHealthy() }] : []),
-  ]);
+  const signer = options.signer ?? buildSigner(config);
 
   // --- Chain and custody (Phase 2) -----------------------------------------
   const chainAdapter =
@@ -223,22 +248,59 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
       pageSize: config.indexer.pageSize,
     });
 
+  /**
+   * Readiness covers every dependency a request can fail on
+   * (master-prompt rule 170, prompt_phase4.md rule 223).
+   *
+   * Built here rather than beside the signer because the chain adapter has to
+   * exist first. `solana` matters as much as the others: an unreachable RPC
+   * means deposits stop being detected and withdrawals cannot be broadcast,
+   * and without a probe that failure is invisible until someone notices the
+   * indexer has gone quiet.
+   */
+  const health = createHealthService(db, redis, [
+    { name: 'solana', check: () => chainAdapter.isHealthy() },
+    ...(isHealthCheckable(signer) ? [{ name: 'mpc', check: () => signer.isHealthy() }] : []),
+  ]);
+
   const custodyService = createCustodyService({
     db,
     // Phase 2 derives addresses only; no private key is stored (ADR-0005).
     deriver: createSolanaAddressDeriver(Buffer.from(config.chain.depositSeed, 'base64')),
     validator: createSolanaAddressValidator(),
     chain: SOLANA_CHAIN_ID,
-    assets: config.chain.supportedAssets,
+    assets: config.chain.assets.keys,
     logger,
   });
 
-  const depositPipeline = createDepositPipeline({ db, logger });
+  const depositPipeline = createDepositPipeline({
+    db,
+    logger,
+    assets: config.chain.assets,
+    metrics,
+  });
   const reconciliation = createReconciliationService({
     db,
     reader: chainAdapter,
     chain: SOLANA_CHAIN_ID,
     logger,
+    /**
+     * The treasury is platform-owned and was outside the Phase 3 comparison,
+     * which made every residual wrong by exactly its balance (rule 142).
+     * Custody tiers join this list as they acquire addresses (ADR-0018).
+     */
+    platformAddresses:
+      config.withdrawal.treasuryAddress !== undefined &&
+      config.withdrawal.treasuryAddress.trim() !== ''
+        ? [config.withdrawal.treasuryAddress]
+        : [],
+  });
+
+  const reconciliationWorker = createReconciliationWorker({
+    run: () => reconciliation.run(),
+    logger,
+    consecutiveCyclesBeforeAlert: config.reconciliation.alertAfterCycles,
+    intervalMs: config.reconciliation.intervalMs,
   });
 
   // --- Withdrawals (Phase 3) ------------------------------------------------
@@ -260,7 +322,19 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     chain: SOLANA_CHAIN_ID,
     logger,
     policy: {
-      supportedAssets: config.chain.supportedAssets,
+      // Every asset the platform will credit is an asset it must be able to
+      // reason about withdrawing (ADR-0016).
+      supportedAssets: config.chain.assets.keys,
+      assetLimits: Object.fromEntries(
+        Object.entries(config.risk.assetLimits).map(([asset, limits]) => [
+          asset,
+          {
+            perTransactionLimit: BigInt(limits.perTransactionLimit),
+            dailyLimit: BigInt(limits.dailyLimit),
+            manualReviewAbove: BigInt(limits.manualReviewAbove),
+          },
+        ]),
+      ),
       perTransactionLimit: BigInt(config.risk.perTransactionLimit),
       dailyLimit: BigInt(config.risk.dailyLimit),
       velocityWindowMinutes: config.risk.velocityWindowMinutes,
@@ -289,6 +363,8 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
           ),
         }
       : {}),
+    deadLetters,
+    metrics,
   });
 
   const withdrawalControllers = createWithdrawalControllers({
@@ -360,7 +436,26 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     strictMaxAgeSeconds: config.withdrawal.stepUpMaxAgeSeconds,
   });
 
-  await app.register(createHealthRoutes(health));
+  await app.register(
+    createHealthRoutes(health, {
+      signing: {
+        // What it IS, read from configuration rather than asserted in copy.
+        mode: config.withdrawal.signerKind === 'real' ? 'single-key-mpc' : 'mock',
+        // False for both. `single-key-mpc` gives a process boundary and
+        // authorization verification, and none of the key-compromise
+        // resistance threshold signing exists for (ADR-0015). Saying
+        // otherwise would be the exact overstatement this endpoint prevents.
+        thresholdProtected: false,
+      },
+      assets: {
+        supported: [...config.chain.assets.keys],
+        labels: Object.fromEntries(
+          config.chain.assets.keys.map((key) => [key, config.chain.assets.symbolOf(key)]),
+        ),
+      },
+      auditedForProduction: false,
+    }),
+  );
   await app.register(
     createAuthRoutes({
       controllers,
@@ -404,6 +499,28 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     }),
   );
 
+  await app.register(
+    createOperationsRoutes({
+      metrics: metrics.registry,
+      deadLetters,
+      sessionGuard: sessionGuard as never,
+      operatorStepUpGuard: createStepUpGuard(
+        guardDeps,
+        config.withdrawal.stepUpMaxAgeSeconds,
+      ) as never,
+      /**
+       * Retrying a dead-lettered job means letting the worker pick the
+       * withdrawal up again. The worker claims by state, so the retry is
+       * expressed as "make this eligible again" rather than as a second code
+       * path that does the work itself — a parallel implementation here would
+       * be a parallel set of bugs (ADR-0017's argument, applied to jobs).
+       */
+      retryHandler: async (_queue, reference) => {
+        await withdrawalWorkers.retry(reference);
+      },
+    }),
+  );
+
   // --- Workers --------------------------------------------------------------
   const indexer = createIndexer({
     db,
@@ -422,6 +539,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   app.decorate('withdrawalWorkers', withdrawalWorkers);
   app.decorate('signer', signer);
   app.decorate('reconcile', () => reconciliation.run());
+  app.decorate('reconciliationWorker', reconciliationWorker);
 
   // Tests drive `runOnce()` by hand; production runs it on a timer.
   const shouldStart = options.startIndexer ?? config.indexer.enabled;
@@ -445,10 +563,17 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     withdrawalTimer = setTimeout(() => void tick(), config.withdrawal.workerIntervalMs);
   }
 
+  // Reconciliation on its own, much slower timer (rule 140). Tests call
+  // `runOnce()` so a drift streak is assertable without waiting on a clock.
+  if (options.startReconciliation ?? config.reconciliation.enabled) {
+    reconciliationWorker.start();
+  }
+
   app.decorate('shutdown', async () => {
     // Workers stop first so no cycle is mid-transaction when the connection
     // closes.
     if (withdrawalTimer) clearTimeout(withdrawalTimer);
+    reconciliationWorker.stop();
     await indexer.stop();
     await db.$disconnect();
     redis.disconnect();

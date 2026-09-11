@@ -1,6 +1,102 @@
-import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
+import {
+  Connection,
+  Keypair,
+  LAMPORTS_PER_SOL,
+  NONCE_ACCOUNT_LENGTH,
+  NonceAccount,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  TransactionInstruction,
+} from '@solana/web3.js';
+import { createPrivateKey, sign as edSign } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createSolanaAdapter, createSolanaAddressDeriver, NATIVE_ASSET } from './index.js';
+import {
+  attachSignature,
+  buildTokenTransferTransaction,
+  createSolanaAdapter,
+  createSolanaAddressDeriver,
+  deriveAssociatedTokenAddress,
+  NATIVE_ASSET,
+  parseTokenTransfers,
+  TOKEN_PROGRAM_ID,
+} from './index.js';
+
+/** An SPL mint account's fixed size. */
+const MINT_LENGTH = 82;
+const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+
+/**
+ * Test-only encodings of the two SPL instructions this test needs to SET UP.
+ *
+ * Only `Transfer` is production code; these exist so the test can build a mint
+ * and some supply without adding `@solana/spl-token` as a dependency of the
+ * package that signs treasury transactions.
+ */
+function initializeMintInstruction(
+  mint: PublicKey,
+  authority: PublicKey,
+  decimals: number,
+): TransactionInstruction {
+  // [u8 0][u8 decimals][32 authority][u8 1][32 freeze authority]
+  const data = Buffer.alloc(67);
+  data.writeUInt8(0, 0);
+  data.writeUInt8(decimals, 1);
+  authority.toBuffer().copy(data, 2);
+  data.writeUInt8(0, 34); // no freeze authority
+  return new TransactionInstruction({
+    programId: TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: mint, isSigner: false, isWritable: true },
+      {
+        pubkey: new PublicKey('SysvarRent111111111111111111111111111111111'),
+        isSigner: false,
+        isWritable: false,
+      },
+    ],
+    data: data.subarray(0, 35),
+  });
+}
+
+function mintToInstruction(
+  mint: PublicKey,
+  destination: PublicKey,
+  authority: PublicKey,
+  amount: bigint,
+): TransactionInstruction {
+  const data = Buffer.alloc(9);
+  data.writeUInt8(7, 0); // MintTo
+  data.writeBigUInt64LE(amount, 1);
+  return new TransactionInstruction({
+    programId: TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: mint, isSigner: false, isWritable: true },
+      { pubkey: destination, isSigner: false, isWritable: true },
+      { pubkey: authority, isSigner: true, isWritable: false },
+    ],
+    data,
+  });
+}
+
+function createAtaInstruction(
+  payer: PublicKey,
+  owner: PublicKey,
+  mint: PublicKey,
+): TransactionInstruction {
+  const ata = new PublicKey(deriveAssociatedTokenAddress(owner.toBase58(), mint.toBase58()));
+  return new TransactionInstruction({
+    programId: ASSOCIATED_TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: ata, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.alloc(0),
+  });
+}
 
 /**
  * The adapter against a real validator (master-prompt rule 180,
@@ -145,3 +241,182 @@ describe.runIf(true)('against a local validator', () => {
     ).rejects.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// SPL tokens against the real program (ADR-0016, rules 117-123)
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY THIS TEST EXISTS
+ *
+ * `buildTokenTransferTransaction` hand-encodes the SPL `Transfer` instruction:
+ * `[u8 3][u64le amount]`, with a fixed account ordering. A unit test can only
+ * check that the bytes are the bytes this code produces — it cannot tell
+ * whether the SPL Token program accepts them.
+ *
+ * Every possible mistake here is silent under unit tests and fatal on-chain: a
+ * wrong discriminator invokes a different instruction, a swapped account index
+ * moves tokens somewhere else, and a big-endian amount transfers a wildly
+ * different quantity. So this builds a real mint, a real token account, and
+ * sends a real transfer through the real program.
+ */
+describe('SPL token transfers on a real validator', () => {
+  it('creates a mint, transfers, and creates the destination ATA in one transaction', async () => {
+    if (!available) return;
+
+    const payer = Keypair.generate();
+    const recipient = Keypair.generate();
+
+    const airdrop = await connection.requestAirdrop(payer.publicKey, 2 * LAMPORTS_PER_SOL);
+    await connection.confirmTransaction(airdrop, 'confirmed');
+
+    // --- a real mint, created with the real program ---------------------
+    const mint = Keypair.generate();
+    const mintRent = await connection.getMinimumBalanceForRentExemption(MINT_LENGTH);
+
+    const createMint = new Transaction().add(
+      SystemProgram.createAccount({
+        fromPubkey: payer.publicKey,
+        newAccountPubkey: mint.publicKey,
+        lamports: mintRent,
+        space: MINT_LENGTH,
+        programId: TOKEN_PROGRAM_ID,
+      }),
+      initializeMintInstruction(mint.publicKey, payer.publicKey, 6),
+    );
+    await sendAndConfirm(createMint, [payer, mint]);
+
+    // --- the payer's own token account, and some supply -----------------
+    const payerAta = deriveAssociatedTokenAddress(
+      payer.publicKey.toBase58(),
+      mint.publicKey.toBase58(),
+    );
+    const fund = new Transaction().add(
+      createAtaInstruction(payer.publicKey, payer.publicKey, mint.publicKey),
+      mintToInstruction(mint.publicKey, new PublicKey(payerAta), payer.publicKey, 1_000_000_000n),
+    );
+    await sendAndConfirm(fund, [payer]);
+
+    // The derivation agrees with the program: `mintTo` would have failed if
+    // the ATA we derived were not the one the ATA program created.
+    const before = await connection.getTokenAccountBalance(new PublicKey(payerAta));
+    expect(before.value.amount).toBe('1000000000');
+
+    // --- the transfer this test is actually about -----------------------
+    const nonceAccount = await createNonceAccount(payer);
+    const nonce = await readNonce(nonceAccount);
+
+    const built = buildTokenTransferTransaction({
+      owner: payer.publicKey.toBase58(),
+      ownerTokenAccount: payerAta,
+      destinationOwner: recipient.publicKey.toBase58(),
+      mint: mint.publicKey.toBase58(),
+      amount: '250000000',
+      nonceAccount: nonceAccount.toBase58(),
+      nonceAuthority: payer.publicKey.toBase58(),
+      nonce,
+      // The recipient has never held this mint.
+      createDestinationAccount: true,
+    });
+
+    // Signed the way the real path signs: over the message bytes, attached
+    // afterwards. The signer never sees a Transaction.
+    const signature = signMessage(built.message, payer);
+    const signed = attachSignature(built, payer.publicKey.toBase58(), signature);
+
+    const txSig = await connection.sendRawTransaction(Buffer.from(signed), {
+      skipPreflight: false,
+    });
+    await connection.confirmTransaction(txSig, 'confirmed');
+
+    const tx = await connection.getTransaction(txSig, {
+      commitment: 'confirmed',
+      maxSupportedTransactionVersion: 0,
+    });
+
+    // The program ACCEPTED the hand-written encoding.
+    expect(tx?.meta?.err).toBeNull();
+
+    const after = await connection.getTokenAccountBalance(
+      new PublicKey(built.destinationTokenAccount),
+    );
+    // Exactly the amount asked for — not 250, not 250 * 10^6 again, and not a
+    // byte-order-reversed number.
+    expect(after.value.amount).toBe('250000000');
+
+    // --- and the indexer sees it as a deposit ---------------------------
+    const events = parseTokenTransfers(
+      (await connection.getParsedTransaction(txSig, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      }))!,
+      { watchedOwners: new Set([recipient.publicKey.toBase58()]), txReference: txSig },
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      asset: mint.publicKey.toBase58(),
+      amount: '250000000',
+      to: recipient.publicKey.toBase58(),
+    });
+  }, 90_000);
+});
+
+// --- test helpers ---------------------------------------------------------
+
+async function sendAndConfirm(transaction: Transaction, signers: Keypair[]): Promise<string> {
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+  transaction.recentBlockhash = blockhash;
+  transaction.lastValidBlockHeight = lastValidBlockHeight;
+  transaction.feePayer = signers[0]!.publicKey;
+  transaction.sign(...signers);
+  const signature = await connection.sendRawTransaction(transaction.serialize());
+  await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+  return signature;
+}
+
+async function createNonceAccount(payer: Keypair): Promise<PublicKey> {
+  const nonce = Keypair.generate();
+  const lamports = await connection.getMinimumBalanceForRentExemption(NONCE_ACCOUNT_LENGTH);
+  const transaction = new Transaction().add(
+    SystemProgram.createAccount({
+      fromPubkey: payer.publicKey,
+      newAccountPubkey: nonce.publicKey,
+      lamports,
+      space: NONCE_ACCOUNT_LENGTH,
+      programId: SystemProgram.programId,
+    }),
+    SystemProgram.nonceInitialize({
+      noncePubkey: nonce.publicKey,
+      authorizedPubkey: payer.publicKey,
+    }),
+  );
+  await sendAndConfirm(transaction, [payer, nonce]);
+  return nonce.publicKey;
+}
+
+async function readNonce(address: PublicKey): Promise<string> {
+  const info = await connection.getAccountInfo(address, 'confirmed');
+  if (!info) throw new Error('nonce account not found');
+  return NonceAccount.fromAccountData(info.data).nonce;
+}
+
+/**
+ * Sign the message bytes, the way the real signing path does.
+ *
+ * Node's crypto rather than a nacl dependency: `packages/solana` builds the
+ * transactions the treasury signs, and adding a signing library to it for a
+ * test is the wrong direction. A `Keypair`'s `secretKey` is the 64-byte
+ * expanded form; its first 32 bytes are the seed, which is what PKCS8 wants.
+ */
+const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+
+function signMessage(message: Uint8Array, keypair: Keypair): Uint8Array {
+  const seed = Buffer.from(keypair.secretKey.subarray(0, 32));
+  const key = createPrivateKey({
+    key: Buffer.concat([PKCS8_ED25519_PREFIX, seed]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  return new Uint8Array(edSign(null, Buffer.from(message), key));
+}

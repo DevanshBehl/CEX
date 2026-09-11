@@ -20,6 +20,7 @@ import {
   type RpcOptions,
 } from './rpc.js';
 import { parseTransfers } from './transfers.js';
+import { parseTokenTransfers } from './token.js';
 
 export interface SolanaAdapterOptions extends RpcOptions {
   /** Signatures fetched per page. Bounded by the RPC at 1000. */
@@ -97,6 +98,27 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
         if (!parsed) continue;
         transfers.push(
           ...parseTransfers(parsed, { watchedAddresses, txReference: entry.signature }),
+        );
+        /**
+         * Token movements come from the same transaction and the same watched
+         * addresses, but from a different part of the metadata (ADR-0016).
+         *
+         * One transaction can therefore yield BOTH a SOL event and a token
+         * event for the same address. They carry different
+         * `instructionIndex` values — the address's own account index against
+         * the token account's — so the `(chain, tx, index)` uniqueness key
+         * keeps them as two deposits, which is what rule 123 asks for.
+         *
+         * Whether a mint is allowlisted is NOT decided here. The adapter
+         * reports what the chain did; crediting is the indexer's decision,
+         * and an unrecognised mint has to reach it in order to be recorded as
+         * ignored rather than silently dropped (rule 124).
+         */
+        transfers.push(
+          ...parseTokenTransfers(parsed, {
+            watchedOwners: watchedAddresses,
+            txReference: entry.signature,
+          }),
         );
       }
 

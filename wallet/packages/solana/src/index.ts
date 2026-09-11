@@ -20,8 +20,10 @@ export { createSolanaAdapter, type SolanaAdapterOptions } from './adapter.js';
 export {
   createNonceManager,
   generateNonceAccountAddress,
+  provisionNonceAccount,
   NONCE_ACCOUNT_LENGTH,
   type NonceManager,
+  type NonceProvisionResult,
   type NonceState,
 } from './nonce.js';
 export {
@@ -33,3 +35,18 @@ export {
   type UnsignedWithdrawal,
   type WithdrawalBroadcaster,
 } from './withdrawal-tx.js';
+export {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  buildFeeFundingTransaction,
+  buildTokenTransferTransaction,
+  deriveAssociatedTokenAddress,
+  planNativeSweep,
+  parseTokenTransfers,
+  sweepableTokenAmount,
+  TOKEN_ACCOUNT_LENGTH,
+  TOKEN_PROGRAM_ID,
+  type BuildTokenTransferInput,
+  type FeeFundingInput,
+  type ParseTokenOptions,
+  type SweepPlan,
+} from './token.js';

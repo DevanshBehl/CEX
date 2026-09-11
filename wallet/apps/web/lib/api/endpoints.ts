@@ -1,4 +1,6 @@
 import {
+  capabilitiesResponseSchema,
+  type CapabilitiesResponse,
   currentSessionResponseSchema,
   listCredentialsResponseSchema,
   listSessionsResponseSchema,
@@ -141,6 +143,15 @@ export const api = {
 
   updateMe: (body: { displayName?: string; email?: string }): Promise<MeResponse> =>
     request({ method: 'PATCH', path: '/me', body, schema: meResponseSchema }),
+
+  /**
+   * What this deployment can actually do (rules 236-237).
+   *
+   * Asked rather than assumed: hardcoded copy about custody goes stale
+   * silently, and stale copy about custody is worse than none.
+   */
+  getCapabilities: (): Promise<CapabilitiesResponse> =>
+    request({ method: 'GET', path: '/capabilities', schema: capabilitiesResponseSchema }),
 
   // --- custody (Phase 2) ---
   getDepositAddress: (): Promise<DepositAddressResponse> =>

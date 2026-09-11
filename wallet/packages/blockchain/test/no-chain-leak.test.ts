@@ -45,19 +45,55 @@ describe('packages/blockchain names no chain', () => {
   });
 
   it.each(FORBIDDEN)('never mentions "%s"', (term) => {
+    /**
+     * WHOLE WORDS, not substrings.
+     *
+     * `includes('spl')` matches `split`, `splice` and `display`; `includes
+     * ('evm')` would match nothing today but is the same class of trap. The
+     * guard fired on `approvedBy.split('+')` in `custody.ts`, which names no
+     * chain at all — a false positive that would have taught the next person
+     * to work around the test rather than fix it, which is how a guard stops
+     * guarding.
+     */
+    /**
+     * Case-SENSITIVE, with the term's variants spelled out. Every part earns
+     * its place:
+     *
+     *   \b            `display` contains `spl`, but not at a word start.
+     *   variants      `spl`, `SPL`, `Spl` — the forms a leak actually takes.
+     *   s?            `lamports` must still match; the plural is a word
+     *                 character, so a plain `\b` on the right would miss it.
+     *   (?![a-z])     `split` is `spl` + a lowercase continuation and is a
+     *                 different word; `splToken` is `spl` + a camelCase
+     *                 boundary and IS a leak.
+     *
+     * The `i` flag cannot be used here: under it `[a-z]` also matches
+     * uppercase, so the lookahead would reject `splToken` too — which is how
+     * this test was briefly blind to exactly the leak it exists to catch.
+     */
+    const variants = [term, term.toUpperCase(), term[0]?.toUpperCase() + term.slice(1)];
+    const pattern = new RegExp(`\\b(?:${variants.join('|')})s?(?![a-z])`);
     for (const file of files) {
-      const content = readFileSync(file, 'utf8').toLowerCase();
+      const content = readFileSync(file, 'utf8');
       // The word may legitimately appear in a comment explaining the ban.
       const offending = content
         .split('\n')
-        .filter((line) => line.includes(term))
+        .filter((line) => pattern.test(line))
         .filter((line) => !line.trimStart().startsWith('*') && !line.trimStart().startsWith('//'));
       expect(offending, `${file} mentions "${term}" outside a comment`).toEqual([]);
     }
   });
 
-  it.each(FORBIDDEN_IDENTIFIERS)('never declares a "%s" field', (identifier) => {
-    const pattern = new RegExp(`readonly\\s+${identifier}\\b|\\b${identifier}\\s*[?]?\\s*:`, 'i');
+  it.each(FORBIDDEN_IDENTIFIERS)('never declares a "%s" binding or field', (identifier) => {
+    // Fields, AND plain bindings: `const slot = 2` leaks the vocabulary just
+    // as effectively as `readonly slot: number`, and was slipping through a
+    // pattern that only looked for declarations with a type annotation.
+    const pattern = new RegExp(
+      `readonly\\s+${identifier}\\b` +
+        `|\\b${identifier}\\s*[?]?\\s*:` +
+        `|\\b(?:const|let|var|function)\\s+${identifier}\\b`,
+      'i',
+    );
     for (const file of files) {
       const code = readFileSync(file, 'utf8')
         .split('\n')

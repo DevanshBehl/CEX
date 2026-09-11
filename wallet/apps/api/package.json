@@ -12,7 +12,8 @@
     "lint": "eslint src",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "reconcile": "tsx src/scripts/reconcile.ts"
+    "reconcile": "tsx src/scripts/reconcile.ts",
+    "provision-nonces": "tsx src/scripts/provision-nonces.ts"
   },
   "dependencies": {
     "@fastify/cookie": "11.0.2",
@@ -29,7 +30,7 @@
     "@wallet/risk": "workspace:*",
     "@wallet/solana": "workspace:*",
     "@wallet/types": "workspace:*",
-    "fastify": "5.2.1",
+    "fastify": "5.12.4",
     "fastify-plugin": "5.0.1",
     "fastify-type-provider-zod": "4.0.2",
     "ioredis": "5.4.2",

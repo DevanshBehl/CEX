@@ -10,3 +10,5 @@ export * from './api/health.js';
 export * from './api/custody.js';
 export * from './withdrawal-states.js';
 export * from './api/withdrawal.js';
+export * from './assets.js';
+export * from './api/capabilities.js';

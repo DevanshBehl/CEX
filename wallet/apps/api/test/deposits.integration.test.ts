@@ -1,5 +1,7 @@
+import { createAssetRegistry } from '@wallet/types';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { TransferEvent } from '@wallet/blockchain';
+import type { CreditOutcome } from '../src/services/deposit.service.js';
 import { NATIVE_ASSET } from '@wallet/solana';
 import { createFakeChain, type FakeChain } from './fake-chain.js';
 import {
@@ -497,6 +499,8 @@ async function creditDirect(transfer: TransferEvent): Promise<string> {
   const pipeline = createDepositPipeline({
     db: h.app.appDeps.db,
     logger: h.logs.logger,
+    // SOL only — the allowlist these deposit tests were written against.
+    assets: createAssetRegistry({ nativeDecimals: 9, tokens: [] }),
   });
   const result = await pipeline.creditTransfer(transfer, RENT);
   return result.outcome;
@@ -504,3 +508,100 @@ async function creditDirect(transfer: TransferEvent): Promise<string> {
 
 // Referenced so `cookieFor` stays exported for other suites.
 void cookieFor;
+
+// ---------------------------------------------------------------------------
+// The mint allowlist (ADR-0016, prompt_phase4.md rules 124-125)
+// ---------------------------------------------------------------------------
+
+describe('non-allowlisted assets', () => {
+  const UNKNOWN_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
+  /** The pipeline as configured for these tests: SOL, no mints. */
+  async function creditWithAllowlist(transfer: TransferEvent): Promise<CreditOutcome> {
+    const { createDepositPipeline } = await import('../src/services/deposit.service.js');
+    return createDepositPipeline({
+      db: h.app.appDeps.db,
+      logger: h.logs.logger,
+      assets: createAssetRegistry({ nativeDecimals: 9, tokens: [] }),
+    }).creditTransfer(transfer, RENT);
+  }
+
+  it('records an unknown mint rather than discarding it', async () => {
+    const user = await newUserWithAddress();
+    const transfer = chain.push({
+      to: user.address,
+      amount: '5000000',
+      asset: UNKNOWN_MINT,
+      // What the adapter attaches to a token event, and never to a SOL one.
+      metadata: { tokenAccount: 'ata-1', decimals: '6' },
+    });
+
+    const result = await creditWithAllowlist(transfer);
+    expect(result).toMatchObject({ outcome: 'ignored', reason: 'mint_not_allowlisted' });
+
+    // THE POINT OF THE RULE: a row exists, so "where is my token" has an
+    // answer. Silently dropping it would leave nothing to look up.
+    const row = await h.app.appDeps.db.deposit.findFirst({
+      where: { txSignature: transfer.txReference },
+    });
+    expect(row).toMatchObject({ status: 'ignored', reason: 'mint_not_allowlisted' });
+    expect(row?.asset).toBe(UNKNOWN_MINT);
+  });
+
+  it('creates no ledger entries for it', async () => {
+    const user = await newUserWithAddress();
+    const transfer = chain.push({ to: user.address, amount: '9000000', asset: UNKNOWN_MINT });
+
+    const before = await h.app.appDeps.db.ledgerEntry.count();
+    await creditWithAllowlist(transfer);
+    const after = await h.app.appDeps.db.ledgerEntry.count();
+
+    // An ignored deposit is an observation about the chain, not an accounting
+    // event. A liability here would be one the platform cannot discharge.
+    expect(after).toBe(before);
+
+    const row = await h.app.appDeps.db.deposit.findFirst({
+      where: { txSignature: transfer.txReference },
+    });
+    expect(row?.ledgerTransactionId).toBeNull();
+  });
+
+  it('labels an unknown NATIVE asset differently from an unknown mint', async () => {
+    const user = await newUserWithAddress();
+    const transfer = chain.push({ to: user.address, amount: '10', asset: 'DOGE' });
+    expect(await creditWithAllowlist(transfer)).toMatchObject({
+      reason: 'asset_not_allowlisted',
+    });
+  });
+
+  it('stays idempotent — a replayed unknown mint does not double-record', async () => {
+    const user = await newUserWithAddress();
+    const transfer = chain.push({ to: user.address, amount: '1000', asset: UNKNOWN_MINT });
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => creditWithAllowlist(transfer)),
+    );
+
+    expect(results.filter((r) => r.outcome === 'ignored')).toHaveLength(1);
+    expect(results.filter((r) => r.outcome === 'duplicate')).toHaveLength(19);
+    expect(
+      await h.app.appDeps.db.deposit.count({ where: { txSignature: transfer.txReference } }),
+    ).toBe(1);
+  });
+
+  it('still credits SOL, which IS allowlisted', async () => {
+    const user = await newUserWithAddress();
+    const transfer = chain.push({ to: user.address, amount: LAMPORTS(2) });
+    expect((await creditWithAllowlist(transfer)).outcome).toBe('credited');
+  });
+
+  it('does not log the mint, which is an attacker-chosen string', async () => {
+    const user = await newUserWithAddress();
+    const transfer = chain.push({ to: user.address, amount: '1', asset: UNKNOWN_MINT });
+    await creditWithAllowlist(transfer);
+
+    const output = h.logs.text();
+    expect(output).toContain('deposit.ignored');
+    expect(output).not.toContain(UNKNOWN_MINT);
+  });
+});
