@@ -54,3 +54,20 @@ move until finality. See prompt_phase2.md rule 173.
   or it will report a residual that is not real.
 - This value governs Phase 3 as well: a withdrawal is not settled until its
   transaction is `finalized`, for exactly the same reason.
+
+## Addendum: the network label is verified at boot
+
+`SOLANA_NETWORK` is rendered on the deposit page as the network a user must
+send on (rule 172). Until this was added it was a free-floating label with no
+tie to `SOLANA_RPC_URL` — so a deployment naming `mainnet-beta` while pointing
+at devnet would tell people to send real funds to an address the indexer
+watches on another cluster. The money is real, the credit never arrives, and
+the interface said it was supported.
+
+The API now calls `getGenesisHash` at startup and refuses to start on a
+mismatch. The genesis hash is authoritative and provider-independent; hostname
+matching is not, and a custom RPC endpoint with an arbitrary hostname is
+precisely the case worth catching.
+
+`localnet` is skipped: a fresh validator generates a new genesis hash on every
+reset, so there is no constant to compare against.

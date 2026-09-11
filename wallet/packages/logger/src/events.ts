@@ -82,6 +82,7 @@ export const SECURITY_EVENTS = [
   'sweep.completed',
   'sweep.failed',
   /** Drift that has persisted across cycles, not a single reading (rule 144). */
+  'indexer.network_verified',
   'operator.role_granted',
   'operator.role_revoked',
   'reconciliation.drift_persisted',

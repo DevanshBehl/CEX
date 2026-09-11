@@ -338,8 +338,13 @@ describe('indexer restart safety', () => {
 
     await runIndexer();
 
-    const cursor = await h.app.appDeps.db.indexerCursor.findFirst({
-      where: { addressId: user.addressId },
+    // Scoped to the deposit address's own cursor: an address now has one per
+    // scanned account, and `findFirst` can return a token-account cursor that
+    // legitimately has no signature (ADR-0016).
+    const cursor = await h.app.appDeps.db.indexerCursor.findUnique({
+      where: {
+        addressId_scanAddress: { addressId: user.addressId, scanAddress: user.address },
+      },
     });
     // Stops at the last credited transfer. Advancing past `pending-1` would
     // mean never seeing it again once it finalizes.

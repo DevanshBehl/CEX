@@ -34,6 +34,7 @@ import {
   createNonceManager,
   createSolanaAdapter,
   deriveAssociatedTokenAddress,
+  GENESIS_HASHES,
   createSolanaAddressDeriver,
   createSolanaAddressValidator,
   createSolanaRpc,
@@ -262,6 +263,41 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     { name: 'solana', check: () => chainAdapter.isHealthy() },
     ...(isHealthCheckable(signer) ? [{ name: 'mpc', check: () => signer.isHealthy() }] : []),
   ]);
+
+  /**
+   * VERIFY THAT THE ENDPOINT SERVES THE NETWORK WE CLAIM (rule 172).
+   *
+   * `SOLANA_NETWORK` is a label. It is rendered on the deposit page as the
+   * network the user must send on — and until this check existed, nothing tied
+   * it to `SOLANA_RPC_URL`. A deployment naming `mainnet-beta` while pointing
+   * at devnet would tell people to send real funds to an address the indexer
+   * watches on another cluster: the money is real, the credit never comes, and
+   * the interface said it was fine.
+   *
+   * The genesis hash is the authoritative answer and works with any provider;
+   * hostname matching does not, because a custom RPC has an arbitrary
+   * hostname and that is precisely the case worth catching.
+   *
+   * `localnet` is skipped: a fresh validator generates a new genesis hash on
+   * every reset, so there is nothing to compare against.
+   */
+  const expectedGenesis = GENESIS_HASHES[config.chain.network];
+  if (expectedGenesis !== undefined) {
+    const actual = await chainAdapter.getNetworkIdentity();
+    if (actual !== expectedGenesis) {
+      throw new Error(
+        `SOLANA_RPC_URL does not serve ${config.chain.network}: the endpoint reports genesis ` +
+          `${actual}, expected ${expectedGenesis}. Deposit addresses would be advertised for a ` +
+          'network nothing is watching.',
+      );
+    }
+    logger.info('chain network verified', {
+      event: 'indexer.network_verified',
+      outcome: 'success',
+      targetType: 'chain',
+      targetId: config.chain.network,
+    });
+  }
 
   const custodyService = createCustodyService({
     db,

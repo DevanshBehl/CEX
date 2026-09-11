@@ -17,6 +17,7 @@ export {
 } from './rpc.js';
 export { parseTransfers, type ParseOptions } from './transfers.js';
 export { createSolanaAdapter, type SolanaAdapterOptions } from './adapter.js';
+export { GENESIS_HASHES } from './constants.js';
 export {
   createNonceManager,
   generateNonceAccountAddress,

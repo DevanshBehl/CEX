@@ -55,6 +55,19 @@ export interface ChainReader {
    * the asset, so it belongs on the reader.
    */
   accountExists(address: Address): Promise<boolean>;
+  /**
+   * An opaque identifier for the network this endpoint actually serves.
+   *
+   * Every chain has one — a genesis hash, a chain id — and the domain never
+   * interprets it. It exists so a deployment can VERIFY that the endpoint it
+   * is talking to is the network it believes it is talking to.
+   *
+   * That check matters because the network name is shown to users as the
+   * network to send funds on. A configuration that names one network and
+   * points at another tells people to send real money to an address nothing is
+   * watching.
+   */
+  getNetworkIdentity(): Promise<string>;
   isHealthy(): Promise<boolean>;
 }
 

@@ -149,6 +149,15 @@ export function createFakeChain(): FakeChain {
       return true;
     },
 
+    /**
+     * A localnet-shaped identity, so the boot check skips verification the way
+     * it does against a real local validator. The tests run with
+     * `SOLANA_NETWORK=localnet`, which has no constant genesis hash.
+     */
+    async getNetworkIdentity(): Promise<string> {
+      return 'fake-chain-genesis';
+    },
+
     async isHealthy(): Promise<boolean> {
       return true;
     },

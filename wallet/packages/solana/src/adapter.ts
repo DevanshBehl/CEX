@@ -213,6 +213,17 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
       return info !== null;
     },
 
+    /**
+     * The cluster's genesis hash — Solana's network identity.
+     *
+     * Cheap and cacheable, but deliberately NOT cached here: it is called once
+     * at boot, and a cache would hide an endpoint that was swapped underneath a
+     * long-running process.
+     */
+    async getNetworkIdentity(): Promise<string> {
+      return rpc.call('getGenesisHash', (connection) => connection.getGenesisHash());
+    },
+
     async isHealthy(): Promise<boolean> {
       try {
         await rpc.call('getSlot', (connection) => connection.getSlot('processed'));

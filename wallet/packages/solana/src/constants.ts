@@ -34,3 +34,20 @@ export function derivationPathForIndex(index: number): string {
   }
   return `m/44'/501'/${index}'/0'`;
 }
+
+/**
+ * Genesis hashes, which identify a Solana cluster unambiguously.
+ *
+ * Used to verify that `SOLANA_RPC_URL` actually serves `SOLANA_NETWORK`.
+ * Hostname matching cannot do this: a custom RPC provider has an arbitrary
+ * hostname, and the whole point is to catch a URL that does not look like what
+ * it serves.
+ *
+ * `localnet` is absent on purpose — a fresh `solana-test-validator` generates a
+ * new genesis hash on every reset, so there is no constant to check against.
+ */
+export const GENESIS_HASHES: Readonly<Record<string, string>> = {
+  'mainnet-beta': '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d',
+  devnet: 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG',
+  testnet: '4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY',
+};
