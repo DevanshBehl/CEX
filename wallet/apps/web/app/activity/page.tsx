@@ -3,14 +3,17 @@
 import { useDeposits } from '@/features/custody/use-balances';
 import { DepositStatusBadge } from '@/features/custody/balance-list';
 import { formatAmount, isZeroAmount, shortenAddress } from '@/lib/format';
-import { Card, EmptyState, ErrorNotice, Spinner } from '@/components/ui';
+import { Card, EmptyState, ErrorNotice, Spinner, PageHeader } from '@/components/ui';
 
 export default function ActivityPage() {
   const deposits = useDeposits(10_000);
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Activity</h1>
+      <PageHeader
+        title="Activity"
+        description="Every deposit and withdrawal, with the state the ledger actually holds."
+      />
 
       <Card>
         {deposits.loading ? (
@@ -31,7 +34,7 @@ export default function ActivityPage() {
                   </span>
                 </div>
 
-                <p className="text-xs text-muted">
+                <p className="text-xs text-ink-muted">
                   {new Date(deposit.createdAt).toLocaleString()} ·{' '}
                   <span className="font-mono">{shortenAddress(deposit.txSignature, 8)}</span>
                 </p>
@@ -42,7 +45,7 @@ export default function ActivityPage() {
                   slightly less is owed an explanation.
                 */}
                 {!isZeroAmount(deposit.rentReserved) && (
-                  <p className="text-xs text-muted">
+                  <p className="text-xs text-ink-muted">
                     {formatAmount(deposit.amount, deposit.decimals)} received;{' '}
                     {formatAmount(deposit.rentReserved, deposit.decimals)} held back as a one-time
                     network account minimum, which is not withdrawable.

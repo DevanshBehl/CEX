@@ -82,3 +82,4 @@ export {
   createSigningRequestRepository,
   type SigningRequestRepository,
 } from './repositories/signing-request.repository.js';
+export * from './repositories/operator.repository.js';

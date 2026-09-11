@@ -127,6 +127,36 @@ account exists to answer.
 SOL and rejected again here for the same reason. Two representations of one
 amount is one representation too many.
 
+## Discovery: a token transfer is invisible at the owner's address
+
+Found by running a real deposit against a validator, after the parsing had been
+correct and tested for some time.
+
+A native transfer touches the deposit address, so
+`getSignaturesForAddress(depositAddress)` finds it. **A token transfer does
+not.** It moves between token accounts, and the owner's address is not among
+the transaction's account keys — so polling the owner returns nothing, forever.
+
+Measured: a transfer into an existing token account produced **1** signature at
+the token account and **0** at its owner. (The ATA-_creation_ transaction does
+name the owner, which is what made the first attempt to measure this report the
+opposite — creation and transfer must be separated to see it.)
+
+So the indexer polls each deposit address **and** each derived token account for
+an allowlisted mint, each with its own cursor row. Two consequences:
+
+- **One cursor per (address, scanned account).** A shared cursor would let a
+  native transfer advance past token transfers that had not been seen, and the
+  loss would be silent.
+- **`FetchTransfersRequest` gains `creditTo`.** The account whose history is
+  scanned and the party to be credited are different things; without saying so,
+  the adapter watches whatever it scanned, matches no owner, and drops every
+  token transfer it just successfully found.
+
+Neither could be caught by a unit test: the parsing was right the whole time,
+and nothing was ever fetched to parse. The regression tests for both live in
+`packages/solana/src/localnet.integration.test.ts` and need a real validator.
+
 ## Consequences
 
 - `assets` becomes a richer allowlist: SOL plus a set of mints. The `(owner,

@@ -147,7 +147,10 @@ export function createCustodyRepository(db: Executor): CustodyRepository {
           chain: true,
           walletId: true,
           wallet: { select: { userId: true } },
-          cursor: { select: { lastSignature: true } },
+          // The cursor for the address ITSELF — the native-transfer scan.
+          // Token accounts have their own cursors, fetched by the indexer as
+          // it scans each one (ADR-0016).
+          cursors: { select: { lastSignature: true, scanAddress: true } },
         },
         orderBy: { createdAt: 'asc' },
         take: limit,
@@ -159,7 +162,7 @@ export function createCustodyRepository(db: Executor): CustodyRepository {
         chain: row.chain,
         walletId: row.walletId,
         userId: row.wallet.userId,
-        cursor: row.cursor?.lastSignature ?? null,
+        cursor: row.cursors.find((c) => c.scanAddress === row.address)?.lastSignature ?? null,
       }));
     },
   };

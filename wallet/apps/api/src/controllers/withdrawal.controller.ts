@@ -1,6 +1,6 @@
 import type { FastifyRequest } from 'fastify';
 import { createRiskDecisionRepository, type PrismaClient, type WithdrawalRecord } from '@wallet/db';
-import { AuthorizationDeniedError } from '@wallet/errors';
+import { NotFoundError } from '@wallet/errors';
 import {
   holdsLock,
   isTerminal,
@@ -12,12 +12,21 @@ import {
 } from '@wallet/types';
 import { requireSessionRecord } from '../middleware/guards.js';
 import type { WithdrawalService } from '../services/withdrawal.service.js';
+import { createOperatorRepository, type OperatorRoleName } from '@wallet/db';
 
 export interface WithdrawalControllerDeps {
   readonly db: PrismaClient;
   readonly withdrawals: WithdrawalService;
   readonly decimals: Readonly<Record<string, number>>;
-  readonly operatorUserIds: readonly string[];
+  /**
+   * Bootstrap operators, from configuration.
+   *
+   * Retained ONLY so an environment with no granted roles yet is still
+   * administrable — someone has to be able to make the first grant. Every
+   * other operator comes from `operator_roles`, and this list should be empty
+   * in any environment that has run its bootstrap (rule 166).
+   */
+  readonly bootstrapOperatorUserIds: readonly string[];
 }
 
 export interface WithdrawalControllers {
@@ -33,15 +42,47 @@ export function createWithdrawalControllers(deps: WithdrawalControllerDeps): Wit
   const decisions = createRiskDecisionRepository(deps.db);
   const decimalsFor = (asset: string): number => deps.decimals[asset] ?? 0;
 
+  const operators = createOperatorRepository(deps.db);
+
   /**
-   * Phase 3 has no operator role model (ADR-0011). The queue is gated by
-   * configuration plus a step-up, and a real role model is Phase 4.
+   * Operator authority, from granted roles (rule 166).
+   *
+   * Phase 3 gated this on a configured list of user ids. That made authority a
+   * deploy-time property: granting needed a restart, revoking needed a
+   * restart, and nothing recorded who granted it or why — all three worst
+   * during an incident, which is when operator authority is used.
+   *
+   * NOT FOUND, never FORBIDDEN — as a 404 STATUS, not merely a 404-sounding
+   * message. The previous implementation threw `AuthorizationDeniedError`
+   * with the body text "Not found", which reads correctly and returns 403:
+   * the status still confirms the route exists and that this account simply
+   * lacks the role, which is the disclosure the message was trying to avoid.
    */
-  function requireOperator(userId: string): void {
-    if (!deps.operatorUserIds.includes(userId)) {
-      throw new AuthorizationDeniedError('Not found');
+  async function requireRole(userId: string, required: OperatorRoleName): Promise<void> {
+    if (deps.bootstrapOperatorUserIds.includes(userId)) return;
+
+    const held = await operators.rolesFor(userId);
+
+    // `custodian` implies `approver` implies `viewer`. The hierarchy is here
+    // rather than in the database so a grant records exactly what was given,
+    // not what it happens to imply today — if the implication changes, old
+    // grants still mean what they said.
+    const implied: Record<OperatorRoleName, readonly OperatorRoleName[]> = {
+      viewer: ['viewer', 'approver', 'custodian'],
+      approver: ['approver', 'custodian'],
+      custodian: ['custodian'],
+    };
+
+    if (!held.some((role) => implied[required].includes(role))) {
+      throw new NotFoundError();
     }
   }
+
+  /** Reading the queue needs only `viewer`. */
+  const requireOperator = (userId: string): Promise<void> => requireRole(userId, 'viewer');
+
+  /** Deciding a withdrawal moves money, and needs `approver`. */
+  const requireApprover = (userId: string): Promise<void> => requireRole(userId, 'approver');
 
   return {
     async request(request) {
@@ -80,7 +121,9 @@ export function createWithdrawalControllers(deps: WithdrawalControllerDeps): Wit
 
     async reviewQueue(request) {
       const { userId } = requireSessionRecord(request);
-      requireOperator(userId);
+      // Reading the queue is `viewer`: it exposes other users' withdrawals,
+      // so it is privileged, but it moves nothing.
+      await requireOperator(userId);
 
       const rows = await deps.withdrawals.listForReview(100);
       const items = await Promise.all(
@@ -101,7 +144,8 @@ export function createWithdrawalControllers(deps: WithdrawalControllerDeps): Wit
 
     async approve(request) {
       const { userId } = requireSessionRecord(request);
-      requireOperator(userId);
+      // Approving releases funds. `approver`, not `viewer`.
+      await requireApprover(userId);
       const { id } = request.params as { id: string };
       const { note } = request.body as { note: string };
 
@@ -116,7 +160,8 @@ export function createWithdrawalControllers(deps: WithdrawalControllerDeps): Wit
 
     async reject(request) {
       const { userId } = requireSessionRecord(request);
-      requireOperator(userId);
+      // Rejecting returns funds to the user, which is also a money decision.
+      await requireApprover(userId);
       const { id } = request.params as { id: string };
       const { note } = request.body as { note: string };
 

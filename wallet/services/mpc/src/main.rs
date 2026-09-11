@@ -9,7 +9,7 @@
 //! idempotency contract, the authorization check and the audit trail are
 //! already the right shape for a threshold (ADR-0015).
 
-use wallet_mpc::{auth, error, http, keystore, signer, store};
+use wallet_mpc::{auth, error, frost, http, keystore, signer, store, threshold};
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -27,7 +27,29 @@ use store::Store;
 /// malformed value stops the process here, naming the variable and never
 /// printing its value — a config error is frequently the first thing pasted
 /// into a chat, and it must be safe to paste.
+/// What this process is (ADR-0015).
+///
+/// One binary, three roles, chosen at boot. Separate binaries would duplicate
+/// the config validation, the authentication and the audit trail — and a
+/// participant that authenticated differently from the single-key service is a
+/// participant whose security is a different, less-reviewed thing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Role {
+    /// 4a: one key in one process. The default, so an existing deployment is
+    /// unchanged by this code shipping.
+    SingleKey,
+    /// 4b: holds one FROST share and answers the round endpoints.
+    Participant,
+    /// 4b: holds no key material; runs rounds against the participants.
+    Coordinator,
+}
+
 struct Config {
+    role: Role,
+    /// `role = Participant`: the roster entry this host is.
+    participant_identifier: Option<String>,
+    /// `role = Coordinator`: `identifier@url` for each participant.
+    roster: Vec<String>,
     bind: SocketAddr,
     database_path: PathBuf,
     kek: String,
@@ -65,6 +87,42 @@ fn load_config() -> std::result::Result<Config, Vec<String>> {
                 String::new()
             }
         }
+    }
+
+    let role = match std::env::var("MPC_ROLE").as_deref() {
+        Ok("participant") => Role::Participant,
+        Ok("coordinator") => Role::Coordinator,
+        Ok("single-key") | Err(_) => Role::SingleKey,
+        Ok(other) => {
+            missing.push(format!(
+                "MPC_ROLE: expected single-key, participant or coordinator, got \"{other}\""
+            ));
+            Role::SingleKey
+        }
+    };
+
+    let participant_identifier = std::env::var("MPC_PARTICIPANT_IDENTIFIER").ok();
+    let roster: Vec<String> = std::env::var("MPC_PARTICIPANTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    // Fail at boot, not at the first withdrawal. A coordinator with three
+    // participants configured cannot ever reach a 3-of-5 threshold if one is
+    // down, and discovering that when someone is trying to move money is the
+    // worst possible time.
+    if role == Role::Coordinator && roster.len() < usize::from(wallet_mpc::frost::MAX_SIGNERS) {
+        missing.push(format!(
+            "MPC_PARTICIPANTS: a coordinator needs {} entries (identifier@url), found {}",
+            wallet_mpc::frost::MAX_SIGNERS,
+            roster.len()
+        ));
+    }
+    if role == Role::Participant && participant_identifier.is_none() {
+        missing.push("MPC_PARTICIPANT_IDENTIFIER: required when MPC_ROLE is participant".into());
     }
 
     let kek = required("MPC_KEK", &mut missing);
@@ -119,6 +177,9 @@ fn load_config() -> std::result::Result<Config, Vec<String>> {
         caller_public_key,
         timestamp_tolerance_seconds,
         tls,
+        role,
+        participant_identifier,
+        roster,
         bootstrap_key_ref: std::env::var("MPC_BOOTSTRAP_KEY_REF").ok(),
         approval_public_key: std::env::var("MPC_APPROVAL_PUBLIC_KEY")
             .ok()
@@ -162,6 +223,10 @@ async fn run(config: Config) -> std::result::Result<(), MpcError> {
         config.timestamp_tolerance_seconds,
     )?;
 
+    // The KEK is consumed by the signing service; a participant needs its own
+    // handle to seal shares and nonces with the same key.
+    let kek_for_frost = Kek::from_base64(&config.kek)?;
+
     let signer = match &config.approval_public_key {
         Some(key) => SigningService::new(Arc::clone(&store), kek).with_approval_key(key)?,
         None => {
@@ -173,19 +238,91 @@ async fn run(config: Config) -> std::result::Result<(), MpcError> {
         }
     };
 
-    if let Some(key_ref) = &config.bootstrap_key_ref {
-        let public = signer.ensure_key(key_ref)?;
-        tracing::info!(
-            key_ref,
-            public_key = %base64::Engine::encode(&base64::engine::general_purpose::STANDARD, public),
-            "signing key ready"
-        );
+    // -----------------------------------------------------------------------
+    // Role wiring (ADR-0015)
+    // -----------------------------------------------------------------------
+    let mut participant = None;
+    let mut coordinator = None;
+
+    match config.role {
+        Role::SingleKey => {
+            if let Some(key_ref) = &config.bootstrap_key_ref {
+                let public = signer.ensure_key(key_ref)?;
+                tracing::info!(
+                    key_ref,
+                    public_key = %base64::Engine::encode(&base64::engine::general_purpose::STANDARD, public),
+                    "signing key ready"
+                );
+            }
+            tracing::warn!(
+                "role=single-key: ONE key in one process. A compromise of this host yields the \
+                 treasury key. Threshold signing is MPC_ROLE=participant/coordinator (ADR-0015)."
+            );
+        }
+
+        Role::Participant => {
+            let key_ref = config
+                .bootstrap_key_ref
+                .clone()
+                .unwrap_or_else(|| "treasury".to_string());
+
+            match frost::Participant::load(Arc::clone(&store), kek_for_frost, &key_ref)? {
+                Some(loaded) => {
+                    tracing::info!(
+                        key_ref = %key_ref,
+                        identifier = %config.participant_identifier.clone().unwrap_or_default(),
+                        group_public_key = %base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            loaded.group_public_key()?,
+                        ),
+                        "participant ready"
+                    );
+                    participant = Some(Arc::new(loaded));
+                }
+                None => {
+                    // Deliberately fatal. A participant with no share that
+                    // started anyway would answer health checks, be counted as
+                    // available, and fail every round — which reads as a
+                    // network problem rather than a missing ceremony.
+                    return Err(MpcError::Internal("participant_has_no_share"));
+                }
+            }
+        }
+
+        Role::Coordinator => {
+            let participants = parse_roster(&config.roster)?;
+            tracing::info!(
+                participants = participants.len(),
+                threshold = frost::MIN_SIGNERS,
+                "coordinator ready"
+            );
+            // The group public key comes from the ceremony record, stored
+            // under the coordinator's own key_ref. The coordinator holds no
+            // share — only the public package it needs to aggregate.
+            let key_ref = config
+                .bootstrap_key_ref
+                .clone()
+                .unwrap_or_else(|| "treasury".to_string());
+            let Some((_, group_bytes, _, _)) = store.load_share(&key_ref)? else {
+                return Err(MpcError::Internal("coordinator_has_no_group_key"));
+            };
+            let public_package = postcard::from_bytes(&group_bytes)
+                .map_err(|_| MpcError::Internal("public_package_corrupt"))?;
+
+            coordinator = Some(Arc::new(threshold::Coordinator::new(
+                participants,
+                public_package,
+                std::time::Duration::from_secs(20),
+            )?));
+        }
     }
 
     let state = Arc::new(http::AppState {
         signer,
         store,
         caller,
+        participant,
+        coordinator,
     });
 
     let router = http::router(state);
@@ -256,4 +393,30 @@ fn is_loopback(address: &SocketAddr) -> bool {
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutting down");
+}
+
+/// Parse `identifier@url` roster entries.
+///
+/// The identifier is required rather than inferred from position: a roster
+/// reordered in an environment variable would otherwise silently address the
+/// wrong participant, and the symptom would be an aggregation failure with no
+/// indication of the cause.
+fn parse_roster(
+    entries: &[String],
+) -> std::result::Result<Vec<threshold::ParticipantEndpoint>, MpcError> {
+    entries
+        .iter()
+        .map(|entry| {
+            let (identifier, url) = entry
+                .split_once('@')
+                .ok_or(MpcError::Internal("roster_entry_malformed"))?;
+            if identifier.trim().is_empty() || url.trim().is_empty() {
+                return Err(MpcError::Internal("roster_entry_malformed"));
+            }
+            Ok(threshold::ParticipantEndpoint {
+                identifier: identifier.trim().to_owned(),
+                url: url.trim().trim_end_matches('/').to_owned(),
+            })
+        })
+        .collect()
 }

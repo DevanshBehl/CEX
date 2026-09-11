@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigValidationError, parseEnv, toApiConfig, toPublicConfig } from './index.js';
+import { rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  ConfigValidationError,
+  parseEnv,
+  secretAudit,
+  toApiConfig,
+  toPublicConfig,
+} from './index.js';
 
 const valid = {
   NODE_ENV: 'test',
@@ -15,6 +24,38 @@ const valid = {
   SOLANA_RPC_URL: 'http://127.0.0.1:8899',
   DEPOSIT_SEED: 'z'.repeat(44),
 } as const;
+
+/**
+ * A valid PRODUCTION environment.
+ *
+ * The critical secrets come from files because production refuses them as
+ * literals (rule 162). Written once here rather than inline in each test: the
+ * rule was added after these tests existed, and three copies of the fixture
+ * would have been three places to forget it.
+ */
+function productionEnv(overrides: Record<string, string> = {}): Record<string, string> {
+  const seedPath = join(tmpdir(), `seed-${String(process.pid)}`);
+  const kekPath = join(tmpdir(), `kek-${String(process.pid)}`);
+  writeFileSync(seedPath, 'z'.repeat(44));
+  writeFileSync(kekPath, Buffer.alloc(32, 4).toString('base64'));
+
+  return {
+    ...valid,
+    NODE_ENV: 'production',
+    WEB_ORIGIN: 'https://app.example.com',
+    WEBAUTHN_ORIGIN: 'https://app.example.com',
+    WEBAUTHN_RP_ID: 'example.com',
+    // A production config cannot use the mock signer either (ADR-0011), and a
+    // `real` signer needs a client key to authenticate to services/mpc
+    // (ADR-0013) — so this fixture would fail for two other reasons without
+    // both of these.
+    SIGNER_KIND: 'real',
+    MPC_CLIENT_PRIVATE_KEY: 'ZmFrZS1wZW0tZm9yLXRlc3Rz',
+    DEPOSIT_SEED: `file:${seedPath}`,
+    MPC_KEK: `file:${kekPath}`,
+    ...overrides,
+  };
+}
 
 describe('parseEnv', () => {
   it('accepts a complete environment and applies defaults', () => {
@@ -95,19 +136,7 @@ describe('parseEnv', () => {
   it('refuses a sub-final commitment in production (ADR-0006)', () => {
     // Crediting below finality is a double-credit vector. A test environment
     // may loosen it; production may not.
-    const productionish = {
-      ...valid,
-      NODE_ENV: 'production',
-      WEB_ORIGIN: 'https://app.example.com',
-      WEBAUTHN_ORIGIN: 'https://app.example.com',
-      WEBAUTHN_RP_ID: 'example.com',
-      // A production config cannot use the mock signer either (ADR-0011), and
-      // a `real` signer needs a client key to authenticate to services/mpc
-      // (ADR-0013) — so this fixture would fail for two other reasons without
-      // both of these.
-      SIGNER_KIND: 'real',
-      MPC_CLIENT_PRIVATE_KEY: 'ZmFrZS1wZW0tZm9yLXRlc3Rz',
-    };
+    const productionish = productionEnv();
     expect(() => parseEnv({ ...productionish, SOLANA_COMMITMENT: 'finalized' })).not.toThrow();
     expect(() => parseEnv({ ...productionish, SOLANA_COMMITMENT: 'confirmed' })).toThrow(
       ConfigValidationError,
@@ -242,5 +271,109 @@ describe('TOKEN_MINTS', () => {
     expect(() => parseEnv({ ...valid, TOKEN_MINTS: `SOL:${USDC}:9` })).toThrow(
       ConfigValidationError,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Secret resolution (master-prompt rule 157, prompt_phase4.md rules 161-162)
+// ---------------------------------------------------------------------------
+
+describe('secret references', () => {
+  it('accepts a literal, so an existing .env deployment is unchanged', () => {
+    const config = parseEnv(valid);
+    expect(config.DEPOSIT_SEED).toBe(valid.DEPOSIT_SEED);
+  });
+
+  it('resolves env: indirection', () => {
+    // Resolved against the environment PASSED IN, not a global — which is why
+    // this test needs no process.env mutation.
+    const config = parseEnv({
+      ...valid,
+      SEED_FROM_ELSEWHERE: 'q'.repeat(44),
+      DEPOSIT_SEED: 'env:SEED_FROM_ELSEWHERE',
+    });
+    expect(config.DEPOSIT_SEED).toBe('q'.repeat(44));
+  });
+
+  it('resolves file: indirection, trimming the trailing newline', () => {
+    // Every tool that writes a secret file adds one, and a KEK with a newline
+    // is a different key.
+    const path = join(tmpdir(), `secret-${String(Date.now())}`);
+    writeFileSync(path, `${'r'.repeat(44)}\n`);
+    try {
+      const config = parseEnv({ ...valid, DEPOSIT_SEED: `file:${path}` });
+      expect(config.DEPOSIT_SEED).toBe('r'.repeat(44));
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
+  it('reports an unreadable file by NAME, never by content', () => {
+    let message = '';
+    try {
+      parseEnv({ ...valid, DEPOSIT_SEED: 'file:/nonexistent/secret' });
+    } catch (error) {
+      message = (error as ConfigValidationError).report();
+    }
+    expect(message).toContain('DEPOSIT_SEED');
+    expect(message).toContain('/nonexistent/secret');
+  });
+
+  it('refuses an env: reference that is not set, rather than resolving to empty', () => {
+    // An empty secret produces a KEK of no bytes and fails much later as
+    // something that looks like corruption.
+    expect(() => parseEnv({ ...valid, DEPOSIT_SEED: 'env:DEFINITELY_NOT_SET' })).toThrow(
+      ConfigValidationError,
+    );
+  });
+
+  it('records how each secret was obtained, with no values', () => {
+    parseEnv(valid);
+    const audit = secretAudit();
+    expect(audit.length).toBeGreaterThan(0);
+
+    const rendered = JSON.stringify(audit);
+    expect(rendered).not.toContain(valid.SESSION_SECRET);
+    expect(rendered).not.toContain(valid.DEPOSIT_SEED);
+  });
+
+  it('REFUSES a literal deposit seed in production', () => {
+    // Rule 162: the deposit seed can regenerate every deposit key, so it is
+    // one of the two that must move to a secret manager first.
+    const productionish = {
+      ...valid,
+      NODE_ENV: 'production',
+      WEB_ORIGIN: 'https://app.example.com',
+      WEBAUTHN_ORIGIN: 'https://app.example.com',
+      WEBAUTHN_RP_ID: 'example.com',
+      SIGNER_KIND: 'real',
+      MPC_CLIENT_PRIVATE_KEY: 'ZmFrZS1wZW0tZm9yLXRlc3Rz',
+    };
+
+    expect(() => parseEnv(productionish)).toThrow(ConfigValidationError);
+  });
+
+  it('accepts a production deposit seed that comes from a file', () => {
+    const path = join(tmpdir(), `seed-${String(Date.now())}`);
+    writeFileSync(path, 's'.repeat(44));
+    try {
+      const config = parseEnv({
+        ...valid,
+        NODE_ENV: 'production',
+        WEB_ORIGIN: 'https://app.example.com',
+        WEBAUTHN_ORIGIN: 'https://app.example.com',
+        WEBAUTHN_RP_ID: 'example.com',
+        SIGNER_KIND: 'real',
+        MPC_CLIENT_PRIVATE_KEY: 'ZmFrZS1wZW0tZm9yLXRlc3Rz',
+        DEPOSIT_SEED: `file:${path}`,
+      });
+      expect(config.DEPOSIT_SEED).toBe('s'.repeat(44));
+    } finally {
+      rmSync(path, { force: true });
+    }
+  });
+
+  it('leaves development alone — .env is the documented development path', () => {
+    expect(() => parseEnv(valid)).not.toThrow();
   });
 });

@@ -86,6 +86,20 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
       const ordered = [...eligible].reverse();
 
       const watchedAddresses = new Set<Address>([validator.normalize(request.address)]);
+
+      /*
+       * Who to credit, which is not always what was scanned.
+       *
+       * A token account's inbound transfers are found by scanning the token
+       * account, but they belong to its OWNER — and `parseTokenTransfers`
+       * matches on owner precisely so a mint nobody anticipated is still
+       * attributed. Passing the scanned account here instead would match
+       * nothing, and token deposits would be discovered and then silently
+       * dropped (ADR-0016).
+       */
+      const watchedOwners = new Set<Address>([
+        validator.normalize(request.creditTo ?? request.address),
+      ]);
       const transfers: TransferEvent[] = [];
 
       for (const entry of ordered) {
@@ -116,7 +130,7 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
          */
         transfers.push(
           ...parseTokenTransfers(parsed, {
-            watchedOwners: watchedAddresses,
+            watchedOwners,
             txReference: entry.signature,
           }),
         );
@@ -183,6 +197,20 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
         connection.getMinimumBalanceForRentExemption(0, options.commitment),
       );
       return BigInt(lamports).toString();
+    },
+
+    /**
+     * Does this account exist on chain?
+     *
+     * The token path asks before deciding whether to include an
+     * ATA-creation instruction: creating one that exists fails the whole
+     * transaction, and omitting one that is missing fails it too (ADR-0016).
+     */
+    async accountExists(address: string): Promise<boolean> {
+      const info = await rpc.call('getAccountInfo(exists)', (connection) =>
+        connection.getAccountInfo(toPublicKey(address), options.commitment),
+      );
+      return info !== null;
     },
 
     async isHealthy(): Promise<boolean> {

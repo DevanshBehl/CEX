@@ -88,7 +88,20 @@ export interface TransferPage {
 }
 
 export interface FetchTransfersRequest {
+  /** The account to scan the history of. */
   readonly address: Address;
+  /**
+   * Who the funds belong to, when that is not `address` itself.
+   *
+   * On some chains an account can hold a balance in a SUB-ACCOUNT that the
+   * owner's own address never appears in — so the account whose history must
+   * be scanned and the party to be credited are different things. Absent means
+   * they are the same, which is the ordinary case.
+   *
+   * Without this the adapter credits whatever it scanned, and a sub-account's
+   * inbound transfer is attributed to nobody.
+   */
+  readonly creditTo?: Address;
   /**
    * Opaque cursor from a previous `TransferPage`, or null to start from the
    * beginning of the address's history.

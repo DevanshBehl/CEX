@@ -1,6 +1,9 @@
-# MPC Custodial Wallet
+# Atlas Wallet
 
-An educational custodial Solana wallet platform, built in four phases.
+An educational custodial Solana wallet platform, built in four phases. The
+first product in the Atlas ecosystem; the interface follows the Atlas design
+system (`design.md`), which is why the visual language is deliberately more
+general than one wallet needs.
 **Phases 1–3 are complete: identity, custody and money-in, and money-out.
 Phase 4 is partially complete** — see [Where Phase 4 stands](#where-phase-4-stands).
 
@@ -41,11 +44,15 @@ payload before it will sign, enforces per-request idempotency, and enforces
 custody-tier authority requirements. The key never leaves it: no endpoint
 returns it, no log prints it, and the type that holds it has no accessor.
 
-**It is not threshold signing.** ADR-0015 specifies 3-of-5 FROST-Ed25519 across
-independent failure domains. What exists is one key in one process. That
-delivers the process boundary and the authorization check — most of the
-architectural value — and **none** of the key-compromise resistance. One host
-compromise yields the treasury key.
+**Threshold signing is implemented.** ADR-0015's 3-of-5 FROST-Ed25519 (RFC
+9591, via `frost-ed25519`) runs as a role of the same binary: `MPC_ROLE` selects
+`single-key`, `participant` or `coordinator`. Each participant holds one share
+sealed under its own KEK, keeps its own nonce ledger, and **verifies the
+approval proof itself** before contributing — so a compromised coordinator can
+censor but cannot obtain a signature the approval authority did not authorise.
+
+`single-key` remains the default, so an existing deployment is unchanged by
+this shipping and says so loudly at boot.
 
 | Phase 4 area                      | State                                                                                    |
 | --------------------------------- | ---------------------------------------------------------------------------------------- |

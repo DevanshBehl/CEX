@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { emailSchema } from '@wallet/types';
 import { api, ApiError } from '@/lib/api';
 import { useSession } from '@/hooks/use-session';
-import { Button, Card, ErrorNotice, Field, Input } from '@/components/ui';
+import { Button, Card, ErrorNotice, Field, Input, PageHeader } from '@/components/ui';
 
 export default function ProfilePage() {
   const { state, refresh } = useSession();
@@ -54,8 +54,8 @@ export default function ProfilePage() {
   }
 
   return (
-    <div className="mx-auto max-w-xl space-y-6">
-      <h1 className="text-xl font-semibold">Profile</h1>
+    <div className="max-w-xl animate-fade-up">
+      <PageHeader title="Profile" />
       <Card>
         <form onSubmit={onSave} className="space-y-4">
           <Field label="Display name">

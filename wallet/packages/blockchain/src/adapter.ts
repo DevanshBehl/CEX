@@ -45,6 +45,16 @@ export interface ChainReader {
    * difference between a user's balance and a house account.
    */
   getMinimumAccountBalance(asset: string): Promise<string>;
+  /**
+   * Does this account exist on chain?
+   *
+   * Needed because some chains require an account to be created before it can
+   * receive a given asset, and creating one that already exists fails the
+   * transaction as surely as not creating one that is missing. The caller must
+   * ASK rather than assume — and that is a question about the chain, not about
+   * the asset, so it belongs on the reader.
+   */
+  accountExists(address: Address): Promise<boolean>;
   isHealthy(): Promise<boolean>;
 }
 

@@ -1,4 +1,10 @@
 import { createAssetRegistry, NATIVE_ASSET_KEY, type AssetRegistry } from '@wallet/types';
+import {
+  CRITICAL_SECRETS,
+  resolveSecret,
+  SecretResolutionError,
+  type SecretAudit,
+} from './secrets.js';
 
 /**
  * Display fallback for the native asset. Config must not import a chain
@@ -148,9 +154,104 @@ export interface PublicConfig {
 // ---------------------------------------------------------------------------
 
 /** Pure and testable: no process access, no exit. Throws ConfigValidationError. */
+/**
+ * Resolve secret REFERENCES into values before validation (rule 161).
+ *
+ * Runs first so the rest of the schema validates real values: a KEK that is
+ * `file:/run/secrets/kek` must be 32 bytes of key, not 26 characters of path,
+ * and validating the reference would pass while the value failed much later.
+ *
+ * A value with no scheme is passed through unchanged, so an existing `.env`
+ * deployment behaves exactly as before.
+ */
+function resolveSecretReferences(raw: RawEnv): { raw: RawEnv; audit: SecretAudit[] } {
+  const resolved: Record<string, string | undefined> = { ...raw };
+  const audit: SecretAudit[] = [];
+
+  for (const variable of SECRET_VARIABLES) {
+    const reference = raw[variable];
+    if (reference === undefined || reference.trim() === '') continue;
+
+    // `raw` IS the environment here — `parseEnv` is called with
+    // `process.env` by `loadApiConfigOrExit`, which is the one place that
+    // reads it.
+    const secret = resolveSecret(variable, reference, raw);
+    resolved[variable] = secret.value;
+    audit.push({ variable, scheme: secret.scheme, describe: secret.describe });
+  }
+
+  return { raw: resolved, audit };
+}
+
+/** Every variable whose value is a secret rather than configuration. */
+const SECRET_VARIABLES = [
+  'DEPOSIT_SEED',
+  'SESSION_SECRET',
+  'TOTP_ENCRYPTION_KEY',
+  'MPC_KEK',
+  'MPC_CLIENT_PRIVATE_KEY',
+  'MPC_APPROVAL_PRIVATE_KEY',
+] as const;
+
+/** How each secret was obtained. Names and schemes only — never values. */
+let lastSecretAudit: SecretAudit[] = [];
+
+export function secretAudit(): readonly SecretAudit[] {
+  return lastSecretAudit;
+}
+
 export function parseEnv(raw: RawEnv): Env {
-  const result = envSchema.safeParse(raw);
-  if (result.success) return result.data;
+  let resolved: RawEnv;
+  try {
+    const outcome = resolveSecretReferences(raw);
+    resolved = outcome.raw;
+    lastSecretAudit = outcome.audit;
+  } catch (error) {
+    // A reference that cannot be resolved is a configuration error and is
+    // reported like one: the variable name and the reason, never a value.
+    throw new ConfigValidationError([
+      {
+        variable: error instanceof SecretResolutionError ? error.variable : '(secret)',
+        problem:
+          error instanceof SecretResolutionError
+            ? error.message.replace(`${error.variable}: `, '')
+            : 'could not be resolved',
+      },
+    ]);
+  }
+
+  const result = envSchema.safeParse(resolved);
+
+  if (result.success) {
+    /*
+     * The two secrets that can regenerate everything else must not be
+     * literals in production (rule 162): the deposit seed derives every
+     * deposit key, and the KEK decrypts the treasury key at rest.
+     *
+     * Checked AFTER parsing, so it only fires on an otherwise valid config,
+     * and only in production — development is `.env` by design.
+     */
+    if (result.data.NODE_ENV === 'production') {
+      const literals = lastSecretAudit.filter(
+        (entry) =>
+          entry.scheme === 'literal' &&
+          (CRITICAL_SECRETS as readonly string[]).includes(entry.variable),
+      );
+
+      if (literals.length > 0) {
+        throw new ConfigValidationError(
+          literals.map((entry) => ({
+            variable: entry.variable,
+            problem:
+              'must come from a secret manager in production, not the environment. ' +
+              'Use file:/path or env:OTHER_VAR (master-prompt rule 157).',
+          })),
+        );
+      }
+    }
+
+    return result.data;
+  }
 
   const issues: ConfigIssue[] = result.error.issues.map((issue) => ({
     variable: issue.path.length > 0 ? issue.path.join('.') : '(root)',
@@ -323,3 +424,4 @@ export function loadApiConfigOrExit(raw: RawEnv = readProcessEnv()): ApiConfig {
 export function __resetConfigCache(): void {
   cached = undefined;
 }
+export * from './secrets.js';

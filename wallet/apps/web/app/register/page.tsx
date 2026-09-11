@@ -5,7 +5,8 @@ import Link from 'next/link';
 import { emailSchema } from '@wallet/types';
 import { usePasskey } from '@/hooks/use-passkey';
 import { useSession } from '@/hooks/use-session';
-import { Button, Card, ErrorNotice, Field, Input } from '@/components/ui';
+import { Button, ErrorNotice, Field, Input } from '@/components/ui';
+import { AuthPanel } from '@/components/auth-panel';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -44,50 +45,52 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="mx-auto max-w-md">
-      <Card
-        title="Create your account"
-        description="You will sign in with a passkey. There is no password and no seed phrase to write down."
-      >
-        <form onSubmit={onSubmit} className="space-y-4">
-          <Field
-            label="Email (optional)"
-            hint="Used to identify your account. You can add it later."
-            error={emailError}
-          >
-            <Input
-              type="email"
-              value={email}
-              autoComplete="username webauthn"
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-            />
-          </Field>
-
-          <Field label="Display name (optional)">
-            <Input
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Your name"
-            />
-          </Field>
-
-          {state.error !== null && (
-            <ErrorNotice message={state.error} correlationId={state.correlationId} />
-          )}
-
-          <Button type="submit" disabled={state.busy} className="w-full">
-            {state.busy ? 'Waiting for your passkey…' : 'Create account with a passkey'}
-          </Button>
-        </form>
-
-        <p className="mt-4 text-sm text-muted">
+    <AuthPanel
+      title="Create your account"
+      description="You will sign in with a passkey. There is no password and no seed phrase to write down."
+      footer={
+        <>
           Already have an account?{' '}
-          <Link href="/login" className="text-accent underline">
+          <Link
+            href="/login"
+            className="text-accent transition-colors duration-micro ease-atlas hover:text-accent-strong"
+          >
             Sign in
           </Link>
-        </p>
-      </Card>
-    </div>
+        </>
+      }
+    >
+      <form onSubmit={onSubmit} className="space-y-5">
+        <Field
+          label="Email (optional)"
+          hint="Used to identify your account. You can add it later."
+          error={emailError}
+        >
+          <Input
+            type="email"
+            value={email}
+            autoComplete="username webauthn"
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@example.com"
+          />
+        </Field>
+
+        <Field label="Display name (optional)">
+          <Input
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="Your name"
+          />
+        </Field>
+
+        {state.error !== null && (
+          <ErrorNotice message={state.error} correlationId={state.correlationId} />
+        )}
+
+        <Button type="submit" disabled={state.busy} size="lg" className="w-full">
+          {state.busy ? 'Waiting for your passkey…' : 'Create account with a passkey'}
+        </Button>
+      </form>
+    </AuthPanel>
   );
 }

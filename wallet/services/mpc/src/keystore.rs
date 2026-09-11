@@ -52,7 +52,12 @@ impl Kek {
             .map_err(|_| MpcError::Internal("kek_rejected"))
     }
 
-    fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+    /// Seal arbitrary bytes under this KEK.
+    ///
+    /// `pub` because 4b's key shares and signing nonces are sealed with the
+    /// same primitive as a single key (ADR-0014) — a second encryption path
+    /// for share material would be a second thing to get wrong.
+    pub fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let mut nonce_bytes = [0u8; NONCE_BYTES];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -69,7 +74,7 @@ impl Kek {
         Ok(out)
     }
 
-    fn open(&self, sealed: &[u8]) -> Result<Vec<u8>> {
+    pub fn open(&self, sealed: &[u8]) -> Result<Vec<u8>> {
         if sealed.len() <= NONCE_BYTES {
             return Err(MpcError::Crypto("ciphertext_truncated"));
         }

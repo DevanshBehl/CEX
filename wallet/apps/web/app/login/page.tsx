@@ -4,7 +4,8 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { usePasskey } from '@/hooks/use-passkey';
 import { useSession } from '@/hooks/use-session';
-import { Button, Card, ErrorNotice } from '@/components/ui';
+import { Button, ErrorNotice } from '@/components/ui';
+import { AuthPanel } from '@/components/auth-panel';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -20,25 +21,30 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="mx-auto max-w-md">
-      <Card title="Sign in" description="Your passkey identifies you — there is nothing to type.">
-        {state.error !== null && (
-          <div className="mb-4">
-            <ErrorNotice message={state.error} correlationId={state.correlationId} />
-          </div>
-        )}
-
-        <Button onClick={onSignIn} disabled={state.busy} className="w-full">
-          {state.busy ? 'Waiting for your passkey…' : 'Sign in with a passkey'}
-        </Button>
-
-        <p className="mt-4 text-sm text-muted">
+    <AuthPanel
+      title="Sign in"
+      description="Your passkey identifies you — there is nothing to type."
+      footer={
+        <>
           No account yet?{' '}
-          <Link href="/register" className="text-accent underline">
+          <Link
+            href="/register"
+            className="text-accent transition-colors duration-micro ease-atlas hover:text-accent-strong"
+          >
             Create one
           </Link>
-        </p>
-      </Card>
-    </div>
+        </>
+      }
+    >
+      {state.error !== null && (
+        <div className="mb-4">
+          <ErrorNotice message={state.error} correlationId={state.correlationId} />
+        </div>
+      )}
+
+      <Button onClick={onSignIn} disabled={state.busy} size="lg" className="w-full">
+        {state.busy ? 'Waiting for your passkey…' : 'Sign in with a passkey'}
+      </Button>
+    </AuthPanel>
   );
 }

@@ -10,7 +10,19 @@ import { baseUnitsSchema } from '../money.js';
  * job — it is the side that knows the asset's decimals and the user's locale.
  */
 
-export const assetSchema = z.string().min(1).max(16);
+/**
+ * A ledger asset key: `SOL`, or a mint address (ADR-0016).
+ *
+ * 44, not 16. A symbol fits in 16 characters and a base58 mint address does
+ * not — at 16 every token request was rejected by validation before it reached
+ * the allowlist, which would have made SPL support unreachable from the API
+ * while every internal test passed.
+ *
+ * Deliberately NOT a base58 pattern: the allowlist decides what is creditable
+ * (ADR-0016), and duplicating that judgement in a wire schema means two places
+ * to change when a chain with different address encoding arrives.
+ */
+export const assetSchema = z.string().min(1).max(44);
 export const chainSchema = z.string().min(1).max(32);
 
 export const balanceSchema = z.object({

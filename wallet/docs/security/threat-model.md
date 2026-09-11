@@ -125,13 +125,18 @@ fixed destination — but the seed's blast radius is still every user's deposit
 address between sweeps. Moving it behind the MPC boundary is named in
 prompt_phase4.md rule 162 and is **not done**.
 
-### Threshold signing is not implemented
+### Threshold signing is implemented, but has never been run across real hosts
 
-ADR-0015 specifies 3-of-5 FROST-Ed25519 across independent failure domains.
-What exists is a **single key in a separate process**. That delivers the
-process boundary and the authorization verification, which is most of the
-architectural value — and none of the key-compromise resistance. One host
-compromise yields the treasury key.
+3-of-5 FROST-Ed25519 exists and is tested: any three participants sign, any two
+fail cleanly, a single share produces nothing valid, and nonce reuse is refused
+by the store rather than by care. What has **not** happened is a deployment
+across five independent hosts with five sets of credentials — the tests run
+five participants in one process, each with its own store and its own KEK, which
+is as close as a test can get and is not the same thing.
+
+`MPC_ROLE=single-key` also remains the default. A deployment that has not
+changed it has one key in one process, and one host compromise yields the
+treasury key. The service says so at boot.
 
 ### All participants would share a deploy pipeline
 
@@ -146,11 +151,17 @@ produce on its own. It is not air-gapped key material in a safe. That is a
 meaningful protection against a compromised coordinator and is **not** the
 protection the word "cold" implies in custody.
 
-### Secrets are environment variables
+### Secrets can come from a file, but not yet from a managed store
 
-Rule 161 calls for a secret manager. `.env` is what exists. Every secret is
-readable by anything that can read the process environment or a core dump, and
-there is no rotation path for most of them.
+Secrets are resolved from references — `env:OTHER_VAR` or `file:/run/secrets/x`
+— and production **refuses** the deposit seed or the KEK as a literal. What does
+not exist is an integration with a managed store (AWS Secrets Manager, Vault):
+adding one is a new `SecretSource`, not a change to every call site, but it is
+not written.
+
+So a deployment using `file:` mounts is meaningfully better than `.env` and is
+still only as good as the filesystem it mounts from. There is also still no
+rotation path for most secrets.
 
 ### `TOTP_ENCRYPTION_KEY` cannot be rotated
 
@@ -158,12 +169,16 @@ There is no re-encryption path for stored TOTP secrets. Rotating the key
 invalidates every enrolled authenticator. This is **accepted and recorded**
 rather than fixed (rule 167).
 
-### The operator model is a list of user ids
+### The operator model has roles, but no four-eyes
 
-`OPERATOR_USER_IDS`. No roles, no separation of duties, no four-eyes on operator
-actions beyond what step-up freshness provides. A warm-tier movement requires
-"an operator signature", which is worth exactly what it costs to become an
-operator.
+Roles are granted in the database (`viewer`, `approver`, `custodian`), revocable
+without a restart, and the grant history is append-mostly so "who could approve
+withdrawals in March" stays answerable. Granting is a CLI on the host rather
+than an endpoint, so a compromised operator session cannot mint more operators.
+
+What is still missing: **separation of duties**. One `approver` can approve a
+withdrawal alone; nothing requires two. A warm-tier movement requires "an
+operator signature", which is worth exactly what it costs to become an operator.
 
 ### The dead-letter queue is in memory
 

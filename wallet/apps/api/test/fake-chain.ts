@@ -136,6 +136,19 @@ export function createFakeChain(): FakeChain {
       return minimum;
     },
 
+    /**
+     * Every account "exists" on the fake chain.
+     *
+     * Deliberate: the token path uses this to decide whether to include an
+     * ATA-creation instruction, and the fake chain models nothing about
+     * account lifecycles. Returning true means the tests exercise the simpler
+     * branch — the branch that CREATES an account is only meaningfully tested
+     * against a real validator, which `packages/solana` does.
+     */
+    async accountExists(): Promise<boolean> {
+      return true;
+    },
+
     async isHealthy(): Promise<boolean> {
       return true;
     },

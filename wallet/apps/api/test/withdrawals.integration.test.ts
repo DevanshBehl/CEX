@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createMockSigner, type MockSigner } from '@wallet/blockchain';
-import { createLedgerRepository, createWithdrawalRepository } from '@wallet/db';
+import { randomUUID } from 'node:crypto';
+import {
+  createLedgerRepository,
+  createOperatorRepository,
+  createWithdrawalRepository,
+} from '@wallet/db';
 import { NATIVE_ASSET } from '@wallet/solana';
 import { WITHDRAWAL_TRANSITIONS, type WithdrawalStatus } from '@wallet/types';
 import {
@@ -16,6 +21,7 @@ import {
   markDestinationKnown,
   seedNonceAccounts,
   seedSession,
+  seedSteppedUpSession,
   startHarness,
   type Harness,
 } from './helpers.js';
@@ -554,5 +560,143 @@ describe('log hygiene', () => {
     // But the events themselves are recorded, so this is not passing by
     // silence.
     expect(output).toMatch(/withdrawal\./);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Operator roles (prompt_phase4.md rule 166)
+// ---------------------------------------------------------------------------
+
+describe('operator authority comes from granted roles', () => {
+  /**
+   * A harness with NO bootstrap operators.
+   *
+   * The rest of this file uses `operatorUserIds`, which is the configured
+   * escape hatch that exists only so a fresh environment can make its first
+   * grant. Tests that rely on it prove the escape hatch works and say nothing
+   * about the role model — so these start from an empty list.
+   */
+  let roleHarness: Awaited<ReturnType<typeof startHarness>>;
+
+  beforeAll(async () => {
+    roleHarness = await startHarness({ operatorUserIds: [] });
+  });
+
+  afterAll(async () => {
+    await roleHarness.cleanup();
+  });
+
+  function operators() {
+    return createOperatorRepository(roleHarness.app.appDeps.db);
+  }
+
+  async function queueStatus(cookie: string): Promise<number> {
+    const response = await roleHarness.app.inject({
+      method: 'GET',
+      url: '/operator/review-queue',
+      headers: { cookie },
+    });
+    return response.statusCode;
+  }
+
+  it('refuses an ordinary user', async () => {
+    const session = await seedSteppedUpSession(roleHarness);
+    expect(await queueStatus(session.cookie)).toBe(404);
+  });
+
+  it('admits a user once a viewer role is granted, with no restart', async () => {
+    // The whole point of replacing the environment variable: authority can be
+    // granted while the process is running.
+    const session = await seedSteppedUpSession(roleHarness);
+    expect(await queueStatus(session.cookie)).toBe(404);
+
+    await operators().grant({ userId: session.userId, role: 'viewer', grantedByUserId: null });
+
+    expect(await queueStatus(session.cookie)).toBe(200);
+  });
+
+  it('removes authority on revocation, also with no restart', async () => {
+    const session = await seedSteppedUpSession(roleHarness);
+    await operators().grant({ userId: session.userId, role: 'viewer', grantedByUserId: null });
+    expect(await queueStatus(session.cookie)).toBe(200);
+
+    await operators().revoke(session.userId, 'viewer');
+    expect(await queueStatus(session.cookie)).toBe(404);
+  });
+
+  it('does NOT let a viewer approve a withdrawal', async () => {
+    // Reading the queue and releasing funds are different authorities.
+    // A viewer that could approve would make the distinction decorative.
+    const session = await seedSteppedUpSession(roleHarness);
+    await operators().grant({ userId: session.userId, role: 'viewer', grantedByUserId: null });
+
+    const response = await roleHarness.app.inject({
+      method: 'POST',
+      url: `/operator/withdrawals/${randomUUID()}/approve`,
+      headers: browserHeaders(session.cookie),
+      payload: { note: 'looks fine' },
+    });
+
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('lets a custodian do what an approver can', async () => {
+    // custodian implies approver implies viewer. Asserted, because the
+    // implication lives in code rather than in the grant.
+    const session = await seedSteppedUpSession(roleHarness);
+    await operators().grant({ userId: session.userId, role: 'custodian', grantedByUserId: null });
+    expect(await queueStatus(session.cookie)).toBe(200);
+  });
+
+  it('refuses a second live grant of the same role', async () => {
+    // The partial unique index. A duplicate means the caller's understanding
+    // of current state is wrong, and succeeding quietly would hide that.
+    const session = await seedSteppedUpSession(roleHarness);
+    await operators().grant({ userId: session.userId, role: 'viewer', grantedByUserId: null });
+
+    await expect(
+      operators().grant({ userId: session.userId, role: 'viewer', grantedByUserId: null }),
+    ).rejects.toThrow();
+  });
+
+  it('allows re-granting after a revocation', async () => {
+    const session = await seedSteppedUpSession(roleHarness);
+    await operators().grant({ userId: session.userId, role: 'approver', grantedByUserId: null });
+    await operators().revoke(session.userId, 'approver');
+
+    await expect(
+      operators().grant({ userId: session.userId, role: 'approver', grantedByUserId: null }),
+    ).resolves.toBeDefined();
+  });
+
+  it('keeps revoked grants in the history', async () => {
+    // "Who could approve withdrawals in March" must stay answerable
+    // (master-prompt rule 166).
+    const session = await seedSteppedUpSession(roleHarness);
+    await operators().grant({
+      userId: session.userId,
+      role: 'approver',
+      grantedByUserId: null,
+      reason: 'on-call',
+    });
+    await operators().revoke(session.userId, 'approver');
+
+    const history = await operators().history(session.userId);
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ role: 'approver', reason: 'on-call' });
+    expect(history[0]?.revokedAt).not.toBeNull();
+  });
+
+  it('reports 404 rather than 403, so the route is not confirmed', async () => {
+    // A 403 tells an attacker the endpoint exists and that they simply lack
+    // the role. 404 says nothing either way.
+    const session = await seedSteppedUpSession(roleHarness);
+    const response = await roleHarness.app.inject({
+      method: 'GET',
+      url: '/operator/review-queue',
+      headers: { cookie: session.cookie },
+    });
+    expect(response.statusCode).toBe(404);
+    expect(response.body).not.toContain('role');
   });
 });

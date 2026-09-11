@@ -7,21 +7,31 @@ import { StatusBadge } from '@/components/ui';
 /**
  * Presentation only (rule 163). It receives balances and renders them; it does
  * not fetch, and it does not compute.
+ *
+ * The ROW is the unit, not a card. A balance list is tabular data (§20): the
+ * asset on the left, the figure hard-right in tabular monospace so a column of
+ * them aligns on the decimal. Reserved funds sit beneath the asset as a muted
+ * line rather than a second column, because they are the exception and giving
+ * them equal weight would imply they are not.
  */
 export function BalanceList({ balances }: { balances: readonly Balance[] }) {
   return (
     <ul className="divide-y divide-line">
       {balances.map((balance) => (
-        <li key={balance.asset} className="flex items-baseline justify-between gap-4 py-3">
-          <div>
-            <p className="text-sm font-medium">{balance.asset}</p>
+        <li
+          key={balance.asset}
+          className="group flex items-center justify-between gap-4 py-4 transition-colors duration-micro ease-atlas"
+        >
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-ink">{balance.asset}</p>
             {!isZeroAmount(balance.locked) && (
-              <p className="text-xs text-muted">
+              <p className="mt-0.5 flex items-center gap-1.5 text-xs text-warning">
+                <span aria-hidden="true" className="h-1 w-1 rounded-full bg-warning" />
                 {formatAmount(balance.locked, balance.decimals)} reserved
               </p>
             )}
           </div>
-          <p className="font-mono text-sm tabular-nums">
+          <p className="shrink-0 font-mono text-lg tracking-[-0.01em] text-ink">
             {formatAmount(balance.available, balance.decimals)}
           </p>
         </li>

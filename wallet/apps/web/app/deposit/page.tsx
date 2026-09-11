@@ -3,14 +3,21 @@
 import { useEffect, useState } from 'react';
 import type { DepositAddress } from '@wallet/types';
 import { api, ApiError } from '@/lib/api';
-import { Button, Card, ErrorNotice, Spinner, StatusBadge } from '@/components/ui';
+import {
+  ErrorNotice,
+  PageHeader,
+  Section,
+  Spinner,
+  StatusBadge,
+  SystemNote,
+} from '@/components/ui';
+import { AddressDisplay } from '@/components/crypto';
 
 export default function DepositPage() {
   const [address, setAddress] = useState<DepositAddress | null>(null);
   const [error, setError] = useState<{ message: string; correlationId: string | null } | null>(
     null,
   );
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -33,76 +40,102 @@ export default function DepositPage() {
   }, []);
 
   return (
-    <div className="mx-auto max-w-xl space-y-6">
-      <h1 className="text-xl font-semibold">Deposit</h1>
+    <div className="animate-fade-up">
+      <PageHeader
+        title="Deposit"
+        description="Your address is permanent. Send to it as many times as you like."
+      />
 
       {error !== null && (
-        <ErrorNotice message={error.message} correlationId={error.correlationId} />
+        <div className="mb-8 max-w-2xl">
+          <ErrorNotice message={error.message} correlationId={error.correlationId} />
+        </div>
       )}
 
       {address === null && error === null ? (
         <Spinner label="Preparing your deposit address…" />
       ) : address !== null ? (
-        <>
-          {/*
-            Rule 172: the asset and the network are stated unambiguously and
-            before the address. Sending an asset on the wrong network is the
-            most common way users lose funds, and a vague label is a
-            contributing cause.
-          */}
-          <Card title={`Send ${address.asset} only`}>
-            <div className="flex flex-wrap items-center gap-2">
-              <StatusBadge tone="warn">{address.asset}</StatusBadge>
-              <StatusBadge tone="neutral">{address.network}</StatusBadge>
-            </div>
-
-            <p className="mt-4 text-sm text-muted">
-              This address accepts <strong className="text-ink">{address.asset}</strong> on the{' '}
-              <strong className="text-ink">{address.network}</strong> network only. Anything else
-              sent here may be permanently lost.
-            </p>
-
-            <div className="mt-4 rounded-md border border-line bg-line/20 p-4">
-              <p data-testid="deposit-address" className="break-all font-mono text-sm">
-                {address.address}
+        <div className="grid gap-10 lg:grid-cols-3 lg:gap-12">
+          <div className="lg:col-span-2">
+            {/*
+              Rule 172: the asset and the network are stated unambiguously and
+              BEFORE the address. Sending an asset on the wrong network is the
+              most common way users lose funds, and a vague label is a
+              contributing cause — so this warning is not a footnote under the
+              address, it is the thing you read first.
+            */}
+            <Section
+              title={`Send ${address.asset} only`}
+              action={
+                <div className="flex items-center gap-2">
+                  <StatusBadge tone="warn">{address.asset}</StatusBadge>
+                  <StatusBadge tone="neutral">{address.network}</StatusBadge>
+                </div>
+              }
+            >
+              <p className="max-w-prose text-sm leading-relaxed text-ink-secondary">
+                This address accepts{' '}
+                <strong className="font-medium text-ink">{address.asset}</strong> on the{' '}
+                <strong className="font-medium text-ink">{address.network}</strong> network only.
+                Anything else sent here may be permanently lost.
               </p>
-            </div>
 
-            <div className="mt-3 flex items-center gap-3">
-              <Button
-                variant="secondary"
-                onClick={async () => {
-                  await navigator.clipboard.writeText(address.address);
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 2000);
-                }}
-              >
-                {copied ? 'Copied' : 'Copy address'}
-              </Button>
-              <QrCode value={address.address} />
-            </div>
-          </Card>
+              {/*
+                Copying is part of the address component, not a button beside
+                it. "Select 44 characters by hand" is how a transposition error
+                happens, and the affordance belongs where the risk is.
+              */}
+              <div className="mt-5 max-w-xl">
+                <AddressDisplay
+                  address={address.address}
+                  testId="deposit-address"
+                  label={`Your ${address.asset} address · ${address.network}`}
+                />
+              </div>
 
-          <Card title="What happens next">
-            <ol className="space-y-2 text-sm text-muted">
-              <li>1. Send {address.asset} to the address above from any wallet or exchange.</li>
-              <li>
-                2. The deposit appears as <strong className="text-ink">Confirming</strong> once the
-                network has seen it.
-              </li>
-              <li>
-                3. It is credited once the network has{' '}
-                <strong className="text-ink">finalized</strong> it — usually within a minute. Until
-                then it is not spendable, because a transaction below finality can still be
-                reversed.
-              </li>
-            </ol>
-            <p className="mt-4 text-xs text-muted">
-              Your first deposit to this address holds back a small one-time network account
-              minimum, which is shown separately on the Activity page.
-            </p>
-          </Card>
-        </>
+              <div className="mt-4">
+                <QrCode value={address.address} />
+              </div>
+            </Section>
+          </div>
+
+          <aside className="space-y-8">
+            <Section title="What happens next">
+              {/*
+                §29: a numbered sequence as a rail, not a bulleted list. The
+                index sits in mono at a fixed width so the steps align, which
+                is what makes a process read as a process.
+              */}
+              <ol className="space-y-4">
+                {[
+                  <>Send {address.asset} to the address from any wallet or exchange.</>,
+                  <>
+                    It appears as <strong className="font-medium text-ink">Confirming</strong> once
+                    the network has seen it.
+                  </>,
+                  <>
+                    It is credited once the network has{' '}
+                    <strong className="font-medium text-ink">finalized</strong> it — usually within
+                    a minute. Until then it is not spendable, because a transaction below finality
+                    can still be reversed.
+                  </>,
+                ].map((step, index) => (
+                  <li key={index} className="flex gap-3">
+                    <span className="mt-px shrink-0 font-mono text-2xs text-ink-disabled">
+                      {String(index + 1).padStart(2, '0')}
+                    </span>
+                    <span className="text-xs leading-relaxed text-ink-muted">{step}</span>
+                  </li>
+                ))}
+              </ol>
+            </Section>
+
+            <SystemNote label="One-time" title="A small network minimum is held back">
+              Your first deposit to this address reserves the network&apos;s account minimum. It is
+              shown separately on the Activity page and is never counted as your balance.
+            </SystemNote>
+          </aside>
+        </div>
       ) : null}
     </div>
   );
@@ -122,7 +155,7 @@ function QrCode({ value }: { value: string }) {
       href={`https://solscan.io/account/${value}`}
       target="_blank"
       rel="noopener noreferrer"
-      className="text-sm text-accent underline"
+      className="text-sm text-accent transition-colors duration-micro ease-atlas hover:text-accent-strong"
     >
       View on explorer
     </a>

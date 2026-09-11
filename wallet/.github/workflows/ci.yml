@@ -243,6 +243,9 @@ jobs:
       - run: pnpm --filter @wallet/solana test:integration
       - run: pnpm --filter @wallet/api test:integration
 
+  # The threshold suite (`tests/threshold.rs`) runs five participant services
+  # over real HTTP. It is the only check that 3-of-5 actually holds end to end
+  # — the unit tests prove the cryptography, not the wire protocol.
   rust:
     name: MPC service (Rust)
     runs-on: ubuntu-latest

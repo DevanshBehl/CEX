@@ -42,6 +42,8 @@ fn harness() -> Harness {
             signer,
             store,
             caller,
+            participant: None,
+            coordinator: None,
         })),
         client,
     }

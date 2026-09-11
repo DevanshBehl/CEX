@@ -420,3 +420,166 @@ function signMessage(message: Uint8Array, keypair: Keypair): Uint8Array {
   });
   return new Uint8Array(edSign(null, Buffer.from(message), key));
 }
+
+// ---------------------------------------------------------------------------
+// Token DISCOVERY, not just parsing (ADR-0016)
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY THIS TEST EXISTS
+ *
+ * Token parsing was correct for weeks and token deposits still did not work,
+ * because nothing was ever fetched to parse: the indexer polled deposit
+ * ADDRESSES, and a token transfer never touches the owner's address. It moves
+ * between token accounts, and the owner is not among the transaction's account
+ * keys.
+ *
+ * No unit test with a fabricated transaction can catch that — the fabricated
+ * transaction is handed to the parser directly. Only a real RPC can say whether
+ * `getSignaturesForAddress(owner)` returns anything, and the answer is no.
+ */
+describe('a token transfer is discoverable only at the token account', () => {
+  it('shows a TRANSFER at the token account and not at the owner', async () => {
+    if (!available) return;
+
+    const payer = Keypair.generate();
+    const airdrop = await connection.requestAirdrop(payer.publicKey, 2 * LAMPORTS_PER_SOL);
+    await connection.confirmTransaction(airdrop, 'confirmed');
+
+    const mint = Keypair.generate();
+    const mintRent = await connection.getMinimumBalanceForRentExemption(MINT_LENGTH);
+    await sendAndConfirm(
+      new Transaction().add(
+        SystemProgram.createAccount({
+          fromPubkey: payer.publicKey,
+          newAccountPubkey: mint.publicKey,
+          lamports: mintRent,
+          space: MINT_LENGTH,
+          programId: TOKEN_PROGRAM_ID,
+        }),
+        initializeMintInstruction(mint.publicKey, payer.publicKey, 6),
+      ),
+      [payer, mint],
+    );
+
+    const holder = Keypair.generate();
+    const holderAta = deriveAssociatedTokenAddress(
+      holder.publicKey.toBase58(),
+      mint.publicKey.toBase58(),
+    );
+
+    /*
+     * Creation and transfer are SEPARATE transactions, deliberately.
+     *
+     * The ATA-creation instruction names the owner among its account keys, so
+     * THAT transaction is visible at the owner's address. Bundling the two
+     * hides the finding — the first version of this test did exactly that and
+     * reported the opposite conclusion.
+     *
+     * What matters operationally is the steady state: an address whose token
+     * account already exists, receiving more of the same token.
+     */
+    await sendAndConfirm(
+      new Transaction().add(
+        createAtaInstruction(payer.publicKey, holder.publicKey, mint.publicKey),
+      ),
+      [payer],
+    );
+
+    const transferSignature = await sendAndConfirm(
+      new Transaction().add(
+        mintToInstruction(mint.publicKey, new PublicKey(holderAta), payer.publicKey, 500_000_000n),
+      ),
+      [payer],
+    );
+
+    await waitForFinality();
+
+    /*
+     * Asserted on THE TRANSFER'S OWN SIGNATURE, not on counts.
+     *
+     * Counting is racy: `getSignaturesForAddress` lags `confirmed`, so an
+     * earlier count can be stale and the comparison then reports the opposite
+     * of the truth. Asking whether this specific signature is present at each
+     * address is exact and timing-independent.
+     */
+    const atOwner = await connection.getSignaturesForAddress(holder.publicKey, { limit: 25 });
+    const atTokenAccount = await connection.getSignaturesForAddress(new PublicKey(holderAta), {
+      limit: 25,
+    });
+
+    // THE FINDING: the transfer is invisible at the owner's address...
+    expect(atOwner.map((entry) => entry.signature)).not.toContain(transferSignature);
+    // ...and plainly visible at the token account.
+    expect(atTokenAccount.map((entry) => entry.signature)).toContain(transferSignature);
+  }, 90_000);
+
+  it('attributes a token transfer to the OWNER, not to the scanned account', async () => {
+    if (!available) return;
+
+    // The other half: once the right account is scanned, the credit must go to
+    // the owner. `creditTo` on the fetch request is what carries that — without
+    // it the adapter watches whatever it scanned, matches no owner, and drops
+    // every token transfer it just successfully found.
+    const payer = Keypair.generate();
+    const airdrop = await connection.requestAirdrop(payer.publicKey, 2 * LAMPORTS_PER_SOL);
+    await connection.confirmTransaction(airdrop, 'confirmed');
+
+    const mint = Keypair.generate();
+    const mintRent = await connection.getMinimumBalanceForRentExemption(MINT_LENGTH);
+    await sendAndConfirm(
+      new Transaction().add(
+        SystemProgram.createAccount({
+          fromPubkey: payer.publicKey,
+          newAccountPubkey: mint.publicKey,
+          lamports: mintRent,
+          space: MINT_LENGTH,
+          programId: TOKEN_PROGRAM_ID,
+        }),
+        initializeMintInstruction(mint.publicKey, payer.publicKey, 6),
+      ),
+      [payer, mint],
+    );
+
+    const holder = Keypair.generate();
+    const holderAta = deriveAssociatedTokenAddress(
+      holder.publicKey.toBase58(),
+      mint.publicKey.toBase58(),
+    );
+
+    await sendAndConfirm(
+      new Transaction().add(
+        createAtaInstruction(payer.publicKey, holder.publicKey, mint.publicKey),
+        mintToInstruction(mint.publicKey, new PublicKey(holderAta), payer.publicKey, 250_000_000n),
+      ),
+      [payer],
+    );
+
+    // The adapter reads at `finalized` (ADR-0006); `sendAndConfirm` waits only
+    // for `confirmed`. Without this the transaction is simply not there yet and
+    // the test fails for a reason that has nothing to do with attribution.
+    await waitForFinality();
+
+    const page = await adapter().fetchTransfers({
+      address: holderAta,
+      creditTo: holder.publicKey.toBase58(),
+      cursor: null,
+      pageSize: 20,
+    });
+
+    const tokenTransfer = page.transfers.find((t) => t.asset === mint.publicKey.toBase58());
+    expect(tokenTransfer).toBeDefined();
+    expect(tokenTransfer?.to).toBe(holder.publicKey.toBase58());
+    expect(tokenTransfer?.amount).toBe('250000000');
+  }, 90_000);
+});
+
+/** Give the validator time to finalize what was just confirmed. */
+async function waitForFinality(): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  const target = await connection.getSlot('confirmed');
+  while (Date.now() < deadline) {
+    if ((await connection.getSlot('finalized')) >= target) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}

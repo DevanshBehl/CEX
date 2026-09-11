@@ -388,8 +388,14 @@ describe('indexer restart safety', () => {
     chain.push({ to: user.address, amount: LAMPORTS(1), txReference: 'fully-committed' });
 
     await runIndexer();
-    const cursorAfter = await h.app.appDeps.db.indexerCursor.findFirst({
-      where: { addressId: user.addressId },
+    // Scoped to the cursor for the DEPOSIT ADDRESS itself. An address now has
+    // one cursor per scanned account — its own, plus one per allowlisted mint's
+    // token account (ADR-0016) — so `findFirst` could return a token cursor
+    // that legitimately has no signature.
+    const cursorAfter = await h.app.appDeps.db.indexerCursor.findUnique({
+      where: {
+        addressId_scanAddress: { addressId: user.addressId, scanAddress: user.address },
+      },
     });
     expect(cursorAfter?.lastSignature).toBe('fully-committed');
 

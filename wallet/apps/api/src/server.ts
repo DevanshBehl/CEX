@@ -33,12 +33,12 @@ import { createLogger, type Logger } from '@wallet/logger';
 import {
   createNonceManager,
   createSolanaAdapter,
+  deriveAssociatedTokenAddress,
   createSolanaAddressDeriver,
   createSolanaAddressValidator,
   createSolanaRpc,
   createWithdrawalBroadcaster,
   NATIVE_ASSET,
-  NATIVE_DECIMALS,
   SOLANA_CHAIN_ID,
   type NonceManager,
   type WithdrawalBroadcaster,
@@ -365,13 +365,31 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
       : {}),
     deadLetters,
     metrics,
+    assets: config.chain.assets,
+    chainReader: chainAdapter,
   });
+
+  /**
+   * Display decimals for every allowlisted asset (ADR-0016).
+   *
+   * Built from the registry, not hardcoded to SOL. A `{ SOL: 9 }` map means a
+   * token falls through to `?? 0` and its amount renders as raw base units —
+   * `1000000` where the user expects `1.00 USDC`. Off by six orders of
+   * magnitude, in an interface whose whole job is telling someone how much
+   * money they have.
+   *
+   * These are DISPLAY metadata and reach no arithmetic (master-prompt rule
+   * 115); the ledger is integer base units throughout.
+   */
+  const assetDecimals = Object.fromEntries(
+    config.chain.assets.keys.map((asset) => [asset, config.chain.assets.decimalsOf(asset)]),
+  );
 
   const withdrawalControllers = createWithdrawalControllers({
     db,
     withdrawals: withdrawalService,
-    decimals: { [NATIVE_ASSET]: NATIVE_DECIMALS },
-    operatorUserIds: config.withdrawal.operatorUserIds,
+    decimals: assetDecimals,
+    bootstrapOperatorUserIds: config.withdrawal.operatorUserIds,
   });
 
   const custodyControllers = createCustodyControllers({
@@ -380,7 +398,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     chain: SOLANA_CHAIN_ID,
     network: config.chain.network,
     nativeAsset: NATIVE_ASSET,
-    decimals: { [NATIVE_ASSET]: NATIVE_DECIMALS },
+    decimals: assetDecimals,
   });
 
   const controllers = createAuthControllers({
@@ -527,6 +545,23 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     adapter: chainAdapter,
     pipeline: depositPipeline,
     logger,
+    /**
+     * Where to look for each allowlisted mint (ADR-0016).
+     *
+     * A token transfer never touches the owner's address, so polling the
+     * deposit address alone finds nothing — verified against a real validator.
+     * Each derived token account is polled separately, with its own cursor.
+     *
+     * Derivation lives HERE, in the composition root, because it is
+     * chain-specific and the indexer must not know what a mint is (rule 25).
+     * Each scanned account gets its own cursor row, keyed on the account
+     * itself — sharing one with the deposit address would let a SOL transfer
+     * advance past unseen token transfers, silently.
+     */
+    tokenAccounts: async (address) =>
+      config.chain.assets.tokens.map((token) => ({
+        address: deriveAssociatedTokenAddress(address.address, token.mint),
+      })),
     options: {
       chain: SOLANA_CHAIN_ID,
       pollIntervalMs: config.indexer.pollIntervalMs,

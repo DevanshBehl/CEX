@@ -15,7 +15,14 @@ import { isTerminal } from '@wallet/types';
 import type { DeadLetterQueue, JobQueue } from '../observability/dead-letter.js';
 import type { WalletMetrics } from '../observability/metrics.js';
 import type { NonceManager, WithdrawalBroadcaster } from '@wallet/solana';
-import { attachSignature, buildWithdrawalTransaction } from '@wallet/solana';
+import {
+  attachSignature,
+  buildTokenTransferTransaction,
+  buildWithdrawalTransaction,
+  deriveAssociatedTokenAddress,
+  type UnsignedWithdrawal,
+} from '@wallet/solana';
+import type { AssetRegistry } from '@wallet/types';
 import { releaseLock } from '../services/withdrawal.service.js';
 
 export interface RetryBudgets {
@@ -52,6 +59,16 @@ export interface WithdrawalWorkerDeps {
    */
   readonly deadLetters?: DeadLetterQueue | undefined;
   readonly metrics?: WalletMetrics | undefined;
+  /** The allowlist, for deciding whether an asset is a token (ADR-0016). */
+  readonly assets: AssetRegistry;
+  /**
+   * Chain reads the token path needs.
+   *
+   * Named `chainReader`, not `chain` — that name is already the chain ID on
+   * this interface, and a field that is sometimes a string and sometimes an
+   * object is how a rename goes wrong quietly.
+   */
+  readonly chainReader: { accountExists(address: string): Promise<boolean> };
 }
 
 export interface WithdrawalWorkers {
@@ -149,6 +166,52 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
     });
   }
 
+  /**
+   * Build a token withdrawal.
+   *
+   * Two things the native path does not have to think about:
+   *
+   * 1. **The destination's token account may not exist.** Read from the chain
+   *    rather than assumed — creating one that exists fails the transaction,
+   *    and not creating one that is missing fails it too. Its rent is a house
+   *    expense (`postTokenAccountRent`), never charged to the user.
+   *
+   * 2. **The treasury pays the fee in SOL.** A token transfer cannot pay its
+   *    own fee (rule 119). The treasury holds SOL, so for a WITHDRAWAL the fee
+   *    funding step a sweep needs does not apply — the fee payer already has
+   *    a balance. That asymmetry is why sweeps are the harder half.
+   */
+  async function buildTokenWithdrawal(
+    withdrawal: WithdrawalRecord,
+    nonceAccount: string,
+    nonce: string,
+  ): Promise<UnsignedWithdrawal> {
+    const treasuryTokenAccount = deriveAssociatedTokenAddress(
+      deps.treasuryAddress,
+      withdrawal.asset,
+    );
+    const destinationTokenAccount = deriveAssociatedTokenAddress(
+      withdrawal.destination,
+      withdrawal.asset,
+    );
+
+    const exists = await deps.chainReader.accountExists(destinationTokenAccount);
+
+    const built = buildTokenTransferTransaction({
+      owner: deps.treasuryAddress,
+      ownerTokenAccount: treasuryTokenAccount,
+      destinationOwner: withdrawal.destination,
+      mint: withdrawal.asset,
+      amount: withdrawal.amount,
+      nonceAccount,
+      nonceAuthority: deps.treasuryAddress,
+      nonce,
+      createDestinationAccount: !exists,
+    });
+
+    return { message: built.message, transaction: built.transaction, nonce: built.nonce };
+  }
+
   /** Which queue a give-up belongs to, for the operator's view. */
   function queueFor(status: WithdrawalRecord['status']): JobQueue {
     if (status === 'BROADCAST_FAILED') return 'withdrawal_broadcast';
@@ -196,14 +259,26 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
       const state = await deps.nonces.readNonce(lease.address);
       if (!state) throw new Error(`nonce account ${lease.id} has no on-chain state`);
 
-      const unsigned = buildWithdrawalTransaction({
-        from: deps.treasuryAddress,
-        to: claimed.destination,
-        lamports: claimed.amount,
-        nonceAccount: lease.address,
-        nonceAuthority: deps.treasuryAddress,
-        nonce: state.nonce,
-      });
+      /**
+       * Native or token, decided by the asset (ADR-0016).
+       *
+       * The state machine, the nonce lease, the signing request, the
+       * idempotency key and the settlement posting are all identical either
+       * way — only the bytes differ. prompt_phase4.md rule 126 says a token
+       * withdrawal that cannot reuse the withdrawal machine means the machine
+       * was chain-specific, and that would be the defect. This is the one
+       * place the two paths diverge.
+       */
+      const unsigned = deps.assets.isToken(claimed.asset)
+        ? await buildTokenWithdrawal(claimed, lease.address, state.nonce)
+        : buildWithdrawalTransaction({
+            from: deps.treasuryAddress,
+            to: claimed.destination,
+            lamports: claimed.amount,
+            nonceAccount: lease.address,
+            nonceAuthority: deps.treasuryAddress,
+            nonce: state.nonce,
+          });
 
       /**
        * The idempotency key is (withdrawal, nonce), not the withdrawal alone.

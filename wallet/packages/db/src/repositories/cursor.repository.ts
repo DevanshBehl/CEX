@@ -1,8 +1,22 @@
 import type { Executor } from '../transaction.js';
 import { newId } from '../ids.js';
 
+/**
+ * A cursor is keyed on (address, SCANNED ACCOUNT), not on the address alone.
+ *
+ * A native deposit is found by polling the deposit address; a token deposit is
+ * found by polling that address's token account, because a token transfer never
+ * touches the owner's address (ADR-0016). One address therefore has several
+ * cursors, and sharing one between them would let a native transfer advance
+ * past token transfers that had not been seen.
+ */
+export interface CursorKey {
+  readonly addressId: string;
+  readonly scanAddress: string;
+}
+
 export interface CursorRepository {
-  get(addressId: string, tx?: Executor): Promise<string | null>;
+  get(key: CursorKey, tx?: Executor): Promise<string | null>;
   /**
    * Persist the cursor for an address.
    *
@@ -13,19 +27,19 @@ export interface CursorRepository {
    * re-read, and a re-read is a no-op by the deposit uniqueness constraint.
    */
   advance(
-    input: { addressId: string; chain: string; signature: string; position: bigint | null },
+    input: CursorKey & { chain: string; signature: string; position: bigint | null },
     tx?: Executor,
   ): Promise<void>;
-  touch(addressId: string, chain: string, tx?: Executor): Promise<void>;
+  touch(key: CursorKey, chain: string, tx?: Executor): Promise<void>;
 }
 
 export function createCursorRepository(db: Executor): CursorRepository {
   const exec = (tx?: Executor): Executor => tx ?? db;
 
   return {
-    async get(addressId, tx) {
+    async get(key, tx) {
       const row = await exec(tx).indexerCursor.findUnique({
-        where: { addressId },
+        where: { addressId_scanAddress: { ...key } },
         select: { lastSignature: true },
       });
       return row?.lastSignature ?? null;
@@ -33,10 +47,16 @@ export function createCursorRepository(db: Executor): CursorRepository {
 
     async advance(input, tx) {
       await exec(tx).indexerCursor.upsert({
-        where: { addressId: input.addressId },
+        where: {
+          addressId_scanAddress: {
+            addressId: input.addressId,
+            scanAddress: input.scanAddress,
+          },
+        },
         create: {
           id: newId(),
           addressId: input.addressId,
+          scanAddress: input.scanAddress,
           chain: input.chain,
           lastSignature: input.signature,
           lastPosition: input.position,
@@ -51,10 +71,10 @@ export function createCursorRepository(db: Executor): CursorRepository {
     },
 
     /** Records that a poll happened even though it found nothing. */
-    async touch(addressId, chain, tx) {
+    async touch(key, chain, tx) {
       await exec(tx).indexerCursor.upsert({
-        where: { addressId },
-        create: { id: newId(), addressId, chain, lastPolledAt: new Date() },
+        where: { addressId_scanAddress: { ...key } },
+        create: { id: newId(), ...key, chain, lastPolledAt: new Date() },
         update: { lastPolledAt: new Date() },
       });
     },

@@ -82,6 +82,8 @@ export const SECURITY_EVENTS = [
   'sweep.completed',
   'sweep.failed',
   /** Drift that has persisted across cycles, not a single reading (rule 144). */
+  'operator.role_granted',
+  'operator.role_revoked',
   'reconciliation.drift_persisted',
   /** A negative residual with no withdrawals in flight (rule 148). */
   'reconciliation.negative_residual',

@@ -13,7 +13,8 @@
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "reconcile": "tsx src/scripts/reconcile.ts",
-    "provision-nonces": "tsx src/scripts/provision-nonces.ts"
+    "provision-nonces": "tsx src/scripts/provision-nonces.ts",
+    "grant-role": "tsx src/scripts/grant-role.ts"
   },
   "dependencies": {
     "@fastify/cookie": "11.0.2",

@@ -7,7 +7,18 @@ import { useStepUpAction } from '@/features/security/use-step-up';
 import { newIdempotencyKey, useWithdrawals } from '@/features/withdrawal/use-withdrawals';
 import { WithdrawalStatusBadge } from '@/features/withdrawal/status-badge';
 import { formatAmount, isZeroAmount, shortenAddress } from '@/lib/format';
-import { Button, Card, EmptyState, ErrorNotice, Field, Input, Spinner } from '@/components/ui';
+import {
+  Button,
+  EmptyState,
+  ErrorNotice,
+  Field,
+  Figure,
+  Input,
+  PageHeader,
+  Section,
+  Spinner,
+  SystemNote,
+} from '@/components/ui';
 
 export default function WithdrawPage() {
   const balances = useBalances(10_000);
@@ -79,128 +90,152 @@ export default function WithdrawPage() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6">
-      <h1 className="text-xl font-semibold">Withdraw</h1>
+    <div className="animate-fade-up">
+      <PageHeader
+        title="Withdraw"
+        description="Send SOL to an external address. Reviewed before it is sent."
+      />
 
-      <Card title="Send SOL" description="Withdrawals are reviewed before they are sent.">
-        {balances.loading ? (
-          <Spinner label="Loading your balance…" />
-        ) : (
-          <>
-            <dl className="mb-4 grid grid-cols-2 gap-4 text-sm">
-              <div>
-                <dt className="text-xs uppercase tracking-wide text-muted">Available</dt>
-                <dd className="mt-1 font-mono tabular-nums">
-                  {sol ? formatAmount(sol.available, sol.decimals) : '0'} SOL
-                </dd>
-              </div>
-              {/*
-                The locked balance has existed in the ledger since Phase 2 and
-                has never been shown. A user whose funds are reserved against a
-                pending withdrawal is owed that number (rule 158).
-              */}
-              {sol && !isZeroAmount(sol.locked) && (
-                <div>
-                  <dt className="text-xs uppercase tracking-wide text-muted">Reserved</dt>
-                  <dd className="mt-1 font-mono tabular-nums text-muted">
-                    {formatAmount(sol.locked, sol.decimals)} SOL
-                  </dd>
-                </div>
-              )}
-            </dl>
+      {/*
+        §8: the form takes a readable measure in the left two thirds; the
+        balance and the standing warnings sit beside it rather than stacked
+        above, so the primary action is the first thing at the top of the page.
+      */}
+      <div className="grid gap-10 lg:grid-cols-3 lg:gap-12">
+        <div className="lg:col-span-2">
+          <Section title="Send SOL" description="Withdrawals are reviewed before they are sent.">
+            {balances.loading ? (
+              <Spinner label="Loading your balance…" />
+            ) : (
+              <form onSubmit={onSubmit} className="max-w-xl space-y-5">
+                <Field
+                  label="Destination address"
+                  hint="A Solana address on the same network. Check it carefully — a sent transaction cannot be reversed."
+                >
+                  <Input
+                    value={destination}
+                    onChange={(e) => setDestination(e.target.value)}
+                    placeholder="Recipient's Solana address"
+                    spellCheck={false}
+                  />
+                </Field>
 
-            <form onSubmit={onSubmit} className="space-y-4">
-              <Field
-                label="Destination address"
-                hint="A Solana address on the same network. Check it carefully — a sent transaction cannot be reversed."
-              >
-                <Input
-                  value={destination}
-                  onChange={(e) => setDestination(e.target.value)}
-                  placeholder="Recipient's Solana address"
-                  spellCheck={false}
-                />
-              </Field>
+                <Field label="Amount (SOL)">
+                  <Input
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    inputMode="decimal"
+                    placeholder="0.0"
+                  />
+                </Field>
 
-              <Field label="Amount (SOL)">
-                <Input
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  inputMode="decimal"
-                  placeholder="0.0"
-                />
-              </Field>
-
-              {formError !== null && <ErrorNotice message={formError} />}
-              {stepUp.error !== null && (
-                <ErrorNotice
-                  message={stepUp.error.message}
-                  correlationId={stepUp.error.correlationId}
-                />
-              )}
-
-              <Button type="submit" disabled={submitting || stepUp.busy}>
-                {submitting || stepUp.busy ? 'Submitting…' : 'Request withdrawal'}
-              </Button>
-
-              <p className="text-xs text-muted">
-                Large withdrawals and first-time destinations are reviewed by a person before
-                sending. You will be asked to confirm with your passkey.
-              </p>
-            </form>
-          </>
-        )}
-      </Card>
-
-      <Card title="Your withdrawals">
-        {withdrawals.loading ? (
-          <Spinner label="Loading…" />
-        ) : withdrawals.error !== null ? (
-          <ErrorNotice message={withdrawals.error} />
-        ) : withdrawals.data && withdrawals.data.length > 0 ? (
-          <ul className="divide-y divide-line">
-            {withdrawals.data.map((w) => (
-              <li key={w.id} className="space-y-1 py-3">
-                <div className="flex items-baseline justify-between gap-4">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-sm tabular-nums">
-                      −{formatAmount(w.amount, w.decimals)} {w.asset}
-                    </span>
-                    <WithdrawalStatusBadge status={w.status} />
-                  </div>
-                  <span className="text-xs text-muted">
-                    {new Date(w.createdAt).toLocaleString()}
-                  </span>
-                </div>
-
-                <p className="text-xs text-muted">
-                  To <span className="font-mono">{shortenAddress(w.destination, 8)}</span>
-                  {w.txSignature !== null && (
-                    <>
-                      {' · '}
-                      <span className="font-mono">{shortenAddress(w.txSignature, 8)}</span>
-                    </>
-                  )}
-                </p>
-
-                {/* A safe, specific explanation per state — never a risk code. */}
-                <p className="text-xs text-muted">{w.statusDetail}</p>
-
-                {w.networkFee !== null && !isZeroAmount(w.networkFee) && (
-                  <p className="text-xs text-muted">
-                    Network fee {formatAmount(w.networkFee, w.decimals)} {w.asset}, paid by us.
-                  </p>
+                {formError !== null && <ErrorNotice message={formError} />}
+                {stepUp.error !== null && (
+                  <ErrorNotice
+                    message={stepUp.error.message}
+                    correlationId={stepUp.error.correlationId}
+                  />
                 )}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <EmptyState
-            title="No withdrawals yet"
-            body="Withdrawals appear here with their full status, from review through to settlement."
-          />
-        )}
-      </Card>
+
+                <div className="flex items-center gap-4 pt-1">
+                  <Button type="submit" size="lg" disabled={submitting || stepUp.busy}>
+                    {submitting || stepUp.busy ? 'Submitting…' : 'Request withdrawal'}
+                  </Button>
+                  <p className="text-xs text-ink-muted">
+                    You will be asked to confirm with your passkey.
+                  </p>
+                </div>
+              </form>
+            )}
+          </Section>
+        </div>
+
+        {/* Balance and standing warnings: reference, not the primary action. */}
+        <aside className="space-y-8">
+          <div className="rounded-lg border border-line bg-surface p-5">
+            <Figure
+              label="Available"
+              value={sol ? formatAmount(sol.available, sol.decimals) : '0'}
+              unit="SOL"
+              loading={balances.loading}
+            />
+            {/*
+              The locked balance has existed in the ledger since Phase 2 and
+              was never shown. A user whose funds are reserved against a
+              pending withdrawal is owed that number (rule 158).
+            */}
+            {sol && !isZeroAmount(sol.locked) && (
+              <p className="mt-4 flex items-center gap-1.5 border-t border-line pt-4 text-xs text-warning">
+                <span aria-hidden="true" className="h-1 w-1 rounded-full bg-warning" />
+                {formatAmount(sol.locked, sol.decimals)} SOL reserved against a pending withdrawal
+              </p>
+            )}
+          </div>
+
+          <SystemNote label="Before you send" title="A sent transaction cannot be reversed">
+            Large withdrawals and first-time destinations are reviewed by a person before sending.
+            Check the destination address character by character — there is no recovery path for
+            funds sent to the wrong one.
+          </SystemNote>
+        </aside>
+      </div>
+
+      <div className="mt-14">
+        <Section title="Your withdrawals">
+          {withdrawals.loading ? (
+            <Spinner label="Loading…" />
+          ) : withdrawals.error !== null ? (
+            <ErrorNotice message={withdrawals.error} />
+          ) : withdrawals.data && withdrawals.data.length > 0 ? (
+            <ul className="divide-y divide-line">
+              {withdrawals.data.map((w) => (
+                <li key={w.id} className="py-4">
+                  <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                    <div className="flex items-center gap-3">
+                      <span className="font-mono text-base text-ink">
+                        −{formatAmount(w.amount, w.decimals)} {w.asset}
+                      </span>
+                      <WithdrawalStatusBadge status={w.status} />
+                    </div>
+                    <span className="font-mono text-xs text-ink-muted">
+                      {new Date(w.createdAt).toLocaleString()}
+                    </span>
+                  </div>
+
+                  {/*
+                  §20: the identifiers sit on their own line in mono, indented
+                  under the amount. A wallet user reads an address by its shape,
+                  and proportional type destroys the shape.
+                */}
+                  <p className="mt-2 font-mono text-xs text-ink-muted">
+                    <span className="text-ink-disabled">to</span> {shortenAddress(w.destination, 8)}
+                    {w.txSignature !== null && (
+                      <>
+                        <span className="mx-2 text-ink-disabled">·</span>
+                        {shortenAddress(w.txSignature, 8)}
+                      </>
+                    )}
+                  </p>
+
+                  {/* A safe, specific explanation per state — never a risk code. */}
+                  <p className="mt-1.5 text-xs text-ink-secondary">{w.statusDetail}</p>
+
+                  {w.networkFee !== null && !isZeroAmount(w.networkFee) && (
+                    <p className="mt-1 text-xs text-ink-muted">
+                      Network fee {formatAmount(w.networkFee, w.decimals)} {w.asset}, paid by us.
+                    </p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyState
+              title="No withdrawals yet"
+              body="Withdrawals appear here with their full status, from review through to settlement."
+            />
+          )}
+        </Section>
+      </div>
     </div>
   );
 }

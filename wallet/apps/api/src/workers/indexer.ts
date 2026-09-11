@@ -17,6 +17,20 @@ export interface IndexerDeps {
   readonly pipeline: DepositPipeline;
   readonly logger: Logger;
   readonly options: IndexerOptions;
+  /**
+   * The token accounts to poll for a deposit address (ADR-0016).
+   *
+   * Injected rather than derived here: deriving an associated token address is
+   * chain-specific, and this worker must not know what a mint is (rule 25).
+   * The composition root supplies a function that knows both.
+   *
+   * Returns an empty list when no mints are allowlisted, so a SOL-only
+   * deployment does exactly what it did before.
+   */
+  readonly tokenAccounts: (address: {
+    addressId: string;
+    address: string;
+  }) => Promise<readonly { address: string }[]>;
 }
 
 export interface IndexerCycleResult {
@@ -67,9 +81,39 @@ export function createIndexer(deps: IndexerDeps): Indexer {
   async function pollAddress(
     watched: Awaited<ReturnType<typeof custody.listWatched>>[number],
     result: { transfersSeen: number; credited: number; duplicates: number; notFinal: number },
+    /** Where to look. Defaults to the deposit address itself. */
+    scanAddress: string = watched.address,
+    /**
+     * The cursor to advance. Token accounts get their own row, keyed on the
+     * account actually scanned.
+     */
+    cursorScanAddress: string = watched.address,
   ): Promise<void> {
+    /**
+     * THE ADDRESS POLLED IS NOT ALWAYS THE ADDRESS CREDITED.
+     *
+     * A SOL transfer touches the deposit address itself, so
+     * `getSignaturesForAddress(depositAddress)` finds it.
+     *
+     * A TOKEN transfer does not. It moves between token accounts, and the
+     * owner's own address is not among the transaction's account keys — so
+     * polling the owner returns nothing, forever. Verified against a real
+     * validator: a mint to a deposit address's token account produced **1**
+     * signature for the token account and **0** for the owner.
+     *
+     * So each watched address is polled at its own address AND at every
+     * derived token account for an allowlisted mint (ADR-0016). The
+     * `scanAddress` is where to look; `watched.address` remains who to credit,
+     * because `parseTokenTransfers` matches on the token account's OWNER.
+     *
+     * This is the discovery half of token deposits. No unit test with a
+     * fabricated transaction could have caught it: the parsing was correct the
+     * whole time, and nothing was ever fetched to parse.
+     */
     const page = await deps.adapter.fetchTransfers({
-      address: watched.address,
+      address: scanAddress,
+      // Who to credit, when the scanned account is not the deposit address.
+      ...(scanAddress === watched.address ? {} : { creditTo: watched.address }),
       cursor: watched.cursor,
       pageSize: options.pageSize,
     });
@@ -78,10 +122,14 @@ export function createIndexer(deps: IndexerDeps): Indexer {
       // Nothing found, but the poll happened. Recording that separates
       // "healthy and quiet" from "not being polled at all", which otherwise
       // look identical from the outside.
-      await cursors.touch(watched.addressId, options.chain);
+      await cursors.touch(
+        { addressId: watched.addressId, scanAddress: cursorScanAddress },
+        options.chain,
+      );
       if (page.nextCursor !== null && page.nextCursor !== watched.cursor) {
         await cursors.advance({
           addressId: watched.addressId,
+          scanAddress: cursorScanAddress,
           chain: options.chain,
           signature: page.nextCursor,
           position: null,
@@ -92,10 +140,25 @@ export function createIndexer(deps: IndexerDeps): Indexer {
 
     result.transfersSeen += page.transfers.length;
 
-    // The rent-exempt minimum is read per cycle rather than hardcoded
-    // (rule 114). It is a network parameter; a stale constant would
-    // misattribute the split between a user's balance and house_rent.
-    const rentReserved = await deps.adapter.getMinimumAccountBalance(page.transfers[0]!.asset);
+    /**
+     * The rent-exempt minimum is read per cycle rather than hardcoded
+     * (rule 114). It is a network parameter; a stale constant would
+     * misattribute the split between a user's balance and house_rent.
+     *
+     * ONLY FOR THE NATIVE ASSET. Rent is denominated in the chain's own
+     * currency, so there is no such thing as a rent minimum "in USDC" — asking
+     * for one threw a ChainError that failed the entire poll, which is how
+     * token deposits were discovered and then dropped.
+     *
+     * A token account's rent is real and IS paid, in the native asset, as a
+     * house expense (`postTokenAccountRent`) — never deducted from the token
+     * amount a user receives (ADR-0016 rule 118).
+     */
+    const firstAsset = page.transfers[0]!.asset;
+    const rentReserved =
+      scanAddress === watched.address
+        ? await deps.adapter.getMinimumAccountBalance(firstAsset)
+        : '0';
 
     let highestProcessed: string | null = null;
     let highestPosition: bigint | null = null;
@@ -126,6 +189,7 @@ export function createIndexer(deps: IndexerDeps): Indexer {
     if (highestProcessed !== null) {
       await cursors.advance({
         addressId: watched.addressId,
+        scanAddress: cursorScanAddress,
         chain: options.chain,
         signature: highestProcessed,
         position: highestPosition,
@@ -154,7 +218,21 @@ export function createIndexer(deps: IndexerDeps): Indexer {
       if (stopping) break;
       result.addressesPolled += 1;
       try {
+        // The deposit address itself, for native transfers.
         await pollAddress(address, result);
+
+        /*
+         * And every allowlisted mint's token account for it.
+         *
+         * Each gets its OWN cursor row, keyed on the token account's id —
+         * sharing one cursor across the address and its token accounts would
+         * make advancing past a SOL transfer skip unseen token transfers, and
+         * the loss would be silent.
+         */
+        for (const tokenAccount of await deps.tokenAccounts(address)) {
+          if (stopping) break;
+          await pollAddress(address, result, tokenAccount.address, tokenAccount.address);
+        }
       } catch (error) {
         // One address failing must not stop the cycle. The cursor for this
         // address is simply not advanced, so the next cycle retries from the

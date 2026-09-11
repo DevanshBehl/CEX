@@ -58,8 +58,66 @@ model User {
   recoveryCodes RecoveryCode[]
   wallets       Wallet[]
   withdrawals   Withdrawal[]
+  roles         OperatorRole[]
+  grantedRoles  OperatorRole[] @relation("GrantedBy")
 
   @@map("users")
+}
+
+/// What an operator is allowed to do (prompt_phase4.md rule 166).
+///
+/// Phase 3 used `OPERATOR_USER_IDS`, an environment variable. That made
+/// operator authority a deploy-time property: granting it required a restart,
+/// revoking it required a restart, and nothing recorded who granted it or when.
+/// During an incident — which is when operator authority matters — neither
+/// operation was available.
+///
+/// Roles are deliberately COARSE. A fine-grained permission system invites
+/// inventing permissions nobody audits; these three map to the three things an
+/// operator actually does, and each is a different blast radius.
+enum OperatorRoleName {
+  /// Read the review queue and the reconciliation report. No money moves.
+  viewer
+  /// Approve or reject withdrawals the risk engine referred (ADR-0010).
+  approver
+  /// Approve a warm-tier movement (ADR-0018), and grant or revoke roles.
+  ///
+  /// Separate from `approver` because approving a user's withdrawal and moving
+  /// the platform's own float are different authorities, and the second should
+  /// not come free with the first.
+  custodian
+}
+
+/// A role grant. Append-mostly: a revocation sets `revokedAt` rather than
+/// deleting the row, so "who could approve withdrawals in March" stays
+/// answerable (master-prompt rule 166).
+model OperatorRole {
+  id     String           @id @db.Uuid
+  userId String           @map("user_id") @db.Uuid
+  role   OperatorRoleName
+
+  /// Who granted it. Null only for the bootstrap grant, which the seed script
+  /// makes and which is therefore the one grant with no human behind it.
+  grantedByUserId String?   @map("granted_by_user_id") @db.Uuid
+  grantedAt       DateTime  @default(now()) @map("granted_at") @db.Timestamptz(3)
+  revokedAt       DateTime? @map("revoked_at") @db.Timestamptz(3)
+  /// Operator-facing. Why this person has this authority.
+  reason          String?
+
+  user      User  @relation(fields: [userId], references: [id])
+  grantedBy User? @relation("GrantedBy", fields: [grantedByUserId], references: [id])
+
+  /// ONE LIVE GRANT per (user, role) is enforced by a PARTIAL unique index
+  /// created in the migration:
+  ///
+  ///   CREATE UNIQUE INDEX ... ON (user_id, role) WHERE revoked_at IS NULL
+  ///
+  /// Prisma cannot express a partial index, and the `@@unique([userId, role,
+  /// revokedAt])` it would generate is WRONG: PostgreSQL treats NULLs as
+  /// distinct, so it permits unlimited live grants — exactly what it looks
+  /// like it prevents. Declared here as a comment so nobody re-adds it.
+  @@index([role, revokedAt])
+  @@map("operator_roles")
 }
 
 enum CredentialType {
@@ -264,7 +322,7 @@ model Address {
 
   wallet   Wallet          @relation(fields: [walletId], references: [id], onDelete: Cascade)
   deposits Deposit[]
-  cursor   IndexerCursor?
+  cursors  IndexerCursor[]
 
   @@unique([chain, address])
   @@unique([chain, derivationIndex])
@@ -433,7 +491,20 @@ model Deposit {
 model IndexerCursor {
   id        String @id @db.Uuid
   chain     String
-  addressId String @unique @map("address_id") @db.Uuid
+  addressId String @map("address_id") @db.Uuid
+
+  /// WHICH on-chain account this cursor tracks.
+  ///
+  /// For a native deposit it is the deposit address itself. For a token it is
+  /// that address's associated token account — because a token transfer never
+  /// touches the owner's address, so the owner must be polled at a different
+  /// account entirely (ADR-0016).
+  ///
+  /// Part of the key rather than a second table: they are the same thing,
+  /// scanned in the same loop, with the same restart-safety requirement. One
+  /// SHARED cursor would be the bug — advancing past a SOL transfer would skip
+  /// token transfers that had not been seen, and the loss would be silent.
+  scanAddress String @map("scan_address")
 
   lastSignature String? @map("last_signature")
   lastPosition  BigInt? @map("last_position")
@@ -444,6 +515,7 @@ model IndexerCursor {
 
   address Address @relation(fields: [addressId], references: [id], onDelete: Cascade)
 
+  @@unique([addressId, scanAddress])
   @@index([chain, lastPolledAt])
   @@map("indexer_cursors")
 }

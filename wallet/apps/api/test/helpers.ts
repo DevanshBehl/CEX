@@ -100,7 +100,26 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
           select: { userId: true },
           distinct: ['userId'],
         });
-        const protectedIds = new Set(withHistory.map((row) => row.userId));
+
+        /*
+         * Operator grants protect a user too.
+         *
+         * `operator_roles` is append-mostly: the app role has no DELETE, and a
+         * trigger refuses it regardless — because "who could approve
+         * withdrawals in March" must stay answerable (rule 166). So a user who
+         * was ever granted a role cannot be deleted by this application, which
+         * is the same property withdrawals already had.
+         */
+        const withRoles = await db.operatorRole.findMany({
+          where: { userId: { in: createdUserIds } },
+          select: { userId: true },
+          distinct: ['userId'],
+        });
+
+        const protectedIds = new Set([
+          ...withHistory.map((row) => row.userId),
+          ...withRoles.map((row) => row.userId),
+        ]);
         const deletable = createdUserIds.filter((id) => !protectedIds.has(id));
 
         if (deletable.length > 0) {

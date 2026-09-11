@@ -8,13 +8,14 @@ import { useSession } from '@/hooks/use-session';
 import { useStepUpAction } from '@/features/security/use-step-up';
 import {
   Button,
-  Card,
+  Section,
   ErrorNotice,
   Field,
   Input,
   Modal,
   Spinner,
   StatusBadge,
+  PageHeader,
 } from '@/components/ui';
 
 /**
@@ -51,8 +52,11 @@ export default function SecurityPage() {
   const hasTotp = state.data.factors.includes('totp');
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-xl font-semibold">Security</h1>
+    <div className="max-w-3xl animate-fade-up space-y-12">
+      <PageHeader
+        title="Security"
+        description="Passkeys, two-factor authentication, and the devices signed in to this account."
+      />
 
       {loadError !== null && <ErrorNotice message={loadError} />}
       {stepUpAction.error !== null && (
@@ -63,7 +67,7 @@ export default function SecurityPage() {
       )}
 
       {/* --- Passkeys --- */}
-      <Card
+      <Section
         title="Passkeys"
         description="Keep at least two. A single passkey on a single device is one lost device away from losing access."
       >
@@ -77,7 +81,7 @@ export default function SecurityPage() {
                 <li key={credential.id} className="flex items-center justify-between gap-4 py-3">
                   <div>
                     <p className="text-sm font-medium">{credential.deviceName ?? 'Passkey'}</p>
-                    <p className="text-xs text-muted">
+                    <p className="text-xs text-ink-muted">
                       Added {new Date(credential.createdAt).toLocaleDateString()}
                       {credential.lastUsedAt !== null &&
                         ` · last used ${new Date(credential.lastUsedAt).toLocaleDateString()}`}
@@ -122,7 +126,7 @@ export default function SecurityPage() {
             </div>
           )}
         </div>
-      </Card>
+      </Section>
 
       {/* --- Two-factor --- */}
       <TwoFactorCard
@@ -134,7 +138,7 @@ export default function SecurityPage() {
       />
 
       {/* --- Sessions --- */}
-      <Card
+      <Section
         title="Active sessions"
         description="Revoking a session signs that device out immediately."
       >
@@ -149,7 +153,7 @@ export default function SecurityPage() {
                     {session.ip ?? 'unknown address'}
                     {session.current && <StatusBadge tone="good">This device</StatusBadge>}
                   </p>
-                  <p className="text-xs text-muted">
+                  <p className="text-xs text-ink-muted">
                     Last seen {new Date(session.lastSeenAt).toLocaleString()}
                   </p>
                 </div>
@@ -170,7 +174,7 @@ export default function SecurityPage() {
             ))}
           </ul>
         )}
-      </Card>
+      </Section>
     </div>
   );
 }
@@ -193,7 +197,7 @@ function TwoFactorCard({
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <Card
+    <Section
       title="Two-factor authentication"
       description="An authenticator app as a second factor, on top of your passkey."
     >
@@ -250,10 +254,10 @@ function TwoFactorCard({
       >
         {enrollment !== null && (
           <div className="space-y-4">
-            <p className="text-sm text-muted">
+            <p className="text-sm text-ink-muted">
               Add this secret to your authenticator app, then enter the code it shows.
             </p>
-            <code className="block break-all rounded bg-line/40 p-3 font-mono text-xs">
+            <code className="block break-all rounded bg-surface-elevated p-3 font-mono text-xs">
               {enrollment.secret}
             </code>
 
@@ -299,18 +303,18 @@ function TwoFactorCard({
           setCode('');
         }}
       >
-        <p className="text-sm text-muted">
+        <p className="text-sm text-ink-muted">
           These are shown once and cannot be retrieved later. Store them somewhere safe — each one
           works a single time.
         </p>
         <ul className="mt-4 grid grid-cols-2 gap-2 font-mono text-xs">
           {recoveryCodes?.map((rc) => (
-            <li key={rc} className="rounded bg-line/40 px-2 py-1.5">
+            <li key={rc} className="rounded bg-surface-elevated px-2 py-1.5">
               {rc}
             </li>
           ))}
         </ul>
       </Modal>
-    </Card>
+    </Section>
   );
 }

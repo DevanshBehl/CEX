@@ -281,6 +281,21 @@ impl SigningService {
     ///
     /// Binding to the payload hash is what stops a proof issued for one
     /// withdrawal being replayed onto another (prompt_phase4.md rule 95).
+    /// Public entry point for the participant endpoints.
+    ///
+    /// A FROST participant must run exactly the same authorization check a
+    /// single-key signer does — same approval key, same payload binding, same
+    /// tier policy. Exposing the existing function rather than writing a second
+    /// one is deliberate: two implementations of "is this authorised" is one
+    /// too many, and the second is the one that drifts.
+    pub fn verify_authorization(
+        &self,
+        authorization: &AuthorizationProof,
+        payload_hash: &[u8],
+    ) -> Result<()> {
+        self.validate_authorization(authorization, payload_hash)
+    }
+
     fn validate_authorization(
         &self,
         authorization: &AuthorizationProof,

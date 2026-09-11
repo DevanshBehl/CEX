@@ -43,7 +43,7 @@ export default function OperatorPage() {
   if (forbidden) {
     return (
       <div className="mx-auto max-w-2xl py-16 text-center">
-        <p className="text-sm text-muted">Not found.</p>
+        <p className="text-sm text-ink-muted">Not found.</p>
       </div>
     );
   }
@@ -64,7 +64,9 @@ export default function OperatorPage() {
     <div className="mx-auto max-w-3xl space-y-6">
       <div>
         <h1 className="text-xl font-semibold">Review queue</h1>
-        <p className="mt-1 text-sm text-muted">Withdrawals the risk engine referred to a person.</p>
+        <p className="mt-1 text-sm text-ink-muted">
+          Withdrawals the risk engine referred to a person.
+        </p>
       </div>
 
       {error !== null && <ErrorNotice message={error} />}
@@ -87,7 +89,7 @@ export default function OperatorPage() {
               <WithdrawalStatusBadge status={item.withdrawal.status} />
             </div>
 
-            <dl className="mt-3 space-y-1 text-xs text-muted">
+            <dl className="mt-3 space-y-1 text-xs text-ink-muted">
               <div>
                 To{' '}
                 <span className="font-mono">{shortenAddress(item.withdrawal.destination, 10)}</span>
@@ -107,7 +109,7 @@ export default function OperatorPage() {
               {item.riskCodes.map((code) => (
                 <span
                   key={code}
-                  className="rounded bg-line/50 px-2 py-0.5 font-mono text-xs text-muted"
+                  className="rounded bg-surface-hover px-2 py-0.5 font-mono text-xs text-ink-muted"
                 >
                   {code}
                 </span>

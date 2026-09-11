@@ -8,7 +8,9 @@
 pub mod auth;
 pub mod custody;
 pub mod error;
+pub mod frost;
 pub mod http;
 pub mod keystore;
 pub mod signer;
 pub mod store;
+pub mod threshold;

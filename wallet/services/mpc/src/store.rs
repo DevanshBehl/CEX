@@ -19,6 +19,13 @@ pub struct Store {
 }
 
 /// A completed signing request. Never contains the payload or the key.
+/// A participant's stored share, as it comes back from the database.
+///
+/// A named type rather than a four-element tuple: `(Vec<u8>, Vec<u8>, Vec<u8>,
+/// u16)` gives the caller three indistinguishable byte vectors to get in the
+/// wrong order, and two of them are key material.
+pub type StoredShare = (Vec<u8>, Vec<u8>, Vec<u8>, u16);
+
 pub struct RecordedSignature {
     pub signature: Vec<u8>,
     pub public_key: Vec<u8>,
@@ -85,6 +92,50 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS signing_requests_created
                 ON signing_requests (created_at);
+
+            -- ---------------------------------------------------------------
+            -- 4b: threshold signing (ADR-0015)
+            -- ---------------------------------------------------------------
+
+            -- One participant's FROST key share, sealed under this host's KEK.
+            --
+            -- `identifier` is the participant's FROST identifier; `group_public`
+            -- is the verifying key the whole group shares, which is also the
+            -- treasury address. Storing the group key beside the share means a
+            -- participant can verify what it is part of without asking the
+            -- coordinator.
+            CREATE TABLE IF NOT EXISTS frost_shares (
+                key_ref         TEXT PRIMARY KEY,
+                identifier      BLOB NOT NULL,
+                group_public    BLOB NOT NULL,
+                encrypted_share BLOB NOT NULL,
+                min_signers     INTEGER NOT NULL,
+                max_signers     INTEGER NOT NULL,
+                created_at      TEXT NOT NULL
+            );
+
+            -- THE NONCE LEDGER. The single most important table in 4b.
+            --
+            -- In FROST, reusing a signing nonce across rounds does not weaken
+            -- the scheme — it RECOVERS the participant's secret share. So a
+            -- participant must never produce two signature shares for one
+            -- nonce, and 'must never' has to mean 'cannot', not 'takes care
+            -- not to'.
+            --
+            -- The commitment is written BEFORE it is published, and
+            -- `used_at` is set when a share is produced. A second attempt
+            -- against a row that already has `used_at` is refused. Because
+            -- `nonce_id` is the primary key and the store is synchronous=FULL,
+            -- this survives a crash between publishing and signing — which is
+            -- exactly the window a retrying coordinator would hit.
+            CREATE TABLE IF NOT EXISTS frost_nonces (
+                nonce_id     TEXT PRIMARY KEY,
+                key_ref      TEXT NOT NULL,
+                encrypted_nonces BLOB NOT NULL,
+                commitments  BLOB NOT NULL,
+                created_at   TEXT NOT NULL,
+                used_at      TEXT
+            );
             "#,
         )?;
         Ok(())
@@ -173,6 +224,26 @@ impl Store {
     /// Used to refuse a replay that reuses an id with DIFFERENT bytes — which
     /// is not a retry, it is an attempt to get a second thing signed under a
     /// key the caller already spent.
+    /// The stored signature for a completed request, with no key join.
+    ///
+    /// `completed_signature` joins `keys`, which a COORDINATOR has no row in —
+    /// it holds a group public key in `frost_shares` and no private key
+    /// anywhere. That join returning nothing would have looked like "this
+    /// request never completed" and started a second set of signing rounds,
+    /// which under FROST is a nonce-reuse hazard rather than a wasted call.
+    pub fn completed_signature_only(&self, request_id: &str) -> Result<Option<Vec<u8>>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT signature FROM signing_requests
+             WHERE request_id = ?1 AND outcome = 'succeeded'",
+        )?;
+        let mut rows = statement.query(params![request_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get(0)?),
+            None => Ok(None),
+        }
+    }
+
     pub fn claimed_payload_hash(&self, request_id: &str) -> Result<Option<Vec<u8>>> {
         let connection = self.lock()?;
         connection
@@ -205,6 +276,128 @@ impl Store {
             params![request_id, reason, now()],
         )?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // FROST share storage (ADR-0015)
+    // -----------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_share(
+        &self,
+        key_ref: &str,
+        identifier: &[u8],
+        group_public: &[u8],
+        sealed_share: &[u8],
+        min_signers: u16,
+        max_signers: u16,
+    ) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO frost_shares
+                (key_ref, identifier, group_public, encrypted_share, min_signers, max_signers, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (key_ref) DO NOTHING",
+            params![
+                key_ref,
+                identifier,
+                group_public,
+                sealed_share,
+                min_signers,
+                max_signers,
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns `(identifier, group_public, sealed_share, min_signers)`.
+    pub fn load_share(&self, key_ref: &str) -> Result<Option<StoredShare>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT identifier, group_public, encrypted_share, min_signers
+             FROM frost_shares WHERE key_ref = ?1",
+        )?;
+        let mut rows = statement.query(params![key_ref])?;
+        match rows.next()? {
+            Some(row) => Ok(Some((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))),
+            None => Ok(None),
+        }
+    }
+
+    /// Replace a share in place, preserving the group key (share refresh).
+    pub fn replace_share(&self, key_ref: &str, sealed_share: &[u8]) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE frost_shares SET encrypted_share = ?2 WHERE key_ref = ?1",
+            params![key_ref, sealed_share],
+        )?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // The nonce ledger — see the schema comment on `frost_nonces`
+    // -----------------------------------------------------------------------
+
+    /// Record a freshly generated nonce BEFORE its commitment is published.
+    ///
+    /// Returns false when the id already exists, which means a commitment for
+    /// it has already been published and this is a replay.
+    pub fn record_nonce(
+        &self,
+        nonce_id: &str,
+        key_ref: &str,
+        sealed_nonces: &[u8],
+        commitments: &[u8],
+    ) -> Result<bool> {
+        let connection = self.lock()?;
+        let inserted = connection.execute(
+            "INSERT INTO frost_nonces
+                (nonce_id, key_ref, encrypted_nonces, commitments, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (nonce_id) DO NOTHING",
+            params![nonce_id, key_ref, sealed_nonces, commitments, now()],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    /// Take a nonce for signing, marking it used in the same statement.
+    ///
+    /// The UPDATE ... WHERE used_at IS NULL is what makes this safe: two
+    /// concurrent requests for one nonce produce one winner, decided by the
+    /// database rather than by application-level care.
+    pub fn consume_nonce(&self, nonce_id: &str) -> Result<Option<Vec<u8>>> {
+        let connection = self.lock()?;
+
+        let changed = connection.execute(
+            "UPDATE frost_nonces SET used_at = ?2 WHERE nonce_id = ?1 AND used_at IS NULL",
+            params![nonce_id, now()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+
+        let mut statement =
+            connection.prepare("SELECT encrypted_nonces FROM frost_nonces WHERE nonce_id = ?1")?;
+        let mut rows = statement.query(params![nonce_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn nonce_was_used(&self, nonce_id: &str) -> Result<bool> {
+        let connection = self.lock()?;
+        let mut statement =
+            connection.prepare("SELECT used_at FROM frost_nonces WHERE nonce_id = ?1")?;
+        let mut rows = statement.query(params![nonce_id])?;
+        match rows.next()? {
+            Some(row) => {
+                let used: Option<String> = row.get(0)?;
+                Ok(used.is_some())
+            }
+            None => Ok(false),
+        }
     }
 
     pub fn is_healthy(&self) -> bool {
