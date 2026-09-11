@@ -1,4 +1,4 @@
-import { chainAssets, houseRent, userAvailable } from './accounts.js';
+import { chainAssets, houseFees, houseRent, userAvailable, userLocked } from './accounts.js';
 import { isNegative, isZero, type Amount } from './amount.js';
 import { credit, debit, type LedgerTransaction } from './entries.js';
 import { InvalidEntryError } from './errors.js';
@@ -76,4 +76,198 @@ export function postDeposit(input: DepositPosting): LedgerTransaction {
     referenceId: input.depositId,
     entries,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Withdrawals (prompt_phase3.md rules 109-120)
+//
+// A lock is a BALANCED TRANSFER between two accounts, never a column update.
+// That is what `user_locked` was created for in Phase 2 and left unused until
+// now: the movement shows up in the entry history, reverses by the same
+// mechanism that created it, and cannot be half-applied.
+// ---------------------------------------------------------------------------
+
+export interface WithdrawalLockPosting {
+  readonly withdrawalId: string;
+  readonly userId: string;
+  readonly asset: string;
+  readonly amount: Amount;
+}
+
+/**
+ * Reserve funds against an approved withdrawal (master-prompt rule 118).
+ *
+ *   debit  user_available — the user may no longer spend it
+ *   credit user_locked    — but still owns it
+ *
+ * Total liability to the user is unchanged; only its spendability moves. That
+ * is exactly what a reservation is, and expressing it as a transfer rather than
+ * a flag is what makes it auditable.
+ *
+ * THIS IS ALSO THE SUFFICIENT-FUNDS CHECK (rules 113-114). If the available
+ * balance cannot cover the amount, this transaction must not commit — the check
+ * and the reservation are the same atomic act, so two concurrent withdrawals
+ * cannot both pass a check and both proceed.
+ */
+export function postWithdrawalLock(input: WithdrawalLockPosting): LedgerTransaction {
+  requirePositive(input.amount, input.withdrawalId, 'lock');
+
+  return buildTransaction({
+    kind: 'withdrawal_lock',
+    referenceType: 'withdrawal',
+    referenceId: input.withdrawalId,
+    entries: [
+      debit(userAvailable(input.userId, input.asset), input.asset, input.amount),
+      credit(userLocked(input.userId, input.asset), input.asset, input.amount),
+    ],
+  });
+}
+
+/**
+ * Return reserved funds to the user (master-prompt rule 119).
+ *
+ * Used on rejection, on an exhausted retry budget, and on cancellation. The
+ * exact inverse of the lock, which is the point: a release cannot forget part
+ * of the amount, because it is the same balanced movement in reverse.
+ */
+export function postWithdrawalRelease(input: WithdrawalLockPosting): LedgerTransaction {
+  requirePositive(input.amount, input.withdrawalId, 'release');
+
+  return buildTransaction({
+    kind: 'withdrawal_release',
+    referenceType: 'withdrawal',
+    referenceId: input.withdrawalId,
+    entries: [
+      debit(userLocked(input.userId, input.asset), input.asset, input.amount),
+      credit(userAvailable(input.userId, input.asset), input.asset, input.amount),
+    ],
+  });
+}
+
+export interface WithdrawalSettlePosting extends WithdrawalLockPosting {
+  /**
+   * The network fee actually paid, in base units.
+   *
+   * Charged to `house_fees`, not to the user, unless the product deliberately
+   * passes it on — and if it does, that is a separate entry with its own
+   * reason, never a silent reduction of the user's amount (rule 118).
+   */
+  readonly networkFee?: Amount;
+}
+
+/**
+ * The money has left the platform (master-prompt rule 143).
+ *
+ *   debit  user_locked  — the liability is discharged
+ *   credit chain_assets — we control that much less on-chain
+ *
+ * THIS IS THE ONLY PLACE `chain_assets` DECREASES. Phase 2 could not do it at
+ * all, because nothing could send.
+ *
+ * Posted only after the transaction reaches `finalized` (rules 119, 138).
+ * Settling at `confirmed` and then seeing the transaction dropped would mean
+ * funds released from the lock that never left.
+ */
+export function postWithdrawalSettlement(input: WithdrawalSettlePosting): LedgerTransaction {
+  requirePositive(input.amount, input.withdrawalId, 'settle');
+
+  const fee = input.networkFee ?? 0n;
+  if (isNegative(fee)) {
+    throw new InvalidEntryError('withdrawal_fee_negative', { withdrawalId: input.withdrawalId });
+  }
+
+  const entries = [
+    debit(userLocked(input.userId, input.asset), input.asset, input.amount),
+    credit(chainAssets(input.asset), input.asset, input.amount),
+  ];
+
+  if (!isZero(fee)) {
+    // The fee leaves the platform too, and the house bears it. Two more
+    // entries rather than adjusting the amounts above, so the user-facing
+    // movement and the cost of making it stay separately visible.
+    entries.push(
+      debit(houseFees(input.asset), input.asset, fee),
+      credit(chainAssets(input.asset), input.asset, fee),
+    );
+  }
+
+  return buildTransaction({
+    kind: 'withdrawal_settle',
+    referenceType: 'withdrawal',
+    referenceId: input.withdrawalId,
+    entries,
+  });
+}
+
+/**
+ * The platform funds its own operating balance.
+ *
+ * WHY THIS HAS TO EXIST
+ *
+ * Network fees are paid from the same on-chain pool that holds user funds. If
+ * the house simply debits `house_fees` without having put anything in, the
+ * arithmetic is unavoidable: total user liabilities come to exceed
+ * chain-controlled assets, and the platform is paying its operating costs out
+ * of customer money.
+ *
+ * The `liabilities_covered` invariant catches this immediately — it was the
+ * first thing it caught once withdrawals could pay a fee — which is precisely
+ * what an invariant is for.
+ *
+ * So the house deposits its own funds, like any other participant:
+ *
+ *   debit  chain_assets — the platform controls more on-chain
+ *   credit house_fees   — and that portion is the house's, not a user's
+ *
+ * `house_fees` then behaves as a prepaid balance that fee payments draw down,
+ * and it may never go negative. A custodian that has not funded its fee wallet
+ * cannot pay fees, which is the correct answer rather than an inconvenient one.
+ */
+export function postHouseFunding(input: {
+  readonly reference: string;
+  readonly asset: string;
+  readonly amount: Amount;
+}): LedgerTransaction {
+  requirePositive(input.amount, input.reference, 'house_funding');
+
+  return buildTransaction({
+    kind: 'fee',
+    referenceType: 'house_funding',
+    referenceId: input.reference,
+    entries: [
+      debit(chainAssets(input.asset), input.asset, input.amount),
+      credit(houseFees(input.asset), input.asset, input.amount),
+    ],
+  });
+}
+
+/**
+ * A nonce account's rent-exempt minimum (ADR-0009).
+ *
+ * A durable nonce account is an on-chain account and needs the same minimum a
+ * deposit address does. It is real, ours, and not user-withdrawable, so it goes
+ * to `house_rent` for the same reason deposit-address minimums do.
+ */
+export function postNonceAccountRent(input: {
+  readonly nonceAccountId: string;
+  readonly asset: string;
+  readonly amount: Amount;
+}): LedgerTransaction {
+  requirePositive(input.amount, input.nonceAccountId, 'nonce_rent');
+
+  return buildTransaction({
+    kind: 'fee',
+    referenceType: 'nonce_account',
+    referenceId: input.nonceAccountId,
+    entries: [
+      debit(chainAssets(input.asset), input.asset, input.amount),
+      credit(houseRent(input.asset), input.asset, input.amount),
+    ],
+  });
+}
+
+function requirePositive(amount: Amount, reference: string, what: string): void {
+  if (isNegative(amount) || isZero(amount)) {
+    throw new InvalidEntryError(`${what}_amount_not_positive`, { reference });
+  }
 }

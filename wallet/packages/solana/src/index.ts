@@ -17,3 +17,19 @@ export {
 } from './rpc.js';
 export { parseTransfers, type ParseOptions } from './transfers.js';
 export { createSolanaAdapter, type SolanaAdapterOptions } from './adapter.js';
+export {
+  createNonceManager,
+  generateNonceAccountAddress,
+  NONCE_ACCOUNT_LENGTH,
+  type NonceManager,
+  type NonceState,
+} from './nonce.js';
+export {
+  attachSignature,
+  buildWithdrawalTransaction,
+  createWithdrawalBroadcaster,
+  type BroadcastOutcome,
+  type BuildWithdrawalInput,
+  type UnsignedWithdrawal,
+  type WithdrawalBroadcaster,
+} from './withdrawal-tx.js';

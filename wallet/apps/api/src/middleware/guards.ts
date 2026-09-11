@@ -99,6 +99,41 @@ export function createStepUpGuard(deps: GuardDeps, maxAgeSeconds?: number) {
   };
 }
 
+/**
+ * Step-up freshness tiered by withdrawal value (ADR-0011,
+ * prompt_phase3.md rule 149).
+ *
+ * A step-up asserts who is at the keyboard RIGHT NOW, and that assertion
+ * decays: one from four minutes ago is weaker evidence than one from four
+ * seconds ago, because the window in which a device could have been taken over
+ * is larger. So the window shortens as the loss grows.
+ *
+ * The body has not been validated yet — this runs at `preValidation` so an
+ * unauthenticated caller never learns the endpoint's shape — so the amount is
+ * read defensively and an unreadable one gets the STRICTER tier.
+ */
+export function createWithdrawalStepUpGuard(
+  deps: GuardDeps & { readonly reviewThreshold: bigint; readonly strictMaxAgeSeconds: number },
+) {
+  return async function withdrawalStepUpGuard(
+    request: FastifyRequest,
+    _reply: FastifyReply,
+  ): Promise<void> {
+    const session = request.session;
+    if (!session) throw new AuthenticationRequiredError();
+
+    const body = request.body as { amount?: unknown } | undefined;
+    const raw = typeof body?.amount === 'string' ? body.amount : null;
+
+    let large = true; // the safe default
+    if (raw !== null && /^\d+$/.test(raw)) {
+      large = BigInt(raw) >= deps.reviewThreshold;
+    }
+
+    deps.sessions.requireStepUp(session, large ? deps.strictMaxAgeSeconds : undefined);
+  };
+}
+
 export function requireSessionRecord(request: FastifyRequest): {
   session: SessionRecord;
   userId: string;

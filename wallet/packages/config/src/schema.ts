@@ -50,6 +50,25 @@ export const envSchema = z
 
     RATE_LIMIT_AUTH_PER_IP_PER_MINUTE: z.coerce.number().int().positive().default(20),
     RATE_LIMIT_AUTH_PER_ACCOUNT_PER_MINUTE: z.coerce.number().int().positive().default(10),
+    /**
+     * Withdrawals get their own limit (master-prompt rule 162).
+     *
+     * Borrowing the auth limit was the first thing the integration suite tripped
+     * over, and it was right to: the two endpoints are throttled for different
+     * reasons. Auth limits exist to slow credential guessing; a withdrawal limit
+     * exists to bound the damage of a compromised session, and the risk engine's
+     * velocity rule is the real control there.
+     */
+    RATE_LIMIT_WITHDRAWAL_PER_MINUTE: z.coerce.number().int().positive().default(30),
+    /**
+     * A coarse ceiling across every endpoint.
+     *
+     * Was hardcoded at 300 until an end-to-end run tripped it: the suite drives
+     * a real browser through two dozen journeys from one IP, `/auth/session` was
+     * throttled, and the app correctly concluded the user was signed out. The
+     * failures pointed at the pages, not at the limit.
+     */
+    RATE_LIMIT_GLOBAL_PER_MINUTE: z.coerce.number().int().positive().default(300),
 
     // --- Phase 2: chain and custody -----------------------------------------
     SOLANA_RPC_URL: z.string().url(),
@@ -92,6 +111,73 @@ export const envSchema = z
     INDEXER_POLL_INTERVAL_MS: z.coerce.number().int().min(500).default(5_000),
     INDEXER_PAGE_SIZE: z.coerce.number().int().min(1).max(1000).default(100),
     INDEXER_MAX_ADDRESSES_PER_CYCLE: z.coerce.number().int().positive().default(200),
+
+    // --- Phase 3: risk policy (ADR-0010) ------------------------------------
+    // Base units. Educational-project defaults, chosen so every rule is
+    // reachable in testing rather than to model a real institution's appetite.
+    RISK_PER_TRANSACTION_LIMIT: z.string().default('100000000000'), // 100 SOL
+    RISK_DAILY_LIMIT: z.string().default('250000000000'), // 250 SOL
+    RISK_VELOCITY_WINDOW_MINUTES: z.coerce.number().int().positive().default(60),
+    RISK_VELOCITY_MAX_COUNT: z.coerce.number().int().positive().default(10),
+    RISK_MANUAL_REVIEW_ABOVE: z.string().default('25000000000'), // 25 SOL
+    RISK_NEW_DESTINATION_REVIEW: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((v) => v === 'true'),
+    RISK_KNOWN_DESTINATION_WINDOW_DAYS: z.coerce.number().int().positive().default(90),
+
+    // --- Phase 3: step-up tiering (ADR-0011) --------------------------------
+    /** Freshness demanded for a withdrawal at or above the review threshold. */
+    WITHDRAWAL_STEP_UP_MAX_AGE_SECONDS: z.coerce.number().int().positive().default(60),
+
+    // --- Phase 3: retry budgets (ADR-0012) ----------------------------------
+    WITHDRAWAL_SIGN_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(3),
+    WITHDRAWAL_BROADCAST_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
+    WITHDRAWAL_EXPIRY_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(3),
+
+    // --- Phase 3: signing and treasury --------------------------------------
+    /**
+     * `mock` produces signatures that verify against nothing. The superRefine
+     * below refuses it in production, and MockSigner itself refuses to
+     * construct there — two independent guards, because this one matters.
+     */
+    // `real` has no implementation until Phase 4; it exists now so a
+    // production configuration is expressible and the guard below is testable.
+    SIGNER_KIND: z.enum(['mock', 'real']).default('mock'),
+    SIGNER_KEY_REF: z.string().min(1).default('treasury-hot-1'),
+    /**
+     * The address withdrawals are paid from, and the nonce authority.
+     *
+     * A blank value is treated as absent rather than as a too-short string:
+     * `FOO=` in a .env file means "not set", and rejecting it with a length
+     * error would be a confusing way to say so.
+     */
+    TREASURY_ADDRESS: z
+      .string()
+      .transform((v) => (v.trim() === '' ? undefined : v.trim()))
+      .refine((v) => v === undefined || (v.length >= 32 && v.length <= 44), {
+        message: 'must be a base58 address of 32-44 characters, or empty',
+      })
+      .optional(),
+    NONCE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(5),
+
+    WITHDRAWAL_WORKERS_ENABLED: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((v) => v === 'true'),
+    WITHDRAWAL_WORKER_INTERVAL_MS: z.coerce.number().int().min(500).default(3000),
+    WITHDRAWAL_WORKER_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+
+    /** Comma-separated user ids permitted to use the operator queue. */
+    OPERATOR_USER_IDS: z
+      .string()
+      .default('')
+      .transform((v) =>
+        v
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
   })
   // -------------------------------------------------------------------------
   // Cross-field invariants. These catch the misconfigurations that otherwise
@@ -143,6 +229,32 @@ export const envSchema = z
         path: ['SUPPORTED_ASSETS'],
         message: 'must list at least one asset',
       });
+    }
+
+    // The mock signer produces signatures that verify against nothing. This is
+    // the outer of two guards; MockSigner also refuses to construct in
+    // production (prompt_phase3.md rules 125, 227).
+    if (env.NODE_ENV === 'production' && env.SIGNER_KIND === 'mock') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SIGNER_KIND'],
+        message:
+          'must not be "mock" in production — it produces signatures that verify against nothing',
+      });
+    }
+
+    for (const key of [
+      'RISK_PER_TRANSACTION_LIMIT',
+      'RISK_DAILY_LIMIT',
+      'RISK_MANUAL_REVIEW_ABOVE',
+    ] as const) {
+      if (!/^\d+$/.test(env[key])) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: 'must be a non-negative integer in base units, as a string',
+        });
+      }
     }
 
     if (env.NODE_ENV === 'production') {

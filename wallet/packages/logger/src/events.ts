@@ -45,6 +45,31 @@ export const SECURITY_EVENTS = [
   'indexer.cursor_advanced',
   'reconciliation.completed',
   'reconciliation.drift_detected',
+
+  // --- Phase 3: withdrawals ---
+  // Identifiers, verdicts, and reason codes only. Amounts, destinations, and
+  // transaction signatures are NOT loggable (prompt_phase3.md rules 64, 226).
+  'withdrawal.requested',
+  'withdrawal.risk_approve',
+  'withdrawal.risk_deny',
+  'withdrawal.risk_review',
+  'withdrawal.funds_locked',
+  'withdrawal.funds_released',
+  'withdrawal.operator_approved',
+  'withdrawal.operator_rejected',
+  'withdrawal.signing_started',
+  'withdrawal.signed',
+  'withdrawal.sign_failed',
+  'withdrawal.broadcast',
+  'withdrawal.broadcast_failed',
+  'withdrawal.rebroadcast',
+  'withdrawal.expired',
+  'withdrawal.confirmed',
+  'withdrawal.settled',
+  'withdrawal.failed',
+  'nonce.leased',
+  'nonce.released',
+  'nonce.pool_exhausted',
 ] as const;
 
 export type SecurityEvent = (typeof SECURITY_EVENTS)[number];

@@ -41,6 +41,20 @@ export default defineConfig({
   webServer: [
     {
       command: 'pnpm --filter @wallet/api dev',
+      /**
+       * Rate limits raised for the suite.
+       *
+       * Two dozen browser journeys from one IP exceed a realistic per-minute
+       * ceiling, `/auth/session` gets throttled, and the app correctly decides
+       * the user is signed out — which surfaces as unrelated assertions failing
+       * on pages that are working fine.
+       */
+      env: {
+        ...process.env,
+        RATE_LIMIT_GLOBAL_PER_MINUTE: '100000',
+        RATE_LIMIT_WITHDRAWAL_PER_MINUTE: '100000',
+        RATE_LIMIT_AUTH_PER_IP_PER_MINUTE: '100000',
+      },
       url: 'http://localhost:4000/health/live',
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,

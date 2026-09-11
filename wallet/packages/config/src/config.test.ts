@@ -101,11 +101,35 @@ describe('parseEnv', () => {
       WEB_ORIGIN: 'https://app.example.com',
       WEBAUTHN_ORIGIN: 'https://app.example.com',
       WEBAUTHN_RP_ID: 'example.com',
+      // A production config cannot use the mock signer either (ADR-0011), so
+      // this fixture would fail for two reasons without it.
+      SIGNER_KIND: 'real',
     };
     expect(() => parseEnv({ ...productionish, SOLANA_COMMITMENT: 'finalized' })).not.toThrow();
     expect(() => parseEnv({ ...productionish, SOLANA_COMMITMENT: 'confirmed' })).toThrow(
       ConfigValidationError,
     );
+  });
+
+  it('refuses the mock signer in production (rules 125, 227)', () => {
+    // Two independent guards: this, and MockSigner refusing to construct.
+    // A mock signature verifies against nothing, so the failure would be
+    // silent and expensive.
+    const productionish = {
+      ...valid,
+      NODE_ENV: 'production',
+      WEB_ORIGIN: 'https://app.example.com',
+      WEBAUTHN_ORIGIN: 'https://app.example.com',
+      WEBAUTHN_RP_ID: 'example.com',
+    };
+    expect(() => parseEnv({ ...productionish, SIGNER_KIND: 'mock' })).toThrow(
+      ConfigValidationError,
+    );
+  });
+
+  it('rejects a risk limit that is not an integer base-unit string', () => {
+    expect(() => parseEnv({ ...valid, RISK_DAILY_LIMIT: '1.5' })).toThrow(ConfigValidationError);
+    expect(() => parseEnv({ ...valid, RISK_DAILY_LIMIT: '250000000000' })).not.toThrow();
   });
 
   it('parses the asset allowlist (ADR-0008)', () => {

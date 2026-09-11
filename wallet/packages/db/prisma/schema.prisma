@@ -57,6 +57,7 @@ model User {
   sessions      Session[]
   recoveryCodes RecoveryCode[]
   wallets       Wallet[]
+  withdrawals   Withdrawal[]
 
   @@map("users")
 }
@@ -445,4 +446,234 @@ model IndexerCursor {
 
   @@index([chain, lastPolledAt])
   @@map("indexer_cursors")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — withdrawals, risk decisions, signing, and nonce accounts
+// ---------------------------------------------------------------------------
+
+/// The withdrawal state machine (prompt_phase3.md §8).
+///
+/// Legal transitions are declared once in packages/types and enforced twice:
+/// by the type system for code that goes through the domain, and by a database
+/// check constraint for everything else (rules 98-99).
+enum WithdrawalStatus {
+  REQUESTED
+  RISK_EVALUATING
+  MANUAL_REVIEW
+  APPROVED
+  FUNDS_LOCKED
+  SIGNING
+  SIGNED
+  BROADCAST
+  CONFIRMED
+  SETTLED
+  // --- failure edges, each a state rather than an exception (rule 106) ---
+  SIGN_FAILED
+  BROADCAST_FAILED
+  EXPIRED
+  REJECTED
+  /// A retry budget ran out. Terminal, lock released, surfaced to an operator.
+  FAILED
+}
+
+enum RiskVerdict {
+  approve
+  deny
+  review
+}
+
+model Withdrawal {
+  id     String @id @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  chain  String
+  asset  String
+  /// Base units. NUMERIC(38,0) — never a float, never a JS number.
+  amount Decimal @db.Decimal(38, 0)
+  /// The fee actually paid, known only after settlement.
+  networkFee Decimal? @map("network_fee") @db.Decimal(38, 0)
+
+  destination String
+
+  status WithdrawalStatus @default(REQUESTED)
+
+  /// UNIQUE(user_id, idempotency_key) — a resubmission is the SAME withdrawal,
+  /// not a second one (master-prompt rule 87, prompt_phase3.md rules 147-148).
+  idempotencyKey String @map("idempotency_key")
+
+  /// Per-edge retry counts, persisted so a budget survives a worker restart
+  /// (ADR-0012). An in-memory counter would reset and retry forever.
+  signAttempts      Int @default(0) @map("sign_attempts")
+  broadcastAttempts Int @default(0) @map("broadcast_attempts")
+  expiryAttempts    Int @default(0) @map("expiry_attempts")
+
+  /// Set once the lock is posted, cleared when released or settled.
+  lockLedgerTransactionId   String? @map("lock_ledger_transaction_id") @db.Uuid
+  settleLedgerTransactionId String? @map("settle_ledger_transaction_id") @db.Uuid
+
+  /// The signed transaction, persisted BEFORE confirmation is awaited
+  /// (master-prompt rule 141). Re-broadcast uses these exact bytes; it never
+  /// re-signs (rules 140-143).
+  signedTransaction Bytes?  @map("signed_transaction")
+  txSignature       String? @map("tx_signature")
+
+  /// Which nonce account this withdrawal leased, and the nonce it was built on.
+  /// The nonce advancing is the proof the transaction landed (ADR-0009).
+  nonceAccountId String? @map("nonce_account_id") @db.Uuid
+  nonceValue     String? @map("nonce_value")
+
+  /// Why it failed or was rejected. Operator-facing, never returned verbatim
+  /// to the client.
+  failureReason String? @map("failure_reason")
+
+  correlationId String? @map("correlation_id")
+
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  settledAt   DateTime? @map("settled_at") @db.Timestamptz(3)
+
+  user         User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nonceAccount NonceAccount?          @relation(fields: [nonceAccountId], references: [id])
+  transitions  WithdrawalTransition[]
+  riskDecision RiskDecision?
+  signingRequests SigningRequest[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@index([txSignature])
+  @@map("withdrawals")
+}
+
+/// APPEND-ONLY (prompt_phase3.md rules 100-102).
+///
+/// The current status is a column so it is queryable; the history is here so it
+/// is complete. Both, because "where is this withdrawal" and "how did it get
+/// here" are different questions and an incident needs both.
+model WithdrawalTransition {
+  id           String @id @db.Uuid
+  withdrawalId String @map("withdrawal_id") @db.Uuid
+
+  fromStatus WithdrawalStatus? @map("from_status")
+  toStatus   WithdrawalStatus  @map("to_status")
+
+  reason String?
+  /// null for an automated transition; set for an operator action.
+  actorUserId   String? @map("actor_user_id") @db.Uuid
+  correlationId String? @map("correlation_id")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  withdrawal Withdrawal @relation(fields: [withdrawalId], references: [id], onDelete: Cascade)
+
+  @@index([withdrawalId, createdAt])
+  @@map("withdrawal_transitions")
+}
+
+/// Every risk evaluation, persisted with its inputs so it can be replayed
+/// (master-prompt rules 152-153, prompt_phase3.md rule 205).
+model RiskDecision {
+  id           String @id @db.Uuid
+  withdrawalId String @unique @map("withdrawal_id") @db.Uuid
+
+  verdict RiskVerdict
+  /// The full code list. Operator-facing — the client gets a generic message.
+  codes   String[]
+  /// The rules that ran, so "was the daily limit checked?" is answerable from
+  /// the record rather than from the code as it exists today.
+  evaluatedRules String[] @map("evaluated_rules")
+  /// Inputs and per-rule detail, for replay. Amounts as strings.
+  inputSnapshot  Json     @map("input_snapshot")
+  outcomes       Json
+  policyVersion  String   @map("policy_version")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  withdrawal Withdrawal @relation(fields: [withdrawalId], references: [id], onDelete: Cascade)
+
+  @@index([verdict, createdAt])
+  @@map("risk_decisions")
+}
+
+enum SigningOutcome {
+  requested
+  succeeded
+  failed
+}
+
+/// What was asked of the signer and what came back (master-prompt rule 110).
+///
+/// NEVER contains key material, a share, or the payload's secret inputs. It
+/// records that a request was made, by whom, under what authorization, and the
+/// outcome (prompt_phase3.md rules 129-130).
+model SigningRequest {
+  id           String @id @db.Uuid
+  withdrawalId String @map("withdrawal_id") @db.Uuid
+
+  /// Idempotency key handed to the signer. The same id must yield the same
+  /// signature and must not start a second signing round — under threshold
+  /// signing a duplicate round is a nonce-reuse hazard.
+  requestId String @unique @map("request_id")
+  /// Opaque handle. The application never learns what it points at.
+  keyRef    String @map("key_ref")
+
+  outcome SigningOutcome @default(requested)
+  /// Which implementation answered. `mock` must never appear in production.
+  signerKind String  @map("signer_kind")
+  failureReason String? @map("failure_reason")
+
+  /// Who authorised, when, under which policy version. NOT the signature.
+  authorization Json
+
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(3)
+
+  withdrawal Withdrawal @relation(fields: [withdrawalId], references: [id], onDelete: Cascade)
+
+  @@index([withdrawalId, createdAt])
+  @@map("signing_requests")
+}
+
+enum NonceAccountStatus {
+  /// Created on-chain and ready to lease.
+  available
+  /// Leased to an in-flight withdrawal.
+  leased
+  /// Taken out of service.
+  retired
+}
+
+/// A durable nonce account (ADR-0009).
+///
+/// Custody infrastructure, not an implementation detail: a transaction built on
+/// a durable nonce stays valid indefinitely, which is what makes signing
+/// latency safe and re-broadcast unambiguous.
+///
+/// One in-flight withdrawal at a time (prompt_phase3.md rule 38). Two
+/// withdrawals on one nonce produce two transactions where only one can win,
+/// and the loser's failure is indistinguishable from an expiry.
+model NonceAccount {
+  id      String @id @db.Uuid
+  chain   String
+  address String
+
+  status NonceAccountStatus @default(available)
+
+  /// The current on-chain nonce value. Advancing exactly once is the proof a
+  /// transaction landed exactly once.
+  currentNonce String? @map("current_nonce")
+
+  /// Which withdrawal holds the lease, if any.
+  leasedBy   String?   @map("leased_by") @db.Uuid
+  leasedAt   DateTime? @map("leased_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  withdrawals Withdrawal[]
+
+  @@unique([chain, address])
+  @@index([chain, status])
+  @@map("nonce_accounts")
 }

@@ -58,12 +58,21 @@ export const ACCOUNT_CLASS: Readonly<
   external: 'contra',
 };
 
-/** Accounts that must never project to a negative balance (rule 75). */
+/**
+ * Accounts that must never project to a negative balance (rule 75).
+ *
+ * `house_fees` is here for a reason worth stating: it is a PREPAID balance the
+ * platform funds itself (see `postHouseFunding`). A negative `house_fees` means
+ * the platform paid its network fees out of the pooled assets that back user
+ * balances — which is to say, out of customer money. The arithmetic shows up
+ * immediately as a `liabilities_covered` violation; this check names the cause.
+ */
 export const NON_NEGATIVE_ACCOUNT_TYPES: ReadonlySet<AccountType> = new Set<AccountType>([
   'user_available',
   'user_locked',
   'chain_assets',
   'house_rent',
+  'house_fees',
 ]);
 
 /** Accounts owed to a specific user. Their total is the platform's liability. */

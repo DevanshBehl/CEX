@@ -6,7 +6,7 @@ import {
 } from 'fastify-type-provider-zod';
 import { Redis } from 'ioredis';
 import type { ApiConfig } from '@wallet/config';
-import type { ChainAdapter } from '@wallet/blockchain';
+import { createMockSigner, type ChainAdapter, type Signer } from '@wallet/blockchain';
 import {
   createRedisChallengeStore,
   createEncryptor,
@@ -25,18 +25,28 @@ import {
 } from '@wallet/db';
 import { createLogger, type Logger } from '@wallet/logger';
 import {
+  createNonceManager,
   createSolanaAdapter,
   createSolanaAddressDeriver,
   createSolanaAddressValidator,
+  createSolanaRpc,
+  createWithdrawalBroadcaster,
   NATIVE_ASSET,
   NATIVE_DECIMALS,
   SOLANA_CHAIN_ID,
+  type NonceManager,
+  type WithdrawalBroadcaster,
 } from '@wallet/solana';
 
 import { requestContextPlugin } from './plugins/request-context.js';
 import { securityPlugin } from './plugins/security.js';
 import { registerErrorHandler } from './errors/handler.js';
-import { createCsrfGuard, createSessionGuard, createStepUpGuard } from './middleware/guards.js';
+import {
+  createCsrfGuard,
+  createSessionGuard,
+  createStepUpGuard,
+  createWithdrawalStepUpGuard,
+} from './middleware/guards.js';
 import { createAuthControllers } from './controllers/auth.controller.js';
 import { createCustodyControllers } from './controllers/custody.controller.js';
 import { createCustodyService } from './services/custody.service.js';
@@ -44,6 +54,10 @@ import { createDepositPipeline } from './services/deposit.service.js';
 import { createReconciliationService } from './services/reconciliation.service.js';
 import { createIndexer, type Indexer } from './workers/indexer.js';
 import { createCustodyRoutes } from './routes/custody.routes.js';
+import { createWithdrawalControllers } from './controllers/withdrawal.controller.js';
+import { createWithdrawalService } from './services/withdrawal.service.js';
+import { createWithdrawalWorkers, type WithdrawalWorkers } from './workers/withdrawal-workers.js';
+import { createWithdrawalRoutes } from './routes/withdrawal.routes.js';
 import { createAccountService } from './services/account.service.js';
 import { createHealthService } from './services/health.service.js';
 import { createLoginService } from './services/login.service.js';
@@ -60,6 +74,8 @@ declare module 'fastify' {
     log2: Logger;
     appDeps: AppDeps;
     indexer: Indexer | null;
+    withdrawalWorkers: WithdrawalWorkers;
+    signer: Signer;
     reconcile: () => Promise<unknown>;
     shutdown: () => Promise<void>;
   }
@@ -79,6 +95,32 @@ export interface BuildServerOptions {
   readonly chainAdapter?: ChainAdapter;
   /** Tests drive the indexer by hand rather than on a timer. */
   readonly startIndexer?: boolean;
+  /**
+   * Injected so a test can make the signer fail, hang, or return garbage on
+   * demand — which is the entire reason the mock exists (rules 127-128).
+   */
+  readonly signer?: Signer;
+  readonly nonceManager?: NonceManager;
+  readonly broadcaster?: WithdrawalBroadcaster;
+  readonly startWithdrawalWorkers?: boolean;
+}
+
+/**
+ * Choose a signer from configuration.
+ *
+ * `real` is declared in the config schema so a production deployment is
+ * expressible, but nothing implements it until Phase 4. Failing loudly here
+ * beats silently falling back to the mock, which is the one outcome that must
+ * never happen (prompt_phase3.md rules 125, 227).
+ */
+function buildSigner(config: ApiConfig): Signer {
+  if (config.withdrawal.signerKind === 'real') {
+    throw new Error(
+      'SIGNER_KIND=real is not implemented until Phase 4. The Rust threshold ' +
+        'signer arrives with services/mpc; there is no fallback.',
+    );
+  }
+  return createMockSigner({ nodeEnv: config.shared.nodeEnv, seed: config.session.secret });
 }
 
 /**
@@ -178,6 +220,58 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     logger,
   });
 
+  // --- Withdrawals (Phase 3) ------------------------------------------------
+  const solanaRpc = createSolanaRpc({
+    endpoint: config.chain.rpcUrl,
+    commitment: config.chain.commitment,
+    requestTimeoutMs: config.chain.rpcTimeoutMs,
+    maxRetries: config.chain.rpcMaxRetries,
+  });
+
+  /**
+   * The mock refuses to construct when NODE_ENV=production, and config refuses
+   * SIGNER_KIND=mock there. Two independent guards, because a mock signature
+   * verifies against nothing and the failure would be silent.
+   */
+  const signer = options.signer ?? buildSigner(config);
+
+  const withdrawalService = createWithdrawalService({
+    db,
+    validator: createSolanaAddressValidator(),
+    chain: SOLANA_CHAIN_ID,
+    logger,
+    policy: {
+      supportedAssets: config.chain.supportedAssets,
+      perTransactionLimit: BigInt(config.risk.perTransactionLimit),
+      dailyLimit: BigInt(config.risk.dailyLimit),
+      velocityWindowMinutes: config.risk.velocityWindowMinutes,
+      velocityMaxCount: config.risk.velocityMaxCount,
+      manualReviewAbove: BigInt(config.risk.manualReviewAbove),
+      reviewNewDestinations: config.risk.reviewNewDestinations,
+      knownDestinationWindowDays: config.risk.knownDestinationWindowDays,
+    },
+  });
+
+  const withdrawalWorkers = createWithdrawalWorkers({
+    db,
+    signer,
+    nonces: options.nonceManager ?? createNonceManager(solanaRpc),
+    broadcaster: options.broadcaster ?? createWithdrawalBroadcaster(solanaRpc),
+    logger,
+    chain: SOLANA_CHAIN_ID,
+    treasuryAddress: config.withdrawal.treasuryAddress ?? '',
+    keyRefId: config.withdrawal.signerKeyRef,
+    budgets: config.withdrawal.budgets,
+    batchSize: config.withdrawal.workerBatchSize,
+  });
+
+  const withdrawalControllers = createWithdrawalControllers({
+    db,
+    withdrawals: withdrawalService,
+    decimals: { [NATIVE_ASSET]: NATIVE_DECIMALS },
+    operatorUserIds: config.withdrawal.operatorUserIds,
+  });
+
   const custodyControllers = createCustodyControllers({
     db,
     custody: custodyService,
@@ -222,7 +316,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     webOrigin: config.http.webOrigin,
     cookieSecret: config.session.secret,
     redis,
-    globalPerMinute: 300,
+    globalPerMinute: config.rateLimit.globalPerMinute,
   });
 
   const guardDeps = {
@@ -234,6 +328,11 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   const csrfGuard = createCsrfGuard(guardDeps);
   const sessionGuard = createSessionGuard(guardDeps);
   const stepUpGuard = createStepUpGuard(guardDeps);
+  const withdrawalStepUpGuard = createWithdrawalStepUpGuard({
+    ...guardDeps,
+    reviewThreshold: BigInt(config.risk.manualReviewAbove),
+    strictMaxAgeSeconds: config.withdrawal.stepUpMaxAgeSeconds,
+  });
 
   await app.register(createHealthRoutes(health));
   await app.register(
@@ -263,6 +362,22 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     }),
   );
 
+  await app.register(
+    createWithdrawalRoutes({
+      controllers: withdrawalControllers,
+      sessionGuard: sessionGuard as never,
+      csrfGuard: csrfGuard as never,
+      withdrawalStepUpGuard: withdrawalStepUpGuard as never,
+      // The operator queue always demands the strict tier: Phase 3 has no role
+      // model, so freshness is doing the work a role check would.
+      operatorStepUpGuard: createStepUpGuard(
+        guardDeps,
+        config.withdrawal.stepUpMaxAgeSeconds,
+      ) as never,
+      rateLimit: { max: config.rateLimit.withdrawalPerMinute, timeWindow: '1 minute' },
+    }),
+  );
+
   // --- Workers --------------------------------------------------------------
   const indexer = createIndexer({
     db,
@@ -278,15 +393,36 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   });
 
   app.decorate('indexer', indexer);
+  app.decorate('withdrawalWorkers', withdrawalWorkers);
+  app.decorate('signer', signer);
   app.decorate('reconcile', () => reconciliation.run());
 
   // Tests drive `runOnce()` by hand; production runs it on a timer.
   const shouldStart = options.startIndexer ?? config.indexer.enabled;
   if (shouldStart) indexer.start();
 
+  // The withdrawal workers run on their own timer in production. Tests call
+  // `runAllCycles()` so "what happened after N cycles" is answerable.
+  let withdrawalTimer: NodeJS.Timeout | undefined;
+  const runWorkers = options.startWithdrawalWorkers ?? config.withdrawal.workersEnabled;
+  if (runWorkers) {
+    const tick = async (): Promise<void> => {
+      try {
+        await withdrawalWorkers.runAllCycles();
+      } catch (error) {
+        logger.error('withdrawal worker cycle failed', {
+          errorName: error instanceof Error ? error.name : 'unknown',
+        });
+      }
+      withdrawalTimer = setTimeout(() => void tick(), config.withdrawal.workerIntervalMs);
+    };
+    withdrawalTimer = setTimeout(() => void tick(), config.withdrawal.workerIntervalMs);
+  }
+
   app.decorate('shutdown', async () => {
-    // The indexer stops first so no cycle is mid-transaction when the
-    // connection closes.
+    // Workers stop first so no cycle is mid-transaction when the connection
+    // closes.
+    if (withdrawalTimer) clearTimeout(withdrawalTimer);
     await indexer.stop();
     await db.$disconnect();
     redis.disconnect();

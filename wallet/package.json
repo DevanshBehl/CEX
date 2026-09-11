@@ -13,7 +13,7 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "test:integration": "turbo run test:integration",
+    "test:integration": "turbo run test:integration --concurrency=1",
     "test:e2e": "pnpm --filter @wallet/web test:e2e",
     "db:generate": "pnpm --filter @wallet/db generate",
     "db:migrate": "pnpm --filter @wallet/db migrate",

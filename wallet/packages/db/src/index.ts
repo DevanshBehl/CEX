@@ -56,3 +56,29 @@ export {
   type RecordDepositResult,
 } from './repositories/deposit.repository.js';
 export { createCursorRepository, type CursorRepository } from './repositories/cursor.repository.js';
+
+// --- Phase 3 ---------------------------------------------------------------
+export {
+  createWithdrawalRepository,
+  type CreateWithdrawalInput,
+  type CreateWithdrawalResult,
+  type RetryEdge,
+  type TransitionInput,
+  type WithdrawalRecord,
+  type WithdrawalRepository,
+} from './repositories/withdrawal.repository.js';
+export {
+  createNonceAccountRepository,
+  type NonceAccountRecord,
+  type NonceAccountRepository,
+} from './repositories/nonce.repository.js';
+export {
+  createRiskDecisionRepository,
+  type RecordRiskDecisionInput,
+  type RiskDecisionRecord,
+  type RiskDecisionRepository,
+} from './repositories/risk-decision.repository.js';
+export {
+  createSigningRequestRepository,
+  type SigningRequestRepository,
+} from './repositories/signing-request.repository.js';

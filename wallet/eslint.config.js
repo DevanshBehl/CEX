@@ -15,10 +15,16 @@ import tseslint from 'typescript-eslint';
  * Packages that do not exist yet. Importing one is a phase-ordering mistake,
  * and the error should say so rather than "cannot find module".
  *
- * Remove an entry when its phase arrives — @wallet/ledger, @wallet/blockchain
- * and @wallet/solana came off this list when Phase 2 started.
+ * This list is EMPTY as of Phase 3: @wallet/ledger, @wallet/blockchain and
+ * @wallet/solana came off it when Phase 2 started, and @wallet/risk when
+ * Phase 3 did. Phase 4's addition is `services/mpc`, which is Rust and so is
+ * not reachable by a TypeScript import at all.
+ *
+ * Kept rather than deleted because the mechanism is the point: add a name here
+ * the moment a future package is named, and add a case to
+ * scripts/verify-boundaries.mjs alongside it.
  */
-const FUTURE_PACKAGES = ['@wallet/risk'];
+const FUTURE_PACKAGES = [];
 
 /**
  * The domain packages that must stay free of chain, persistence, and framework
@@ -44,11 +50,16 @@ const SHARED_IMPORT_PATTERNS = [
     message:
       'Deep imports are banned. Import from the package barrel only (prompt_phase1.md rules 26-27).',
   },
-  {
-    group: FUTURE_PACKAGES,
-    message:
-      'That package belongs to a later phase and does not exist yet (prompt_phase2.md rule 30).',
-  },
+  // An empty group matches nothing, which is correct while the list is empty.
+  ...(FUTURE_PACKAGES.length > 0
+    ? [
+        {
+          group: FUTURE_PACKAGES,
+          message:
+            'That package belongs to a later phase and does not exist yet (prompt_phase2.md rule 30).',
+        },
+      ]
+    : []),
 ];
 
 /** Chain SDKs, banned everywhere except the adapter package. */

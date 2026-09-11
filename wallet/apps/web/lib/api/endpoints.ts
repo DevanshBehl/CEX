@@ -28,6 +28,12 @@ import {
   type ListAddressesResponse,
   type ListBalancesResponse,
   type ListDepositsResponse,
+  listWithdrawalsResponseSchema,
+  withdrawalResponseSchema,
+  listReviewQueueResponseSchema,
+  type ListWithdrawalsResponse,
+  type WithdrawalResponse,
+  type ListReviewQueueResponse,
 } from '@wallet/types';
 import { request } from './client';
 
@@ -160,4 +166,43 @@ export const api = {
 
   getDeposit: (id: string): Promise<DepositResponse> =>
     request({ method: 'GET', path: `/deposits/${id}`, schema: depositResponseSchema }),
+
+  // --- withdrawals (Phase 3) ---
+  requestWithdrawal: (body: {
+    asset: string;
+    amount: string;
+    destination: string;
+    idempotencyKey: string;
+  }): Promise<WithdrawalResponse> =>
+    request({ method: 'POST', path: '/withdrawals', body, schema: withdrawalResponseSchema }),
+
+  listWithdrawals: (): Promise<ListWithdrawalsResponse> =>
+    request({ method: 'GET', path: '/withdrawals', schema: listWithdrawalsResponseSchema }),
+
+  getWithdrawal: (id: string): Promise<WithdrawalResponse> =>
+    request({ method: 'GET', path: `/withdrawals/${id}`, schema: withdrawalResponseSchema }),
+
+  // --- operator ---
+  reviewQueue: (): Promise<ListReviewQueueResponse> =>
+    request({
+      method: 'GET',
+      path: '/operator/review-queue',
+      schema: listReviewQueueResponseSchema,
+    }),
+
+  approveWithdrawal: (id: string, note: string): Promise<WithdrawalResponse> =>
+    request({
+      method: 'POST',
+      path: `/operator/withdrawals/${id}/approve`,
+      body: { note },
+      schema: withdrawalResponseSchema,
+    }),
+
+  rejectWithdrawal: (id: string, note: string): Promise<WithdrawalResponse> =>
+    request({
+      method: 'POST',
+      path: `/operator/withdrawals/${id}/reject`,
+      body: { note },
+      schema: withdrawalResponseSchema,
+    }),
 };

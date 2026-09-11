@@ -26,6 +26,7 @@
     "@wallet/errors": "workspace:*",
     "@wallet/ledger": "workspace:*",
     "@wallet/logger": "workspace:*",
+    "@wallet/risk": "workspace:*",
     "@wallet/solana": "workspace:*",
     "@wallet/types": "workspace:*",
     "fastify": "5.2.1",

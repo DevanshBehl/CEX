@@ -1,7 +1,7 @@
 # MPC Custodial Wallet
 
 An educational custodial Solana wallet platform, built in four phases.
-**Phase 1 (identity) and Phase 2 (custody and money-in) are complete.**
+**Phases 1–3 are complete: identity, custody and money-in, and money-out.**
 
 > Not audited. Not production custody. Never point this at real funds.
 > — master-prompt rules 7–8
@@ -18,24 +18,32 @@ An educational custodial Solana wallet platform, built in four phases.
 ## What works today
 
 A person can create an account with a passkey, sign in with no password and no
-seed phrase, manage their passkeys and sessions, and turn on two-factor
-authentication. They can then get a Solana deposit address, send SOL to it, and
-watch it appear in their balance — recorded in a double-entry ledger that the
-database itself refuses to let anyone falsify.
+seed phrase, and manage their passkeys, sessions and two-factor authentication.
+They can get a Solana deposit address, send SOL to it, and watch it appear in
+their balance. They can then withdraw it — through risk checks, fund locking, a
+signature, a broadcast, and ledger settlement — with every state of that journey
+shown honestly.
+
+All of it recorded in a double-entry ledger the database itself refuses to let
+anyone falsify.
 
 ## What it deliberately does NOT do
 
-**Money can arrive and be accounted for. It cannot leave.**
+**The signer is a mock.** It produces signatures that verify against nothing, it
+announces itself on every call, and it refuses to start when `NODE_ENV` is
+`production` — twice over, since the config refuses `SIGNER_KIND=mock` there as
+well.
 
-There is no withdrawal path, no transaction signing, and no risk engine. That is
-the shape of Phase 2 on purpose: deposits need no signing, so the ledger gets
-proven correct before any key material exists. Building withdrawals first would
-mean debugging accounting bugs and signing bugs at the same time, with no way to
-tell which layer is wrong.
+That is the shape of Phase 3 on purpose. The retry, timeout, expiry and
+ambiguous-broadcast paths are where withdrawals actually go wrong, and they are
+nearly impossible to provoke against real MPC. A mock can be told to fail, hang,
+or return the same signature twice, inside a test. Phase 4 replaces it with a
+Rust threshold implementation, and if that replacement requires editing anything
+above the `Signer` interface, the abstraction leaked.
 
 Also absent, by design: SPL tokens (ADR-0008), sweeps from deposit addresses
-into a hot wallet, and hot/warm/cold segregation. Those are Phase 4, and each
-depends on signing.
+into a hot wallet, hot/warm/cold segregation, and an operator role model. All
+Phase 4.
 
 ## Quick start
 
@@ -84,15 +92,17 @@ packages/
   db/         Prisma schema, migrations, repositories, transaction helper
   auth/       WebAuthn, sessions, TOTP, step-up, CSRF
   ledger/     double-entry accounting — pure, no chain, no database
-  blockchain/ chain-agnostic interfaces — no implementation, no chain names
+  risk/       the withdrawal policy engine — pure, deterministic, replayable
+  blockchain/ chain-agnostic interfaces, plus the mock signer
   solana/     the only package allowed to import a Solana SDK
 infra/        docker-compose: PostgreSQL + Redis
 scripts/      verify-boundaries.mjs — proves the lint rules actually bite
 ```
 
-There is no `packages/risk` or `services/mpc` yet. Empty packages rot and
-misrepresent the architecture, so they arrive with the phase that needs them —
-and `verify-boundaries.mjs` fails the build if anything imports one early.
+Every TypeScript package now exists. Phase 4's addition is `services/mpc`, which
+is Rust and so cannot be reached by an import at all — `verify-boundaries.mjs`
+still checks that the domain packages stay free of chains, databases and
+frameworks.
 
 ## The rules that shape this code
 
@@ -172,9 +182,98 @@ network's rent-exempt minimum behind for the account to exist. Crediting that to
 the user would create an obligation the platform cannot meet, so it goes to
 `house_rent` and the Activity page shows the split explicitly.
 
+**The house pre-funds its own fees.** Network fees are paid from the same
+on-chain pool that holds user funds, so a platform that debits `house_fees`
+without having put anything in is paying its operating costs out of customer
+money. The `liabilities_covered` invariant catches that immediately — it was the
+first thing it caught once withdrawals could pay a fee. `house_fees` is a
+prepaid balance and may never go negative.
+
+## The withdrawal lifecycle
+
+```
+REQUESTED → RISK_EVALUATING → { REJECTED | MANUAL_REVIEW | APPROVED }
+MANUAL_REVIEW    → { REJECTED | APPROVED }
+APPROVED         → FUNDS_LOCKED
+FUNDS_LOCKED     → SIGNING → { SIGNED | SIGN_FAILED }
+SIGNED           → BROADCAST → { CONFIRMED | BROADCAST_FAILED | EXPIRED }
+CONFIRMED        → SETTLED
+SIGN_FAILED | BROADCAST_FAILED | EXPIRED → FUNDS_LOCKED  (bounded retry)
+                                         → FAILED        (budget exhausted)
+```
+
+Fifteen states, twenty-four legal transitions, declared once in
+`packages/types/src/withdrawal-states.ts`. The migration that enforces them is
+**generated from that same table**, so the constraint and the type cannot drift
+— and both are tested, illegal transitions and legal ones alike.
+
+**Every failure edge is a state, not an exception.** A withdrawal that fails is
+_somewhere_, with a reason, and its full history is in `withdrawal_transitions`,
+which is append-only for the application role and for the schema owner.
+
+**A lock is a balanced transfer**, `user_available → user_locked`, posted in the
+same database transaction as the state change — so the ledger and the machine
+can never disagree. It is also the sufficient-funds check, because the check and
+the reservation have to be one atomic act: two concurrent withdrawals can each
+pass a balance check and both proceed, but only one can win the ledger write.
+
+### Durable nonces, and why they are not a detail
+
+A Solana recent blockhash dies in 60–90 seconds. A withdrawal passes through
+risk evaluation, possibly a human approval queue, a signing round, and a
+broadcast — and in Phase 4 that signing round is threshold MPC across several
+machines. It will not reliably finish inside 90 seconds.
+
+A blockhash that expires mid-flight produces the **ambiguous broadcast**: signed,
+submitted, and nobody can say whether it landed. Re-signing risks a double-spend;
+doing nothing strands the funds. There is no third option, because a dead
+blockhash carries no evidence.
+
+Every withdrawal is therefore built on a **durable nonce account**, which gives
+one property nothing else does:
+
+> The nonce advancing exactly once is proof the transaction landed exactly once.
+
+Re-broadcasting identical bytes is always safe. Re-signing happens only after
+reading the nonce shows the old transaction can never land. See
+[ADR-0009](./docs/adr/0009-durable-nonce-accounts.md) and the
+[ambiguous-broadcast runbook](./docs/runbooks/ambiguous-broadcast.md).
+
+## The risk engine
+
+`packages/risk` is pure: no database, no clock, no chain, no configuration read.
+Everything it needs is an argument, including `now` — so the same input always
+produces the same decision, and a decision persisted today can be replayed years
+from now and explain itself.
+
+Seven rules run on **every** evaluation. No short-circuit on the first denial,
+because an operator resolving a review needs everything that was wrong, not the
+first thing.
+
+| Rule                                    | Verdict when it fires |
+| --------------------------------------- | --------------------- |
+| account state                           | deny                  |
+| destination valid / on-curve / not ours | deny                  |
+| per-transaction limit                   | deny                  |
+| rolling 24h limit                       | deny                  |
+| velocity (count in a window)            | deny                  |
+| first-time destination                  | **review**            |
+| above the review threshold              | **review**            |
+
+**The daily window rolls.** A calendar reset would let an attacker take a full
+limit at 23:59 and another at 00:01.
+
+**A new destination is reviewed, not denied.** It is the shape of an account
+takeover — and also the shape of every legitimate first withdrawal.
+
+**The client is told a denial happened and a generic reason; never which limit,
+never by how much.** Returning the specific limit turns the endpoint into an
+oracle for probing thresholds. The full codes go to the persisted decision and
+to the operator queue.
+
 ## Testing
 
-301 tests: 189 unit, 98 integration, 14 end-to-end.
+441 tests: 264 unit, 153 integration, 24 end-to-end.
 
 ```bash
 pnpm test              # unit — no infrastructure needed
@@ -201,6 +300,42 @@ cleanly when no validator is running, because a skip is honest and a mocked
 "localnet" test is not.
 
 ## What the tests actually caught
+
+### Phase 3
+
+**1. Paying network fees out of the pooled assets is paying them with customer
+money.** The `liabilities_covered` invariant fired the first time a settlement
+charged a fee — total user liabilities exceeded chain-controlled assets by
+exactly the fee. The accounting was right and the _design_ was wrong: the house
+has to pre-fund its own operating balance, like any other participant.
+`house_fees` is now a prepaid balance that may never go negative.
+
+**2. Catching a constraint violation inside a PostgreSQL transaction poisons
+it.** Carried forward from Phase 2 as a written rule, and it still had to be
+applied deliberately to withdrawal idempotency keys — `ON CONFLICT DO NOTHING`,
+never `try/catch`.
+
+**3. The withdrawal route borrowed the auth rate limit.** The two exist for
+different reasons: auth limits slow credential guessing, a withdrawal limit
+bounds a compromised session, and the risk engine's velocity rule is the real
+control there. The integration suite tripped over it immediately.
+
+**4. A hardcoded global rate limit made the E2E suite fail on unrelated
+assertions.** Two dozen browser journeys from one IP exceeded 300/min,
+`/auth/session` was throttled, and the app correctly concluded the user was
+signed out — so the failures pointed at the pages rather than at the limit. It
+is configuration now.
+
+**5. Test data accumulating across runs crowded out the worker batch.** Every
+run left withdrawals in `BROADCAST` that nothing would ever finalize; they piled
+up until a cycle appeared to do nothing. The fix is test hygiene, but the
+diagnosis took a while because the symptom looked like a worker bug.
+
+**6. Deleting a test user fails once it has withdrawal history — and that is the
+system working.** The cascade reaches `withdrawal_transitions`, which is
+append-only, so the delete is refused. Cleanup now removes only users who left
+no evidence behind. Test data accumulating is the honest price of history that
+cannot be quietly edited.
 
 ### Phase 2
 
@@ -270,6 +405,30 @@ pages/_document` — naming a file this project does not have. Diagnosis was
    slowed by Turbo replaying a cached success over a genuinely broken build; if
    a build result looks impossible, clear `.turbo` before believing it.
 
+## Known limitations (Phase 3)
+
+- **The signer is a mock.** It produces signatures that verify against nothing.
+  Two independent guards stop it reaching production: the config refuses
+  `SIGNER_KIND=mock` there, and `MockSigner` refuses to construct. Real
+  threshold signing is Phase 4.
+- **`SIGNER_KIND=real` throws.** It exists in the schema so a production
+  configuration is expressible; nothing implements it yet, and failing loudly
+  beats silently falling back to the mock.
+- **No operator role model.** The review queue is gated by a configured list of
+  user ids plus a step-up. A real role model is Phase 4 (ADR-0011).
+- **The nonce pool is a fixed size.** It bounds withdrawal concurrency, and a
+  dry pool makes withdrawals wait rather than fail. Growing it on demand is
+  Phase 4.
+- **Reconciliation does not observe nonce accounts or the treasury.** Their
+  balances are outside the comparison, so the residual is approximate while
+  withdrawals are in flight.
+- **No operator tooling for adjustments.** A lock that somehow outlives its
+  withdrawal needs a reversing ledger transaction, and there is no UI or CLI for
+  one.
+- **Address allowlisting is not built.** Master-prompt rule 150 calls it a
+  future feature; the policy engine is shaped so it drops in without
+  restructuring.
+
 ## Known limitations (Phase 2)
 
 - **`user_locked` exists and is never used.** Phase 2 creates the account and
@@ -314,18 +473,28 @@ pages/_document` — naming a file this project does not have. Diagnosis was
 
 ## Next
 
-Phase 3 — withdrawals, the risk engine, and a mock signer. See
+Phase 4 — real MPC, SPL tokens, and operational hardening. See
 [`report.md`](./report.md) §5.
 
-The shape of it: a withdrawal state machine with explicit failure edges, a
-deterministic policy engine that returns reason codes, fund locking as a
-balanced transfer into `user_locked`, and a clearly-labelled mock `Signer`. The
-mock is the point — it can be made to fail, hang, or time out on command, which
-is how the retry and expiry paths get tested. Those paths are nearly impossible
-to exercise against real MPC.
+Split it in two and do not attempt both at once:
 
-Two decisions to make before it starts: **durable nonce accounts versus recent
-blockhashes** (a blockhash dies in ~60–90 seconds, and an MPC signing round plus
-a manual review will exceed that — a dead blockhash mid-flight creates an
-ambiguous "did it land?" state, which is the highest-consequence bug class in
-the system), and how `requireStepUp` maps onto withdrawal value tiers.
+**4a — a Rust service holding a single key.** A real process boundary, its own
+datastore, mutual-TLS or signed-request authentication, key material that never
+leaves. Then `RustSingleKeySigner` behind the existing `Signer` interface, and
+**every Phase 3 test must pass unchanged above that interface**. That is the
+proof the abstraction held.
+
+**4b — threshold signing.** FROST-Ed25519 (RFC 9591) via an established Rust
+implementation, never a hand-rolled scheme. It produces an ordinary Ed25519
+signature, so nothing on-chain changes. Participants are entities distinct from
+application users, each its own process, with distributed key generation and
+explicit handling of unavailability and round timeouts.
+
+Also Phase 4: SPL tokens with their ATA rent and fee funding, sweeps and custody
+tiers, reconciliation as a scheduled job with alerting, metrics and health
+checks across every dependency, a real operator role model, and a secret manager
+in place of `.env`.
+
+If 4b stalls, **ship 4a plus everything else** rather than blocking tokens,
+reconciliation and observability behind it. The single-key Rust service already
+delivers the process boundary, which is most of the architectural value.

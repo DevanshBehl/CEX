@@ -34,6 +34,10 @@ export const ERROR_CODES = [
   'ASSET_NOT_SUPPORTED',
   'ADDRESS_INVALID',
 
+  // Withdrawals (Phase 3).
+  'WITHDRAWAL_NOT_PENDING_REVIEW',
+  'NONCE_POOL_EXHAUSTED',
+
   // Reserved for later phases.
   // INSUFFICIENT_FUNDS gains its meaning in Phase 2's ledger and its first
   // caller in Phase 3's withdrawal path; the other two are still unemitted.

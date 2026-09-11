@@ -41,9 +41,19 @@ env:
   SOLANA_NETWORK: localnet
   SOLANA_COMMITMENT: finalized
   SUPPORTED_ASSETS: SOL
-  # Tests drive the indexer by hand; a background timer would make
+  # Tests drive the workers by hand; a background timer would make
   # "what happened after N cycles" unanswerable.
   INDEXER_ENABLED: 'false'
+  WITHDRAWAL_WORKERS_ENABLED: 'false'
+  # Phase 3. `mock` is refused in production by config AND by MockSigner itself.
+  SIGNER_KIND: mock
+  SIGNER_KEY_REF: ci-treasury
+  TREASURY_ADDRESS: BWwVzPxw1AK6LgsSn7GSPj9Stv1o5ENkp4PCru9w3Hvr
+  # Raised for CI: two dozen browser journeys from one IP exceed a realistic
+  # ceiling, and a throttled /auth/session surfaces as unrelated failures.
+  RATE_LIMIT_GLOBAL_PER_MINUTE: '100000'
+  RATE_LIMIT_WITHDRAWAL_PER_MINUTE: '100000'
+  RATE_LIMIT_AUTH_PER_IP_PER_MINUTE: '100000'
 
 jobs:
   static:
@@ -134,6 +144,8 @@ jobs:
           --shadow-database-url "$MIGRATION_DATABASE_URL"
           --exit-code
 
+      # Serial: the suites share one database, and running them concurrently
+      # makes one suite's fixtures another's mystery failure.
       - run: pnpm test:integration
 
   localnet:

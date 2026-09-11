@@ -30,9 +30,23 @@ deposits.
 
 ### Negative residual — the books claim MORE than the chain holds
 
-**Escalate.** Phase 2 cannot send funds: there is no signing path and no
-withdrawal. So there is no legitimate way for the chain balance to fall below
-what the ledger records.
+**Since Phase 3, this has a legitimate transient cause.** A withdrawal that has
+been broadcast but has not yet settled has left the chain and has not yet been
+debited from the ledger, so the chain balance is legitimately lower for a few
+seconds.
+
+Check that first:
+
+```sql
+SELECT id, amount, status, tx_signature FROM withdrawals
+WHERE status IN ('BROADCAST', 'CONFIRMED');
+```
+
+If the shortfall is accounted for by those amounts, it is not drift. Re-run
+after they settle.
+
+**If it is not, escalate.** With no withdrawals in flight there is no
+legitimate way for the chain balance to fall below what the ledger records.
 
 Possible causes, all serious:
 
@@ -42,11 +56,14 @@ Possible causes, all serious:
 - Funds moved from a deposit address by something outside this system, which
   means a key is compromised.
 - A ledger write that did not correspond to a real transfer.
+- A withdrawal settled that never actually landed — which would mean settlement
+  happened below finality, contradicting ADR-0006.
 
 Do this in order:
 
-1. **Stop the indexer** (`INDEXER_ENABLED=false`, restart) so nothing further is
-   credited while you investigate.
+1. **Stop the indexer and the withdrawal workers**
+   (`INDEXER_ENABLED=false`, `WITHDRAWAL_WORKERS_ENABLED=false`, restart) so
+   nothing further is credited or sent while you investigate.
 2. Identify which addresses disagree:
    ```sql
    SELECT a.address FROM addresses a WHERE a.chain = 'solana' AND a.status = 'active';
@@ -72,3 +89,7 @@ verify that the split between `user_available` and `house_rent` is right, and it
 cannot detect a deposit credited to the **wrong user** — both totals would still
 match. Attribution correctness rests on the uniqueness of deposit addresses
 (ADR-0004) and is covered by tests, not by this report.
+
+Since Phase 3 it also does not observe nonce accounts or the treasury address,
+so their balances are not part of the comparison. Extending it to cover every
+platform-owned address is a Phase 4 task, alongside scheduling and alerting.

@@ -32,12 +32,11 @@ const CASES = [
     source: "import 'fastify';\n",
     expect: /do not belong in a domain package/,
   },
-  {
-    name: 'a package from a later phase',
-    file: 'packages/auth/src/__boundary_probe2.ts',
-    source: "import '@wallet/risk';\n",
-    expect: /belongs to a later phase/,
-  },
+  // The "future package" case is absent while eslint.config.js's
+  // FUTURE_PACKAGES list is empty — every TypeScript package now exists, and
+  // Phase 4's addition is Rust. Restore a case here the moment a name is added
+  // back to that list; an unexercised boundary rule is what this script exists
+  // to catch.
   {
     name: 'the ledger domain reaching for a chain',
     file: 'packages/ledger/src/__boundary_probe.ts',
@@ -47,6 +46,18 @@ const CASES = [
   {
     name: 'the ledger domain reaching for persistence',
     file: 'packages/ledger/src/__boundary_probe2.ts',
+    source: "import '@wallet/db';\n",
+    expect: /must not depend on a chain, a database, or a cache/,
+  },
+  {
+    name: 'the risk domain reaching for a chain',
+    file: 'packages/risk/src/__boundary_probe.ts',
+    source: "import '@solana/web3.js';\n",
+    expect: /Only packages\/solana may import a chain SDK/,
+  },
+  {
+    name: 'the risk domain reaching for persistence',
+    file: 'packages/risk/src/__boundary_probe2.ts',
     source: "import '@wallet/db';\n",
     expect: /must not depend on a chain, a database, or a cache/,
   },

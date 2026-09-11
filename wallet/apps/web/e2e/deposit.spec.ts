@@ -69,11 +69,13 @@ test.describe('deposit journey', () => {
     await expect(page.getByText(/no activity yet/i)).toBeVisible();
   });
 
-  test('withdrawals are absent and the page says why', async ({ page }) => {
+  test('the dashboard is honest about what is not real yet', async ({ page }) => {
     await register(page);
-    // Phase 2 ends with money that can arrive and cannot leave. The UI should
-    // say that rather than offering a control that does not work.
-    await expect(page.locator('main')).toContainText(/withdrawals are not available yet/i);
+    // Phase 2 asserted "withdrawals are not available yet". Phase 3 built them,
+    // so the wording changed — but the property did not: the UI says plainly
+    // what is still a mock rather than letting anyone assume otherwise
+    // (master-prompt rule 8).
+    await expect(page.locator('main')).toContainText(/signing is not real yet/i);
   });
 
   test('a deposit address is not reachable while signed out', async ({ page }) => {

@@ -45,6 +45,8 @@ export interface ApiConfig {
   readonly rateLimit: {
     readonly authPerIpPerMinute: number;
     readonly authPerAccountPerMinute: number;
+    readonly withdrawalPerMinute: number;
+    readonly globalPerMinute: number;
   };
   readonly chain: {
     readonly rpcUrl: string;
@@ -60,6 +62,31 @@ export interface ApiConfig {
     readonly pollIntervalMs: number;
     readonly pageSize: number;
     readonly maxAddressesPerCycle: number;
+  };
+  readonly risk: {
+    readonly perTransactionLimit: string;
+    readonly dailyLimit: string;
+    readonly velocityWindowMinutes: number;
+    readonly velocityMaxCount: number;
+    readonly manualReviewAbove: string;
+    readonly reviewNewDestinations: boolean;
+    readonly knownDestinationWindowDays: number;
+  };
+  readonly withdrawal: {
+    readonly stepUpMaxAgeSeconds: number;
+    readonly signerKind: Env['SIGNER_KIND'];
+    readonly signerKeyRef: string;
+    readonly treasuryAddress: string | undefined;
+    readonly noncePoolSize: number;
+    readonly workersEnabled: boolean;
+    readonly workerIntervalMs: number;
+    readonly workerBatchSize: number;
+    readonly budgets: {
+      readonly sign: number;
+      readonly broadcast: number;
+      readonly expiry: number;
+    };
+    readonly operatorUserIds: readonly string[];
   };
 }
 
@@ -130,6 +157,8 @@ export function toApiConfig(env: Env): ApiConfig {
     rateLimit: Object.freeze({
       authPerIpPerMinute: env.RATE_LIMIT_AUTH_PER_IP_PER_MINUTE,
       authPerAccountPerMinute: env.RATE_LIMIT_AUTH_PER_ACCOUNT_PER_MINUTE,
+      withdrawalPerMinute: env.RATE_LIMIT_WITHDRAWAL_PER_MINUTE,
+      globalPerMinute: env.RATE_LIMIT_GLOBAL_PER_MINUTE,
     }),
     chain: Object.freeze({
       rpcUrl: env.SOLANA_RPC_URL,
@@ -145,6 +174,31 @@ export function toApiConfig(env: Env): ApiConfig {
       pollIntervalMs: env.INDEXER_POLL_INTERVAL_MS,
       pageSize: env.INDEXER_PAGE_SIZE,
       maxAddressesPerCycle: env.INDEXER_MAX_ADDRESSES_PER_CYCLE,
+    }),
+    risk: Object.freeze({
+      perTransactionLimit: env.RISK_PER_TRANSACTION_LIMIT,
+      dailyLimit: env.RISK_DAILY_LIMIT,
+      velocityWindowMinutes: env.RISK_VELOCITY_WINDOW_MINUTES,
+      velocityMaxCount: env.RISK_VELOCITY_MAX_COUNT,
+      manualReviewAbove: env.RISK_MANUAL_REVIEW_ABOVE,
+      reviewNewDestinations: env.RISK_NEW_DESTINATION_REVIEW,
+      knownDestinationWindowDays: env.RISK_KNOWN_DESTINATION_WINDOW_DAYS,
+    }),
+    withdrawal: Object.freeze({
+      stepUpMaxAgeSeconds: env.WITHDRAWAL_STEP_UP_MAX_AGE_SECONDS,
+      signerKind: env.SIGNER_KIND,
+      signerKeyRef: env.SIGNER_KEY_REF,
+      treasuryAddress: env.TREASURY_ADDRESS,
+      noncePoolSize: env.NONCE_POOL_SIZE,
+      workersEnabled: env.WITHDRAWAL_WORKERS_ENABLED,
+      workerIntervalMs: env.WITHDRAWAL_WORKER_INTERVAL_MS,
+      workerBatchSize: env.WITHDRAWAL_WORKER_BATCH_SIZE,
+      budgets: Object.freeze({
+        sign: env.WITHDRAWAL_SIGN_MAX_ATTEMPTS,
+        broadcast: env.WITHDRAWAL_BROADCAST_MAX_ATTEMPTS,
+        expiry: env.WITHDRAWAL_EXPIRY_MAX_ATTEMPTS,
+      }),
+      operatorUserIds: Object.freeze([...env.OPERATOR_USER_IDS]),
     }),
   });
 }

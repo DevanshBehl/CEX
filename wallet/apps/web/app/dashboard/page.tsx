@@ -36,6 +36,9 @@ export default function DashboardPage() {
               <Link href="/deposit">
                 <Button>Deposit</Button>
               </Link>
+              <Link href="/withdraw">
+                <Button variant="secondary">Withdraw</Button>
+              </Link>
               <Link href="/activity">
                 <Button variant="secondary">Activity</Button>
               </Link>
@@ -67,11 +70,14 @@ export default function DashboardPage() {
         </dl>
       </Card>
 
-      {/* Withdrawals are Phase 3. Saying so beats a disabled button. */}
+      {/*
+        Signing is still a mock (Phase 3). Saying so plainly beats letting
+        someone assume otherwise — master-prompt rule 8.
+      */}
       <EmptyState
-        title="Withdrawals are not available yet"
-        body="Money can arrive and be accounted for, but cannot leave. Withdrawals need transaction signing, risk checks, and fund locking — all of which arrive in Phase 3."
-        phase="Phase 3"
+        title="Signing is not real yet"
+        body="Withdrawals run the full lifecycle — risk checks, fund locking, signing, broadcast and settlement — but the signer is a clearly-labelled mock. Threshold MPC arrives in Phase 4."
+        phase="Phase 4"
       />
     </div>
   );
