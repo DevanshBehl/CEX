@@ -101,7 +101,7 @@ export default function WithdrawPage() {
         balance and the standing warnings sit beside it rather than stacked
         above, so the primary action is the first thing at the top of the page.
       */}
-      <div className="grid gap-10 lg:grid-cols-3 lg:gap-12">
+      <div className="grid items-start gap-3 lg:grid-cols-3">
         <div className="lg:col-span-2">
           <Section title="Send SOL" description="Withdrawals are reviewed before they are sent.">
             {balances.loading ? (
@@ -151,8 +151,8 @@ export default function WithdrawPage() {
         </div>
 
         {/* Balance and standing warnings: reference, not the primary action. */}
-        <aside className="space-y-8">
-          <div className="rounded-lg border border-line bg-surface p-5">
+        <aside className="space-y-3">
+          <div className="atlas-raised rounded-lg px-[18px] py-4">
             <Figure
               label="Available"
               value={sol ? formatAmount(sol.available, sol.decimals) : '0'}
@@ -180,19 +180,26 @@ export default function WithdrawPage() {
         </aside>
       </div>
 
-      <div className="mt-14">
-        <Section title="Your withdrawals">
+      <div className="mt-3">
+        <Section title="Your withdrawals" flush>
           {withdrawals.loading ? (
-            <Spinner label="Loading…" />
+            <div className="p-4">
+              <Spinner label="Loading…" />
+            </div>
           ) : withdrawals.error !== null ? (
-            <ErrorNotice message={withdrawals.error} />
+            <div className="p-4">
+              <ErrorNotice message={withdrawals.error} />
+            </div>
           ) : withdrawals.data && withdrawals.data.length > 0 ? (
             <ul className="divide-y divide-line">
               {withdrawals.data.map((w) => (
-                <li key={w.id} className="py-4">
+                <li
+                  key={w.id}
+                  className="px-4 py-3.5 transition-colors duration-micro hover:bg-background-subtle"
+                >
                   <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
                     <div className="flex items-center gap-3">
-                      <span className="font-mono text-base text-ink">
+                      <span className="font-mono text-sm font-semibold text-ink">
                         −{formatAmount(w.amount, w.decimals)} {w.asset}
                       </span>
                       <WithdrawalStatusBadge status={w.status} />

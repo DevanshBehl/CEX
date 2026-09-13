@@ -62,7 +62,7 @@ export default function DepositPage() {
       />
 
       {error !== null && (
-        <div className="mb-8 max-w-2xl">
+        <div className="mb-4 max-w-2xl">
           <ErrorNotice message={error.message} correlationId={error.correlationId} />
         </div>
       )}
@@ -70,8 +70,8 @@ export default function DepositPage() {
       {address === null && error === null ? (
         <Spinner label="Preparing your deposit address…" />
       ) : address !== null ? (
-        <div className="grid gap-10 lg:grid-cols-3 lg:gap-12">
-          <div className="lg:col-span-2">
+        <div className="grid items-start gap-3 lg:grid-cols-3">
+          <div className="space-y-3 lg:col-span-2">
             {/*
               Rule 172: the asset and the network are stated unambiguously and
               BEFORE the address. Sending an asset on the wrong network is the
@@ -116,26 +116,23 @@ export default function DepositPage() {
               <div className="mt-6 max-w-xl">
                 <FaucetPanel address={address.address} />
               </div>
-
-              {/*
-                What is actually held AT this address (ADR-0020, Task 4).
-                
-                Beside the address rather than only on the dashboard: the claim
-                segregated custody makes is that these funds are at an address
-                that is the user's, and the two facts are worth seeing
-                together.
-              */}
-              <div className="mt-6">
-                <AssetBreakdown
-                  allocations={summary.data?.allocations ?? []}
-                  address={address.address}
-                  loading={summary.loading}
-                />
-              </div>
             </Section>
+
+            {/*
+              What is actually held AT this address (ADR-0020, Task 4).
+
+              Beside the address rather than only on the dashboard: the claim
+              segregated custody makes is that these funds are at an address
+              that is the user's, and the two facts are worth seeing together.
+            */}
+            <AssetBreakdown
+              allocations={summary.data?.allocations ?? []}
+              address={address.address}
+              loading={summary.loading}
+            />
           </div>
 
-          <aside className="space-y-8">
+          <aside className="space-y-3">
             <Section title="What happens next">
               {/*
                 §29: a numbered sequence as a rail, not a bulleted list. The
@@ -157,7 +154,7 @@ export default function DepositPage() {
                   </>,
                 ].map((step, index) => (
                   <li key={index} className="flex gap-3">
-                    <span className="mt-px shrink-0 font-mono text-2xs text-ink-disabled">
+                    <span className="mt-px shrink-0 font-mono text-2xs text-ink-muted">
                       {String(index + 1).padStart(2, '0')}
                     </span>
                     <span className="text-xs leading-relaxed text-ink-muted">{step}</span>
@@ -209,7 +206,7 @@ function ExplorerLink({ value, cluster }: { value: string; cluster: Cluster | un
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="text-sm text-accent transition-colors duration-micro ease-atlas hover:text-accent-strong"
+      className="text-sm font-semibold text-accent hover:underline"
     >
       View on explorer
     </a>

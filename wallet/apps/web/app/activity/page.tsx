@@ -8,7 +8,7 @@ import { useWithdrawals } from '@/features/withdrawal/use-withdrawals';
 import { WithdrawalStatusBadge } from '@/features/withdrawal/status-badge';
 import { useAssetLabel } from '@/features/portfolio/use-asset-label';
 import { formatAmount, isZeroAmount, shortenAddress } from '@/lib/format';
-import { Card, EmptyState, ErrorNotice, Spinner, PageHeader } from '@/components/ui';
+import { EmptyState, ErrorNotice, PageHeader, Section, Spinner } from '@/components/ui';
 
 /**
  * Everything that moved, in one list (Task 5).
@@ -45,32 +45,36 @@ export default function ActivityPage() {
   const error = deposits.error ?? withdrawals.error;
 
   return (
-    <div className="space-y-6">
+    <div className="animate-fade-up">
       <PageHeader
         title="Activity"
         description="Every deposit and withdrawal, with the state the ledger actually holds."
       />
 
-      <Card>
+      <Section title="Transactions" flush>
         {loading && rows.length === 0 ? (
-          <Spinner label="Loading activity…" />
+          <div className="p-4">
+            <Spinner label="Loading activity…" />
+          </div>
         ) : error !== null ? (
-          <ErrorNotice message={error} />
+          <div className="p-4">
+            <ErrorNotice message={error} />
+          </div>
         ) : rows.length > 0 ? (
           <ul className="divide-y divide-line">
             {rows.map((row) =>
               row.kind === 'deposit' ? (
                 <li
                   key={`d-${row.deposit.id}`}
-                  className="space-y-1 py-3"
+                  className="space-y-1 px-4 py-3 transition-colors duration-micro hover:bg-background-subtle"
                   data-testid="activity-deposit"
                 >
                   <div className="flex items-baseline justify-between gap-4">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">Deposit</span>
+                      <span className="text-sm font-semibold">Deposit</span>
                       <DepositStatusBadge status={row.deposit.status} />
                     </div>
-                    <span className="font-mono text-sm tabular-nums text-success">
+                    <span className="font-mono text-sm font-semibold tabular-nums text-success">
                       +{formatAmount(row.deposit.creditedAmount, row.deposit.decimals)}{' '}
                       {labelOf(row.deposit.asset)}
                     </span>
@@ -97,15 +101,15 @@ export default function ActivityPage() {
               ) : (
                 <li
                   key={`w-${row.withdrawal.id}`}
-                  className="space-y-1 py-3"
+                  className="space-y-1 px-4 py-3 transition-colors duration-micro hover:bg-background-subtle"
                   data-testid="activity-withdrawal"
                 >
                   <div className="flex items-baseline justify-between gap-4">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">Withdrawal</span>
+                      <span className="text-sm font-semibold">Withdrawal</span>
                       <WithdrawalStatusBadge status={row.withdrawal.status} />
                     </div>
-                    <span className="font-mono text-sm tabular-nums text-ink">
+                    <span className="font-mono text-sm font-semibold tabular-nums text-ink">
                       −{formatAmount(row.withdrawal.amount, row.withdrawal.decimals)}{' '}
                       {labelOf(row.withdrawal.asset)}
                     </span>
@@ -149,7 +153,7 @@ export default function ActivityPage() {
             body="Deposits appear here as soon as the network sees them, and are credited once finalized."
           />
         )}
-      </Card>
+      </Section>
     </div>
   );
 }

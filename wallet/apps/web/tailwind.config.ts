@@ -4,48 +4,54 @@ import type { Config } from 'tailwindcss';
  * Tailwind maps the Atlas tokens in `app/globals.css`; it does not define them
  * (design.md §17, §42).
  *
- * Every colour here is a `var(--atlas-*)` reference. That is what makes the
+ * Every colour here is an `--atlas-*` channel reference. That is what makes the
  * stylesheet the single source of truth — a hex value added to this file would
  * be invisible to anyone reading the tokens, which is exactly how a design
  * system quietly acquires a second palette.
  */
+
+/** A channel token, so opacity modifiers (`border-danger/25`) are emitted. */
+const c = (token: string) => `rgb(var(${token}) / <alpha-value>)`;
+
 export default {
   content: ['./app/**/*.{ts,tsx}', './components/**/*.{ts,tsx}', './features/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
         background: {
-          DEFAULT: 'var(--atlas-bg)',
-          subtle: 'var(--atlas-bg-subtle)',
+          DEFAULT: c('--atlas-bg'),
+          subtle: c('--atlas-bg-subtle'),
         },
         surface: {
-          DEFAULT: 'var(--atlas-surface)',
-          raised: 'var(--atlas-surface-raised)',
-          elevated: 'var(--atlas-surface-raised)',
-          hover: 'var(--atlas-surface-hover)',
-          active: 'var(--atlas-surface-active)',
+          DEFAULT: c('--atlas-surface'),
+          raised: c('--atlas-surface-raised'),
+          elevated: c('--atlas-surface-raised'),
+          hover: c('--atlas-surface-hover'),
+          active: c('--atlas-surface-active'),
         },
         line: {
-          DEFAULT: 'var(--atlas-border)',
-          strong: 'var(--atlas-border-strong)',
-          emphasis: 'var(--atlas-border-emphasis)',
+          DEFAULT: c('--atlas-border'),
+          strong: c('--atlas-border-strong'),
+          emphasis: c('--atlas-border-emphasis'),
         },
         ink: {
-          DEFAULT: 'var(--atlas-text)',
-          secondary: 'var(--atlas-text-secondary)',
-          muted: 'var(--atlas-text-muted)',
-          disabled: 'var(--atlas-text-disabled)',
+          DEFAULT: c('--atlas-text'),
+          secondary: c('--atlas-text-secondary'),
+          muted: c('--atlas-text-muted'),
+          disabled: c('--atlas-text-disabled'),
         },
         accent: {
-          DEFAULT: 'var(--atlas-accent)',
-          strong: 'var(--atlas-accent-strong)',
-          deep: 'var(--atlas-accent-deep)',
-          dim: 'var(--atlas-accent-dim)',
-          glow: 'var(--atlas-accent-glow)',
+          DEFAULT: c('--atlas-accent'),
+          strong: c('--atlas-accent-strong'),
+          deep: c('--atlas-accent-deep'),
+          dim: c('--atlas-accent-dim'),
+          glow: c('--atlas-accent-glow'),
         },
-        success: { DEFAULT: 'var(--atlas-success)', dim: 'var(--atlas-success-dim)' },
-        warning: { DEFAULT: 'var(--atlas-warning)', dim: 'var(--atlas-warning-dim)' },
-        danger: { DEFAULT: 'var(--atlas-danger)', dim: 'var(--atlas-danger-dim)' },
+        success: { DEFAULT: c('--atlas-success'), dim: c('--atlas-success-dim') },
+        warning: { DEFAULT: c('--atlas-warning'), dim: c('--atlas-warning-dim') },
+        danger: { DEFAULT: c('--atlas-danger'), dim: c('--atlas-danger-dim') },
+        'on-accent': c('--atlas-on-accent'),
+        scrim: c('--atlas-scrim'),
       },
 
       borderRadius: {
@@ -94,12 +100,22 @@ export default {
 
       spacing: {
         sidebar: 'var(--atlas-sidebar-width)',
+        topbar: 'var(--atlas-topbar-height)',
       },
 
       keyframes: {
+        fade: {
+          from: { opacity: '0' },
+          to: { opacity: '1' },
+        },
         'fade-up': {
-          from: { opacity: '0', transform: 'translateY(4px)' },
+          from: { opacity: '0', transform: 'translateY(8px)' },
           to: { opacity: '1', transform: 'translateY(0)' },
+        },
+        // A dialog arriving: a short rise with the faintest scale.
+        pop: {
+          from: { opacity: '0', transform: 'translateY(10px) scale(0.98)' },
+          to: { opacity: '1', transform: 'none' },
         },
         shimmer: {
           from: { transform: 'translateX(-100%)' },
@@ -112,7 +128,9 @@ export default {
         },
       },
       animation: {
-        'fade-up': 'fade-up var(--atlas-duration-slow) var(--atlas-ease) both',
+        fade: 'fade 300ms var(--atlas-ease) both',
+        'fade-up': 'fade-up 400ms var(--atlas-ease) both',
+        pop: 'pop 350ms cubic-bezier(0.2, 0.8, 0.3, 1) both',
         shimmer: 'shimmer 1.6s var(--atlas-ease) infinite',
         'pulse-soft': 'pulse-soft 2.4s var(--atlas-ease) infinite',
       },

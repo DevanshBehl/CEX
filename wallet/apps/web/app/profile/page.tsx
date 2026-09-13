@@ -68,7 +68,7 @@ export default function ProfilePage() {
           {error !== null && (
             <ErrorNotice message={error.message} correlationId={error.correlationId} />
           )}
-          {saved && <p className="text-sm text-emerald-700">Saved.</p>}
+          {saved && <p className="text-sm text-success">Saved.</p>}
 
           <Button type="submit" disabled={saving}>
             {saving ? 'Saving…' : 'Save changes'}

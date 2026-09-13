@@ -6,7 +6,16 @@ import { api, ApiError } from '@/lib/api';
 import { WithdrawalStatusBadge } from '@/features/withdrawal/status-badge';
 import { formatAmount, shortenAddress } from '@/lib/format';
 import { useStepUpAction } from '@/features/security/use-step-up';
-import { Button, Card, EmptyState, ErrorNotice, Field, Input, Spinner } from '@/components/ui';
+import {
+  Button,
+  Card,
+  EmptyState,
+  ErrorNotice,
+  Field,
+  Input,
+  PageHeader,
+  Spinner,
+} from '@/components/ui';
 
 /**
  * The operator review queue (prompt_phase3.md rules 160-162).
@@ -78,13 +87,11 @@ export default function OperatorPage() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold">Review queue</h1>
-        <p className="mt-1 text-sm text-ink-muted">
-          Withdrawals the risk engine referred to a person.
-        </p>
-      </div>
+    <div className="max-w-3xl animate-fade-up space-y-3">
+      <PageHeader
+        title="Review queue"
+        description="Withdrawals the risk engine referred to a person."
+      />
 
       {error !== null && <ErrorNotice message={error} />}
       {stepUp.error !== null && (
@@ -110,7 +117,7 @@ export default function OperatorPage() {
         items.map((item) => (
           <Card key={item.withdrawal.id}>
             <div className="flex items-baseline justify-between gap-4">
-              <span className="font-mono text-sm tabular-nums">
+              <span className="font-mono text-sm font-semibold tabular-nums">
                 {formatAmount(item.withdrawal.amount, item.withdrawal.decimals)}{' '}
                 {item.withdrawal.asset}
               </span>
@@ -137,7 +144,7 @@ export default function OperatorPage() {
               {item.riskCodes.map((code) => (
                 <span
                   key={code}
-                  className="rounded bg-surface-hover px-2 py-0.5 font-mono text-xs text-ink-muted"
+                  className="rounded-sm border border-line bg-surface-active px-1.5 py-0.5 font-mono text-[11px] text-ink-secondary"
                 >
                   {code}
                 </span>
@@ -155,7 +162,7 @@ export default function OperatorPage() {
                 />
               </Field>
 
-              <div className="flex gap-3">
+              <div className="flex gap-2">
                 <Button
                   disabled={stepUp.busy}
                   onClick={() => void decide(item.withdrawal.id, true)}

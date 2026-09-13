@@ -52,7 +52,7 @@ export default function SecurityPage() {
   const hasTotp = state.data.factors.includes('totp');
 
   return (
-    <div className="max-w-3xl animate-fade-up space-y-12">
+    <div className="max-w-3xl animate-fade-up space-y-3">
       <PageHeader
         title="Security"
         description="Passkeys, two-factor authentication, and the devices signed in to this account."
@@ -78,9 +78,12 @@ export default function SecurityPage() {
             {credentials
               .filter((c) => c.type === 'webauthn')
               .map((credential) => (
-                <li key={credential.id} className="flex items-center justify-between gap-4 py-3">
+                <li
+                  key={credential.id}
+                  className="flex items-center justify-between gap-4 py-3 first:pt-0"
+                >
                   <div>
-                    <p className="text-sm font-medium">{credential.deviceName ?? 'Passkey'}</p>
+                    <p className="text-sm font-semibold">{credential.deviceName ?? 'Passkey'}</p>
                     <p className="text-xs text-ink-muted">
                       Added {new Date(credential.createdAt).toLocaleDateString()}
                       {credential.lastUsedAt !== null &&
@@ -90,6 +93,7 @@ export default function SecurityPage() {
                   </div>
                   <Button
                     variant="danger"
+                    size="sm"
                     disabled={stepUpAction.busy}
                     onClick={async () => {
                       const ok = await stepUpAction.run(() => api.revokeCredential(credential.id));
@@ -106,6 +110,7 @@ export default function SecurityPage() {
         <div className="mt-4">
           <Button
             variant="secondary"
+            size="sm"
             disabled={passkeyState.busy}
             onClick={async () => {
               const result = await register({ deviceName: 'This device' });
@@ -147,9 +152,12 @@ export default function SecurityPage() {
         ) : (
           <ul className="divide-y divide-line">
             {sessions.map((session) => (
-              <li key={session.id} className="flex items-center justify-between gap-4 py-3">
+              <li
+                key={session.id}
+                className="flex items-center justify-between gap-4 py-3 first:pt-0 last:pb-0"
+              >
                 <div>
-                  <p className="flex items-center gap-2 text-sm font-medium">
+                  <p className="flex items-center gap-2 text-sm font-semibold">
                     {session.ip ?? 'unknown address'}
                     {session.current && <StatusBadge tone="good">This device</StatusBadge>}
                   </p>
@@ -159,6 +167,7 @@ export default function SecurityPage() {
                 </div>
                 <Button
                   variant="secondary"
+                  size="sm"
                   onClick={async () => {
                     await api.revokeSession(session.id);
                     if (session.current) {
@@ -209,6 +218,7 @@ function TwoFactorCard({
         {enabled ? (
           <Button
             variant="danger"
+            size="sm"
             disabled={stepUpAction.busy}
             onClick={async () => {
               const ok = await stepUpAction.run(() => api.disableTotp());
@@ -220,6 +230,7 @@ function TwoFactorCard({
         ) : (
           <Button
             variant="secondary"
+            size="sm"
             disabled={stepUpAction.busy}
             onClick={async () => {
               setError(null);
@@ -257,7 +268,7 @@ function TwoFactorCard({
             <p className="text-sm text-ink-muted">
               Add this secret to your authenticator app, then enter the code it shows.
             </p>
-            <code className="block break-all rounded bg-surface-elevated p-3 font-mono text-xs">
+            <code className="block break-all rounded-md border border-line bg-background-subtle p-3 font-mono text-xs">
               {enrollment.secret}
             </code>
 
@@ -309,7 +320,7 @@ function TwoFactorCard({
         </p>
         <ul className="mt-4 grid grid-cols-2 gap-2 font-mono text-xs">
           {recoveryCodes?.map((rc) => (
-            <li key={rc} className="rounded bg-surface-elevated px-2 py-1.5">
+            <li key={rc} className="rounded-md border border-line bg-background-subtle px-2 py-1.5">
               {rc}
             </li>
           ))}

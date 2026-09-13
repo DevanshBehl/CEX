@@ -31,7 +31,7 @@ function ExplorerAddressLink({ address }: { address: string }) {
       target="_blank"
       rel="noopener noreferrer"
       data-testid="breakdown-explorer-link"
-      className="font-mono text-2xs text-accent transition-colors duration-micro ease-atlas hover:text-accent-strong"
+      className="font-mono text-2xs text-accent transition-colors duration-micro ease-atlas hover:underline"
     >
       {shortenAsset(address)} ↗
     </a>
@@ -51,10 +51,10 @@ export function AssetBreakdown({
   const labelOf = useAssetLabel();
 
   return (
-    <section className="atlas-raised rounded-xl p-5 lg:p-6" data-testid="asset-breakdown">
-      <header className="flex flex-wrap items-baseline justify-between gap-2">
+    <section className="atlas-raised overflow-hidden rounded-lg" data-testid="asset-breakdown">
+      <header className="flex flex-wrap items-baseline justify-between gap-2 border-b border-line px-4 py-3">
         <div>
-          <h2 className="text-sm font-medium text-ink">Holdings</h2>
+          <h2 className="text-sm font-semibold text-ink">Holdings</h2>
           <p className="mt-0.5 text-xs text-ink-muted">
             Held at your own address on this network, not in a pool.
           </p>
@@ -63,22 +63,19 @@ export function AssetBreakdown({
       </header>
 
       {loading && allocations.length === 0 ? (
-        <p className="mt-6 text-sm text-ink-muted">Loading…</p>
+        <p className="px-4 py-6 text-sm text-ink-muted">Loading…</p>
       ) : allocations.length === 0 ? (
-        <p className="mt-6 text-sm text-ink-muted">Nothing held on this network yet.</p>
+        <p className="px-4 py-6 text-sm text-ink-muted">Nothing held on this network yet.</p>
       ) : (
-        <div className="mt-4 overflow-x-auto">
+        <div className="overflow-x-auto">
           <table className="w-full min-w-[34rem] border-collapse text-sm">
             <thead>
-              <tr className="border-b border-line text-left">
+              <tr className="border-b border-line bg-background-subtle text-left">
                 {['Asset', 'Balance', 'Value', '24h', 'Share'].map((heading, index) => (
                   <th
                     key={heading}
                     scope="col"
-                    className={[
-                      'pb-2 text-2xs font-medium uppercase tracking-wider text-ink-disabled',
-                      index === 0 ? '' : 'text-right',
-                    ].join(' ')}
+                    className={['atlas-th px-4 py-2', index === 0 ? '' : 'text-right'].join(' ')}
                   >
                     {heading}
                   </th>
@@ -90,10 +87,10 @@ export function AssetBreakdown({
                 <tr
                   key={allocation.asset}
                   data-testid="breakdown-row"
-                  className="border-b border-line/60 last:border-0"
+                  className="border-b border-line/60 transition-colors duration-micro last:border-0 hover:bg-background-subtle"
                 >
-                  <td className="py-3">
-                    <span className="font-medium text-ink" data-testid="breakdown-symbol">
+                  <td className="px-4 py-3">
+                    <span className="font-semibold text-ink" data-testid="breakdown-symbol">
                       {labelOf(allocation.asset, allocation.symbol)}
                     </span>
                     {/*
@@ -108,11 +105,11 @@ export function AssetBreakdown({
                     )}
                   </td>
 
-                  <td className="py-3 text-right font-mono tabular-nums text-ink-secondary">
+                  <td className="px-4 py-3 text-right font-mono tabular-nums text-ink-secondary">
                     {formatAmount(allocation.amount, allocation.decimals)}
                   </td>
 
-                  <td className="py-3 text-right font-mono tabular-nums text-ink">
+                  <td className="px-4 py-3 text-right font-mono font-semibold tabular-nums text-ink">
                     {allocation.valueUsd === null ? (
                       // NOT "$0.00". A holding nothing can price is not worth
                       // nothing, and saying so would understate what someone
@@ -123,7 +120,7 @@ export function AssetBreakdown({
                     )}
                   </td>
 
-                  <td className="py-3 text-right font-mono tabular-nums">
+                  <td className="px-4 py-3 text-right font-mono tabular-nums">
                     {allocation.changeUsd === null ? (
                       <span className="text-ink-disabled">—</span>
                     ) : (
@@ -137,7 +134,7 @@ export function AssetBreakdown({
                     )}
                   </td>
 
-                  <td className="py-3 text-right font-mono tabular-nums text-ink-muted">
+                  <td className="px-4 py-3 text-right font-mono tabular-nums text-ink-muted">
                     {allocation.valueUsd === null
                       ? '—'
                       : formatBps(allocation.shareBps).replace('+', '')}

@@ -29,7 +29,7 @@ export default function LoginPage() {
           No account yet?{' '}
           <Link
             href="/register"
-            className="text-accent transition-colors duration-micro ease-atlas hover:text-accent-strong"
+            className="font-semibold text-accent transition-colors duration-micro ease-atlas hover:underline"
           >
             Create one
           </Link>

@@ -82,7 +82,7 @@ export default function DashboardPage() {
   const recent = (withdrawals.data ?? []).slice(0, 4);
 
   return (
-    <div className="animate-fade-up space-y-10">
+    <div className="animate-fade-up space-y-3">
       <PageHeader
         title="Dashboard"
         description="Your balances, and everything currently in flight."
@@ -97,7 +97,7 @@ export default function DashboardPage() {
         worse than no number at all. That rule has not changed: where a price
         is genuinely unknown this still says so rather than showing $0.00.
       */}
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Portfolio value"
           value={
@@ -157,33 +157,33 @@ export default function DashboardPage() {
       */}
       <AssetBreakdown allocations={summary.data?.allocations ?? []} loading={summary.loading} />
 
-      <div className="grid gap-10 xl:grid-cols-3 xl:gap-8">
-        <div className="space-y-10 xl:col-span-2">
+      <div className="grid items-start gap-3 xl:grid-cols-3">
+        <div className="space-y-3 xl:col-span-2">
           <Section
             title="Balances"
             description="Available to spend, excluding anything reserved."
+            flush
             action={
-              <Link
-                href="/activity"
-                className="text-xs text-ink-muted transition-colors duration-micro ease-atlas hover:text-accent"
-              >
+              <Link href="/activity" className="text-xs font-semibold text-accent hover:underline">
                 View activity →
               </Link>
             }
           >
             {balances.loading ? (
-              <div className="space-y-3">
-                <Skeleton className="h-14 w-full rounded-lg" />
-                <Skeleton className="h-14 w-full rounded-lg" />
+              <div className="space-y-2 p-4">
+                <Skeleton className="h-10 w-full rounded-md" />
+                <Skeleton className="h-10 w-full rounded-md" />
               </div>
             ) : balances.error !== null ? (
-              <ErrorNotice message={balances.error} />
+              <div className="p-4">
+                <ErrorNotice message={balances.error} />
+              </div>
             ) : assets.length > 0 ? (
-              <ul className="space-y-2">
+              <ul className="divide-y divide-line">
                 {assets.map((balance) => (
                   <li
                     key={balance.asset}
-                    className="atlas-raised atlas-raised-hover flex items-center gap-4 rounded-lg px-4 py-3.5"
+                    className="flex items-center gap-3 px-4 py-3 transition-colors duration-micro hover:bg-background-subtle"
                   >
                     <AssetMark symbol={labelOf(balance.asset, balance.symbol)} />
                     <div className="min-w-0 flex-1">
@@ -192,7 +192,7 @@ export default function DashboardPage() {
                         base58 address until the response carried a name for
                         it (Task 4).
                       */}
-                      <p className="text-sm font-medium text-ink">
+                      <p className="text-sm font-semibold text-ink">
                         {labelOf(balance.asset, balance.symbol)}
                       </p>
                       {!isZeroAmount(balance.locked) && (
@@ -202,7 +202,7 @@ export default function DashboardPage() {
                         </p>
                       )}
                     </div>
-                    <p className="shrink-0 font-mono text-lg tracking-[-0.01em] text-ink">
+                    <p className="shrink-0 font-mono text-sm font-semibold text-ink">
                       {formatAmount(balance.available, balance.decimals)}
                     </p>
                   </li>
@@ -216,33 +216,31 @@ export default function DashboardPage() {
             )}
           </Section>
 
-          <Section title="Move funds">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <ActionTile
-                href="/deposit"
-                title="Deposit"
-                description="Get your permanent address and send funds to it."
-                icon={DEPOSIT_ICON}
-                primary
-              />
-              <ActionTile
-                href="/withdraw"
-                title="Withdraw"
-                description="Send to an external address, after risk review."
-                icon={WITHDRAW_ICON}
-              />
-            </div>
-          </Section>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <ActionTile
+              href="/deposit"
+              title="Deposit"
+              description="Get your permanent address and send funds to it."
+              icon={DEPOSIT_ICON}
+              primary
+            />
+            <ActionTile
+              href="/withdraw"
+              title="Withdraw"
+              description="Send to an external address, after risk review."
+              icon={WITHDRAW_ICON}
+            />
+          </div>
         </div>
 
-        <div className="space-y-10">
+        <div className="space-y-3">
           <Section
             title="Recent withdrawals"
             action={
               recent.length > 0 ? (
                 <Link
                   href="/withdraw"
-                  className="text-xs text-ink-muted transition-colors duration-micro ease-atlas hover:text-accent"
+                  className="text-xs font-semibold text-accent hover:underline"
                 >
                   All →
                 </Link>

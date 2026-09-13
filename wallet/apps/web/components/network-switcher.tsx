@@ -48,8 +48,8 @@ export function NetworkPill({ cluster }: { cluster: Cluster }) {
       data-testid="network-pill"
       data-cluster={cluster}
       className={[
-        'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1',
-        'font-mono text-2xs font-medium uppercase tracking-wider',
+        'inline-flex items-center gap-1.5 rounded-md border px-2 py-1',
+        'text-[11.5px] font-semibold',
         tone.pill,
       ].join(' ')}
     >
@@ -99,7 +99,7 @@ export function NetworkSwitcher() {
         aria-expanded={open}
         aria-label={`Network: ${CLUSTER_DISPLAY[cluster].label}. Change network.`}
         data-testid="network-switcher"
-        className="rounded-full transition-opacity duration-micro ease-atlas hover:opacity-80"
+        className="rounded-md transition-opacity duration-micro ease-atlas hover:opacity-80"
       >
         <NetworkPill cluster={cluster} />
       </button>
@@ -108,7 +108,7 @@ export function NetworkSwitcher() {
         <div
           role="listbox"
           aria-label="Solana network"
-          className="atlas-raised absolute right-0 z-50 mt-2 w-52 overflow-hidden rounded-lg p-1"
+          className="atlas-raised absolute right-0 z-50 mt-2 w-52 overflow-hidden rounded-lg p-1 shadow-md"
         >
           {served.map((option) => {
             const display = CLUSTER_DISPLAY[option];
@@ -128,7 +128,9 @@ export function NetworkSwitcher() {
                 className={[
                   'flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm',
                   'transition-colors duration-micro ease-atlas',
-                  selected ? 'bg-surface text-ink' : 'text-ink-secondary hover:bg-surface/60',
+                  selected
+                    ? 'bg-surface-active font-semibold text-ink'
+                    : 'text-ink-secondary hover:bg-surface-hover',
                 ].join(' ')}
               >
                 <span
@@ -141,7 +143,7 @@ export function NetworkSwitcher() {
                   anyone who cannot distinguish these two, and this is the one
                   distinction in the product that must not be missed.
                 */}
-                <span className="font-mono text-2xs uppercase tracking-wider text-ink-disabled">
+                <span className="font-mono text-2xs text-ink-muted">
                   {display.intent === 'live' ? 'Live' : 'Test'}
                 </span>
               </button>

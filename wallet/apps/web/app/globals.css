@@ -6,89 +6,144 @@
  * Atlas design tokens (design.md §17).
  *
  * This wallet is one product in the Atlas ecosystem. The visual language is
- * defined here so a future Atlas surface — an exchange, a custody console —
+ * defined here so a future Atlas surface — the exchange, an operator console —
  * inherits it rather than reinventing it (§47).
  *
  * Every reusable value lives in this file. Components consume tokens; the
  * moment a component carries its own hex, the system has two sources of truth
  * and the second one drifts.
  *
- * DARK-ONLY. §3 calls for dark-mode-first, and this commits rather than
- * maintaining two palettes at half the quality each. `color-scheme` tells the
- * browser so native controls and scrollbars follow.
+ * # Two themes, one set of names
+ *
+ * The Atlas console is light by default — a custody workspace read for hours
+ * in an office — with a dark variant chosen from the top bar. Public surfaces
+ * (landing, sign-in, registration) are always dark: they are the product's
+ * front door, not a workspace. Both palettes redefine the SAME token names, so
+ * no component knows which theme it is in.
+ *
+ * # Why colours are channels
+ *
+ * Colour tokens are bare `R G B` channels, consumed as
+ * `rgb(var(--atlas-x) / <alpha-value>)` in `tailwind.config.ts`. A token
+ * written as a full colour cannot take an opacity modifier: Tailwind silently
+ * drops `border-danger/25` from the stylesheet rather than failing, which is
+ * how every translucent border in the app had quietly stopped rendering.
  */
 
-:root {
-  color-scheme: dark;
+:root,
+[data-theme='light'] {
+  color-scheme: light;
 
   /* --- Surfaces (§3) ------------------------------------------------------
-     A real ladder, not two shades. Depth in a dark interface comes from
-     stacking surfaces and letting borders catch light — not from shadows. */
-  --atlas-bg: #08080a;
-  --atlas-bg-subtle: #0a0a0d;
-  --atlas-surface: #101013;
-  --atlas-surface-raised: #141418;
-  --atlas-surface-hover: #18181d;
-  --atlas-surface-active: #1d1d23;
+     A light console gets its depth from a grey page under white panels with
+     hairline borders — not from shadows, which turn a dense grid to mud. */
+  --atlas-bg: 243 245 247;
+  --atlas-bg-subtle: 248 250 252;
+  --atlas-surface: 255 255 255;
+  --atlas-surface-raised: 255 255 255;
+  --atlas-surface-hover: 248 250 252;
+  --atlas-surface-active: 238 242 246;
 
   /* --- Borders (§12) ------------------------------------------------------ */
-  --atlas-border: rgb(255 255 255 / 0.07);
-  --atlas-border-strong: rgb(255 255 255 / 0.1);
-  --atlas-border-emphasis: rgb(255 255 255 / 0.16);
-
-  /**
-   * The top highlight.
-   *
-   * A 1px inset light line along the upper edge of a raised surface. This is
-   * the single detail that separates a premium dark interface from a flat one:
-   * it reads as a physical edge catching light, and without it cards look like
-   * holes cut in the page. Applied via `.atlas-raised`.
-   */
-  --atlas-highlight: inset 0 1px 0 0 rgb(255 255 255 / 0.06);
+  --atlas-border: 223 228 234;
+  --atlas-border-strong: 203 213 225;
+  --atlas-border-emphasis: 148 163 184;
 
   /* --- Text (§5) ---------------------------------------------------------- */
-  --atlas-text: #fafafa;
-  --atlas-text-secondary: #a1a1aa;
-  --atlas-text-muted: #6f6f78;
-  --atlas-text-disabled: #4a4a52;
+  --atlas-text: 15 23 42;
+  --atlas-text-secondary: 71 85 105;
+  --atlas-text-muted: 100 116 139;
+  --atlas-text-disabled: 148 163 184;
 
-  /* --- Accent (§6) — electric blue, used selectively. ---------------------- */
-  --atlas-accent: #7dd3fc;
-  --atlas-accent-strong: #38bdf8;
-  --atlas-accent-deep: #0284c7;
-  --atlas-accent-dim: rgb(56 189 248 / 0.1);
-  --atlas-accent-glow: rgb(56 189 248 / 0.25);
+  /* --- Accent (§6) — one blue, used selectively. --------------------------
+     `accent` is the accent as TEXT; `accent-strong` is the accent as a FILL.
+     On white they are the same deep blue; on dark they part company, because
+     a fill-strength blue is too dim to read as text on a dark panel. */
+  --atlas-accent: 29 78 216;
+  --atlas-accent-strong: 29 78 216;
+  --atlas-accent-deep: 30 64 175;
+  --atlas-accent-dim: 239 246 255;
+  --atlas-accent-glow: 29 78 216;
+  --atlas-on-accent: 255 255 255;
 
-  /* --- Semantic (§7) — meaning, never decoration. -------------------------- */
-  --atlas-success: #34d399;
-  --atlas-success-dim: rgb(52 211 153 / 0.1);
-  --atlas-warning: #fbbf24;
-  --atlas-warning-dim: rgb(251 191 36 / 0.1);
-  --atlas-danger: #fb7185;
-  --atlas-danger-dim: rgb(251 113 133 / 0.1);
+  /* --- Semantic (§7) — meaning, never decoration. -------------------------
+     The light values are the darker steps: #16A34A green on white is legible,
+     the #34D399 used on dark is not. */
+  --atlas-success: 22 163 74;
+  --atlas-success-dim: 236 253 243;
+  --atlas-warning: 180 83 9;
+  --atlas-warning-dim: 255 247 237;
+  --atlas-danger: 220 38 38;
+  --atlas-danger-dim: 254 242 242;
 
-  /* --- Radius (§14) ------------------------------------------------------- */
-  --atlas-radius-sm: 6px;
-  --atlas-radius-md: 10px;
-  --atlas-radius-lg: 14px;
-  --atlas-radius-xl: 18px;
+  /* --- Shadows (§13) — for things that float. ----------------------------- */
+  --atlas-shadow-sm: 0 1px 2px rgb(15 23 42 / 0.08);
+  --atlas-shadow-md: 0 6px 20px -6px rgb(15 23 42 / 0.12);
+  --atlas-shadow-lg: 0 24px 60px rgb(15 23 42 / 0.3);
+  --atlas-scrim: 15 23 42;
+  --atlas-scrim-opacity: 0.5;
 
-  /* --- Shadows (§13) — for things that float, and for lift on hover. ------ */
-  --atlas-shadow-sm: 0 1px 2px rgb(0 0 0 / 0.5);
-  --atlas-shadow-md: 0 4px 16px -4px rgb(0 0 0 / 0.5);
-  --atlas-shadow-lg: 0 24px 64px -16px rgb(0 0 0 / 0.8);
+  --atlas-scrollbar: 203 210 218;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --atlas-bg: 11 15 20;
+  --atlas-bg-subtle: 15 20 27;
+  --atlas-surface: 17 22 29;
+  --atlas-surface-raised: 17 22 29;
+  --atlas-surface-hover: 22 29 39;
+  --atlas-surface-active: 26 34 48;
+
+  --atlas-border: 30 39 51;
+  --atlas-border-strong: 42 52 65;
+  --atlas-border-emphasis: 100 116 139;
+
+  --atlas-text: 230 234 240;
+  --atlas-text-secondary: 182 192 204;
+  --atlas-text-muted: 139 150 165;
+  --atlas-text-disabled: 107 119 135;
+
+  --atlas-accent: 147 197 253;
+  --atlas-accent-strong: 59 130 246;
+  --atlas-accent-deep: 37 99 235;
+  --atlas-accent-dim: 23 37 84;
+  --atlas-accent-glow: 59 130 246;
+  --atlas-on-accent: 255 255 255;
+
+  --atlas-success: 52 211 153;
+  --atlas-success-dim: 16 44 38;
+  --atlas-warning: 251 191 36;
+  --atlas-warning-dim: 46 36 16;
+  --atlas-danger: 248 113 113;
+  --atlas-danger-dim: 48 24 29;
+
+  --atlas-shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --atlas-shadow-md: 0 8px 24px -8px rgb(0 0 0 / 0.5);
+  --atlas-shadow-lg: 0 30px 80px rgb(0 0 0 / 0.5);
+  --atlas-scrim: 5 8 16;
+  --atlas-scrim-opacity: 0.7;
+
+  --atlas-scrollbar: 42 52 65;
+}
+
+:root {
+  /* --- Radius (§14) — tight. A console of 8px panels reads as a tool; 14px
+     reads as a consumer app. ----------------------------------------------- */
+  --atlas-radius-sm: 4px;
+  --atlas-radius-md: 6px;
+  --atlas-radius-lg: 8px;
+  --atlas-radius-xl: 10px;
 
   /* --- Motion (§25) — one curve everywhere. ------------------------------- */
-  --atlas-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --atlas-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --atlas-duration-micro: 120ms;
   --atlas-duration-base: 200ms;
   --atlas-duration-slow: 360ms;
 
-  /* --- Grid (§9) ---------------------------------------------------------- */
-  --atlas-grid-size: 56px;
-  --atlas-grid-line: rgb(255 255 255 / 0.02);
-
-  --atlas-sidebar-width: 232px;
+  --atlas-sidebar-width: 220px;
+  --atlas-topbar-height: 52px;
 }
 
 @layer base {
@@ -97,9 +152,8 @@
   }
 
   body {
-    background: var(--atlas-bg);
-    color: var(--atlas-text);
-    font-feature-settings: 'cv11', 'ss01';
+    background: rgb(var(--atlas-bg));
+    color: rgb(var(--atlas-text));
     -webkit-font-smoothing: antialiased;
   }
 
@@ -118,109 +172,78 @@
   /* `:focus-visible`, not `:focus` — a mouse click leaves no ring, a keyboard
      user always knows exactly where they are (§26). */
   :focus-visible {
-    outline: 2px solid var(--atlas-accent-strong);
+    outline: 2px solid rgb(var(--atlas-accent-strong));
     outline-offset: 2px;
     border-radius: var(--atlas-radius-sm);
   }
 
   ::selection {
-    background: var(--atlas-accent-glow);
-    color: #fff;
+    background: rgb(var(--atlas-accent-glow) / 0.25);
   }
 
   ::-webkit-scrollbar {
-    width: 11px;
-    height: 11px;
+    width: 8px;
+    height: 8px;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: rgb(255 255 255 / 0.12);
-    border: 3px solid transparent;
-    background-clip: content-box;
-    border-radius: 999px;
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background: rgb(255 255 255 / 0.22);
-    background-clip: content-box;
+    background: rgb(var(--atlas-scrollbar));
+    border-radius: 6px;
   }
 }
 
 @layer components {
   /**
-   * A raised surface: gradient, border, and the top highlight.
+   * A panel: a flat surface with a hairline border.
    *
-   * The gradient is barely perceptible by design — 4% of lightness across the
-   * card. You do not see it; you see that the top of the card is nearer to you
-   * than the bottom, which is the whole trick.
+   * Flat on purpose. The console is dense — tables, figures, forms side by
+   * side — and gradients or inset highlights on every panel add noise that
+   * competes with the numbers.
    */
   .atlas-raised {
-    background: linear-gradient(180deg, var(--atlas-surface-raised) 0%, var(--atlas-surface) 100%);
-    border: 1px solid var(--atlas-border);
-    box-shadow: var(--atlas-highlight);
+    background: rgb(var(--atlas-surface-raised));
+    border: 1px solid rgb(var(--atlas-border));
   }
 
   .atlas-raised-hover {
-    transition:
-      border-color var(--atlas-duration-base) var(--atlas-ease),
-      box-shadow var(--atlas-duration-base) var(--atlas-ease),
-      transform var(--atlas-duration-base) var(--atlas-ease);
+    transition: border-color var(--atlas-duration-base) var(--atlas-ease);
   }
   .atlas-raised-hover:hover {
-    border-color: var(--atlas-border-strong);
-    box-shadow: var(--atlas-highlight), var(--atlas-shadow-md);
-    transform: translateY(-1px);
+    border-color: rgb(var(--atlas-border-emphasis));
   }
 
   /**
-   * The signature grid (§9), as a fixed layer behind everything.
-   *
-   * THE MASK IS THE WHOLE JOB. Unmasked, the tiling stops at a hard
-   * rectangular edge and reads as a rendering artefact rather than a design
-   * element. The fade is what makes it feel like light falling off.
-   */
-  .atlas-grid {
-    position: fixed;
-    inset: 0;
-    z-index: 0;
-    pointer-events: none;
-    background-image: linear-gradient(to right, var(--atlas-grid-line) 1px, transparent 1px),
-      linear-gradient(to bottom, var(--atlas-grid-line) 1px, transparent 1px);
-    background-size: var(--atlas-grid-size) var(--atlas-grid-size);
-    -webkit-mask-image: radial-gradient(ellipse 100% 70% at 50% 0%, #000 0%, transparent 75%);
-    mask-image: radial-gradient(ellipse 100% 70% at 50% 0%, #000 0%, transparent 75%);
-  }
-
-  /**
-   * A single wide, very low-opacity wash at the top of a view.
-   *
-   * §1 rules out "giant glowing blobs"; this is the restrained version, used
-   * once per view to keep the top of the page from reading as flat black.
+   * A single wide, low-opacity wash of the accent, used once per public view
+   * to keep a dark page from reading as flat black.
    */
   .atlas-glow {
     position: absolute;
     inset-inline: 0;
-    top: 0;
-    height: 480px;
+    top: -160px;
+    height: 520px;
     pointer-events: none;
     background: radial-gradient(
-      ellipse 55% 100% at 50% 0%,
-      rgb(56 189 248 / 0.07),
+      ellipse 50% 60% at 55% 30%,
+      rgb(var(--atlas-accent-glow) / 0.16),
       transparent 70%
     );
   }
 
-  /** A hairline that fades at both ends, so separation does not read as a cut. */
+  /** A plain hairline. */
   .atlas-rule {
     height: 1px;
-    background: linear-gradient(
-      to right,
-      transparent,
-      var(--atlas-border-strong) 12%,
-      var(--atlas-border-strong) 88%,
-      transparent
-    );
+    background: rgb(var(--atlas-border));
+  }
+
+  /** Column headers of a data table: small caps-style labels on a tinted band. */
+  .atlas-th {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: rgb(var(--atlas-text-muted));
   }
 }
 

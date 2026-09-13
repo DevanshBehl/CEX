@@ -21,15 +21,15 @@ import { useState } from 'react';
  */
 export function AssetMark({ symbol, size = 'md' }: { symbol: string; size?: 'sm' | 'md' | 'lg' }) {
   const sizes = {
-    sm: 'h-7 w-7 text-[10px]',
-    md: 'h-9 w-9 text-xs',
-    lg: 'h-11 w-11 text-sm',
+    sm: 'h-6 w-6 text-[9px]',
+    md: 'h-7 w-7 text-[10px]',
+    lg: 'h-9 w-9 text-xs',
   } as const;
 
   return (
     <span
       aria-hidden="true"
-      className={`${sizes[size]} atlas-raised inline-flex shrink-0 items-center justify-center rounded-full font-semibold uppercase tracking-wider text-ink-secondary`}
+      className={`${sizes[size]} inline-flex shrink-0 items-center justify-center rounded-full bg-accent-dim font-bold uppercase text-accent`}
     >
       {symbol.slice(0, 3)}
     </span>
@@ -44,7 +44,7 @@ export function AssetMark({ symbol, size = 'md' }: { symbol: string; size?: 'sm'
  */
 export function NetworkBadge({ network }: { network: string }) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-md border border-line-strong bg-surface px-2 py-1 text-2xs font-medium uppercase tracking-wider text-ink-secondary">
+    <span className="inline-flex items-center gap-1.5 rounded-sm bg-accent-dim px-[7px] py-0.5 text-[10.5px] font-semibold text-accent">
       <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-accent-strong" />
       {network}
     </span>
@@ -71,10 +71,10 @@ export function AddressDisplay({
   const [copied, setCopied] = useState(false);
 
   return (
-    <div className="atlas-raised overflow-hidden rounded-lg">
+    <div className="overflow-hidden rounded-md border border-line bg-background-subtle">
       {label !== undefined && (
         <div className="border-b border-line px-4 py-2.5">
-          <p className="text-2xs font-medium uppercase tracking-wider text-ink-muted">{label}</p>
+          <p className="text-xs font-semibold text-ink-secondary">{label}</p>
         </div>
       )}
       <div className="flex items-center gap-3 p-4">
@@ -92,7 +92,7 @@ export function AddressDisplay({
             setTimeout(() => setCopied(false), 1800);
           }}
           aria-label="Copy address"
-          className="shrink-0 rounded-md border border-line-strong bg-surface px-2.5 py-2 text-ink-muted transition-all duration-micro ease-atlas hover:border-line-emphasis hover:text-ink active:translate-y-px"
+          className="shrink-0 rounded-md border border-line-strong bg-surface px-2.5 py-2 text-ink-muted transition-colors duration-micro ease-atlas hover:border-line-emphasis hover:text-ink"
         >
           {copied ? (
             <svg
@@ -151,7 +151,7 @@ export function ProgressRail({
           <li key={step} className="flex flex-1 flex-col gap-1.5">
             <span
               className={[
-                'h-0.5 w-full rounded-full transition-colors duration-slow ease-atlas',
+                'h-[3px] w-full rounded-full transition-colors duration-slow ease-atlas',
                 failed && active
                   ? 'bg-danger'
                   : done
@@ -162,7 +162,7 @@ export function ProgressRail({
               ].join(' ')}
             />
             <span
-              className={`text-2xs uppercase tracking-wider ${
+              className={`text-[11px] font-medium ${
                 done || active ? 'text-ink-secondary' : 'text-ink-disabled'
               }`}
             >

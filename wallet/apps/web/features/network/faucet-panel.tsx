@@ -43,9 +43,9 @@ export function FaucetPanel({ address }: { address: string }) {
   return (
     <div
       data-testid="faucet-panel"
-      className="rounded-lg border border-warning/25 bg-warning-dim p-4"
+      className="rounded-lg border border-warning/30 bg-warning-dim p-4"
     >
-      <p className="flex items-center gap-2 text-2xs font-medium uppercase tracking-wider text-warning">
+      <p className="flex items-center gap-2 text-xs font-semibold text-warning">
         <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-warning" />
         {display.label} — test funds only
       </p>
@@ -64,7 +64,7 @@ export function FaucetPanel({ address }: { address: string }) {
           type="button"
           onClick={() => void copy()}
           data-testid="faucet-copy-address"
-          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-warning/30 bg-background/40 px-3 text-xs font-medium text-warning transition-colors duration-micro ease-atlas hover:bg-background/70"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-warning/40 bg-surface px-3 text-xs font-semibold text-warning transition-colors duration-micro ease-atlas hover:border-warning"
         >
           {copied ? 'Address copied' : 'Copy my address'}
         </button>
@@ -77,7 +77,7 @@ export function FaucetPanel({ address }: { address: string }) {
             // knowing which custodian sent the user.
             rel="noopener noreferrer"
             data-testid="faucet-link"
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line-strong bg-surface px-3 text-xs font-medium text-ink-secondary transition-colors duration-micro ease-atlas hover:border-line-emphasis hover:text-ink"
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line-strong bg-surface px-3 text-xs font-semibold text-ink-secondary transition-colors duration-micro ease-atlas hover:border-line-emphasis hover:text-ink"
           >
             {faucet.label}
             <svg
@@ -92,7 +92,7 @@ export function FaucetPanel({ address }: { address: string }) {
             </svg>
           </a>
         ) : (
-          <code className="rounded-md border border-line bg-background px-2.5 py-1.5 font-mono text-2xs text-ink-secondary">
+          <code className="rounded-md border border-line bg-surface px-2.5 py-1.5 font-mono text-2xs text-ink-secondary">
             solana airdrop 2 {address.slice(0, 6)}… --url localhost
           </code>
         )}

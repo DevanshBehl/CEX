@@ -8,7 +8,7 @@
 export default function GlobalError({ reset }: { error: Error; reset: () => void }) {
   return (
     <div className="mx-auto max-w-md py-24 text-center">
-      <p className="font-mono text-2xs uppercase tracking-[0.2em] text-danger">Error</p>
+      <p className="font-mono text-xs text-danger">Error</p>
       <h1 className="mt-4 text-xl font-semibold tracking-[-0.01em] text-ink">
         Something went wrong
       </h1>
