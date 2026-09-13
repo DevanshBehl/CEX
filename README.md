@@ -14,9 +14,7 @@ The first product is complete and verified end to end on Solana devnet:
 
 > [!WARNING]
 > Educational project. **Not audited. Not production custody. Never use it with
-> real funds.** The [threat model](wallet/docs/security/threat-model.md) lists
-> exactly what is and is not defended.
-
+> real funds.** 
 | Product                          | Status                                           | Where                            |
 | -------------------------------- | ------------------------------------------------ | -------------------------------- |
 | Custodial wallet (Atlas Wallet)  | **Implemented** — localnet + devnet verified     | [`wallet/`](wallet)              |
