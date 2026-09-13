@@ -1,0 +1,15 @@
+%%{init: {"theme": "dark", "themeVariables": {"fontSize": "26px", "fontFamily": "Helvetica, Arial, sans-serif"}, "sequence": {"actorFontSize": 26, "messageFontSize": 24, "noteFontSize": 22, "boxMargin": 14, "actorMargin": 120, "width": 260}}}%%
+sequenceDiagram
+    participant C as Coordinator
+    participant P as 5 Participants
+
+    C->>P: Round 1 · start
+    P-->>C: commitments + proof of knowledge
+    C->>P: Round 2 · share exchange
+    P-->>C: shares, end-to-end encrypted
+    Note over C: sees only ciphertext
+    C->>P: Round 3 · verify
+    P-->>C: all 5 agree on group key
+    C->>P: Commit
+    Note over P: each keeps its own share
+    Note over C,P: address = group public key

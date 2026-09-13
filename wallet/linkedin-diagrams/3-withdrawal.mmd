@@ -1,0 +1,17 @@
+%%{init: {"theme": "dark", "themeVariables": {"fontSize": "28px", "fontFamily": "Helvetica, Arial, sans-serif"}, "flowchart": {"nodeSpacing": 50, "rankSpacing": 60, "padding": 22}}}%%
+flowchart TB
+    a["📝 Request<br/>passkey step-up"]
+    b{"🛡️ Risk engine"}
+    c["👮 Manual review<br/>operator approves"]
+    d["🔒 Funds locked"]
+    e["🔐 3-of-5 signing<br/>house pays fee · user key signs"]
+    f["📡 Broadcast<br/>durable nonce"]
+    g["✅ Settled<br/>ledger posted"]
+    x["❌ Rejected"]
+
+    a --> b
+    b -->|"new address"| c
+    b -->|"within policy"| d
+    b -->|"over limit"| x
+    c --> d
+    d --> e --> f --> g
