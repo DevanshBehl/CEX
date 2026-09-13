@@ -25,3 +25,7 @@ scripts/.mpc-cluster.env
 # LinkedIn post material (local only)
 linkedin.md
 linkedin-diagrams/
+
+# Build prompts (local only)
+master-prompt.md
+prompt_phase*.md
