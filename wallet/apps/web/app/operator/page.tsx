@@ -19,22 +19,39 @@ export default function OperatorPage() {
   const [items, setItems] = useState<ReviewItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
+  const [needsStepUp, setNeedsStepUp] = useState(false);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const stepUp = useStepUpAction();
 
+  const load = useCallback(async () => {
+    const { items: queue } = await api.reviewQueue();
+    setItems(queue);
+    setError(null);
+    setNeedsStepUp(false);
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
-      const { items: queue } = await api.reviewQueue();
-      setItems(queue);
-      setError(null);
+      await load();
     } catch (e) {
+      /*
+       * STEP_UP_REQUIRED is a 403 too, and it is NOT "you are not an operator".
+       * Treating it as forbidden rendered "Not found." to a genuine approver
+       * whose passkey assertion had simply aged out. The queue is shown behind
+       * an explicit confirm button rather than an automatic prompt: browsers
+       * may refuse a WebAuthn ceremony that no user gesture started.
+       */
+      if (e instanceof ApiError && e.needsStepUp) {
+        setNeedsStepUp(true);
+        return;
+      }
       if (e instanceof ApiError && (e.status === 403 || e.status === 404)) {
         setForbidden(true);
         return;
       }
       setError(e instanceof Error ? e.message : 'Could not load the review queue.');
     }
-  }, []);
+  }, [load]);
 
   useEffect(() => {
     void refresh();
@@ -74,7 +91,18 @@ export default function OperatorPage() {
         <ErrorNotice message={stepUp.error.message} correlationId={stepUp.error.correlationId} />
       )}
 
-      {items === null ? (
+      {needsStepUp ? (
+        <Card>
+          <p className="text-sm text-ink-muted">
+            The review queue needs a fresh passkey confirmation.
+          </p>
+          <div className="mt-4">
+            <Button disabled={stepUp.busy} onClick={() => void stepUp.run(load)}>
+              Confirm with passkey
+            </Button>
+          </div>
+        </Card>
+      ) : items === null ? (
         <Spinner label="Loading the queue…" />
       ) : items.length === 0 ? (
         <EmptyState title="Nothing to review" body="Referred withdrawals appear here." />
