@@ -194,6 +194,7 @@ export function createMockSigner(options: MockSignerOptions = {}): MockSigner {
         // first provisioning from a repeat. A test that needs that distinction
         // needs the real coordinator.
         existing: false,
+        generation: 'mock',
       };
     },
 

@@ -67,11 +67,22 @@ export function createCustodyService(deps: CustodyServiceDeps): CustodyService {
   /**
    * Ask the coordinator for this user's own 3-of-5 group.
    *
-   * The call is idempotent on `keyRef`, which is what makes it safe inside a
-   * transaction that may be retried: a second attempt returns the address the
-   * first one created rather than minting a second key and stranding the
-   * first. That property lives in the service, not here — a client-side guard
-   * would not survive a crash between the call and the commit.
+   * The coordinator runs distributed key generation (ADR-0023): the five
+   * participants each contribute a secret nobody else sees, and what comes
+   * back is public — the group key, which is the address, and the
+   * participants' verification shares. No process ever held the private key.
+   *
+   * Only a FINALIZED result reaches this function: the client throws on
+   * anything less, so the transaction below that writes the address row never
+   * runs for a ceremony that did not complete on every participant.
+   *
+   * The call is idempotent on `keyRef` — the coordinator serialises ceremonies
+   * per key reference and returns an existing key without running a round —
+   * which is what makes it safe inside a request that may be retried: a second
+   * attempt returns the address the first one created rather than minting a
+   * second key and stranding the first. That property lives in the service,
+   * not here — a client-side guard would not survive a crash between the call
+   * and the commit.
    */
   async function provisionSegregatedAddress(
     keys: KeyProvisioner,
@@ -111,7 +122,8 @@ export function createCustodyService(deps: CustodyServiceDeps): CustodyService {
       /*
        * Provisioned OUTSIDE the transaction, deliberately.
        *
-       * It is five network calls that can take seconds, and the index claim
+       * It is a multi-round ceremony across five participants that can take
+       * seconds, and the index claim
        * below takes an advisory lock — holding that lock across a threshold
        * ceremony would serialise every signup in the system behind the slowest
        * participant.

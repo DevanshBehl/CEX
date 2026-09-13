@@ -49,53 +49,10 @@ use crate::store::Store;
 pub const MIN_SIGNERS: u16 = 3;
 pub const MAX_SIGNERS: u16 = 5;
 
-// ---------------------------------------------------------------------------
-// Key generation
-// ---------------------------------------------------------------------------
-
-/// One participant's share, plus the group key it belongs to.
-pub struct GeneratedShare {
-    pub identifier: Identifier,
-    pub secret_share: SecretShare,
-    pub public_package: PublicKeyPackage,
-}
-
-/// Generate the whole share set with a trusted dealer.
-///
-/// # Why a dealer is available at all, and when it must not be used
-///
-/// A trusted dealer briefly knows the whole key. That is acceptable for tests
-/// and for a development environment, and is **not** acceptable for a real
-/// ceremony — master-prompt rule 99 forbids reconstructing a complete private
-/// key, and a dealer is that by construction.
-///
-/// `dkg` below is the real path: each participant generates its own secret and
-/// no machine ever holds the group key. This function exists so the threshold
-/// mechanics can be tested without standing up five hosts, and the runbook
-/// says plainly which one a ceremony uses.
-pub fn generate_with_dealer(
-    min_signers: u16,
-    max_signers: u16,
-) -> Result<(Vec<GeneratedShare>, PublicKeyPackage)> {
-    let (shares, public_package) = frost::keys::generate_with_dealer(
-        max_signers,
-        min_signers,
-        frost::keys::IdentifierList::Default,
-        OsRng,
-    )
-    .map_err(|_| MpcError::Internal("frost_dealer_failed"))?;
-
-    let generated = shares
-        .into_iter()
-        .map(|(identifier, secret_share)| GeneratedShare {
-            identifier,
-            secret_share,
-            public_package: public_package.clone(),
-        })
-        .collect();
-
-    Ok((generated, public_package))
-}
+// Key generation lives in `dkg.rs` (ADR-0023). There is deliberately no dealer
+// here any more: a function that generates every share in one process is a
+// function that holds the whole key, and ADR-0020's interim dealer was deleted
+// rather than disabled so it cannot be called by mistake.
 
 // ---------------------------------------------------------------------------
 // Participant
@@ -142,29 +99,6 @@ impl Participant {
             key_package,
             public_package,
         }))
-    }
-
-    /// Seal a freshly generated share to this participant's store.
-    pub fn install(store: &Store, kek: &Kek, key_ref: &str, share: &GeneratedShare) -> Result<()> {
-        // The share is verified BEFORE it is stored. A dealer — or a DKG peer —
-        // that sent an inconsistent share should be caught at the ceremony,
-        // not at the first withdrawal.
-        let key_package = KeyPackage::try_from(share.secret_share.clone())
-            .map_err(|_| MpcError::Internal("share_failed_verification"))?;
-
-        let package_bytes =
-            postcard::to_allocvec(&key_package).map_err(|_| MpcError::Internal("encode_failed"))?;
-        let group_bytes = postcard::to_allocvec(&share.public_package)
-            .map_err(|_| MpcError::Internal("encode_failed"))?;
-
-        store.store_share(
-            key_ref,
-            &share.identifier.serialize(),
-            &group_bytes,
-            &kek.seal(&package_bytes)?,
-            MIN_SIGNERS,
-            MAX_SIGNERS,
-        )
     }
 
     pub fn identifier(&self) -> Identifier {
@@ -321,21 +255,69 @@ mod tests {
 
     /// Five participants, each with its OWN store — the deployment shape
     /// ADR-0015 requires, modelled as faithfully as one process can.
+    ///
+    /// Shares come from the library's DKG rounds run locally. That is a
+    /// test-only shortcut (one process sees every round-2 share); the real
+    /// ceremony, with sealed transport, is `dkg.rs` and is tested there.
     fn participants() -> (Vec<Participant>, PublicKeyPackage) {
-        let (shares, public_package) = generate_with_dealer(MIN_SIGNERS, MAX_SIGNERS).unwrap();
+        use frost::keys::dkg;
 
-        let loaded = shares
+        let ids: Vec<Identifier> = (1..=MAX_SIGNERS)
+            .map(|i| Identifier::try_from(i).unwrap())
+            .collect();
+        let mut round1_secrets = BTreeMap::new();
+        let mut round1_packages = BTreeMap::new();
+        for id in &ids {
+            let (secret, package) = dkg::part1(*id, MAX_SIGNERS, MIN_SIGNERS, OsRng).unwrap();
+            round1_secrets.insert(*id, secret);
+            round1_packages.insert(*id, package);
+        }
+        let others = |me: &Identifier| -> BTreeMap<_, _> {
+            round1_packages
+                .iter()
+                .filter(|(id, _)| *id != me)
+                .map(|(id, p)| (*id, p.clone()))
+                .collect()
+        };
+
+        let mut round2_secrets = BTreeMap::new();
+        let mut inbox: BTreeMap<Identifier, BTreeMap<Identifier, _>> = BTreeMap::new();
+        for id in &ids {
+            let (secret, outgoing) =
+                dkg::part2(round1_secrets.remove(id).unwrap(), &others(id)).unwrap();
+            round2_secrets.insert(*id, secret);
+            for (recipient, package) in outgoing {
+                inbox.entry(recipient).or_default().insert(*id, package);
+            }
+        }
+
+        let mut public_package = None;
+        let loaded = ids
             .iter()
-            .map(|share| {
+            .map(|id| {
+                let (key_package, public) =
+                    dkg::part3(&round2_secrets[id], &others(id), &inbox[id]).unwrap();
                 let store = Arc::new(Store::in_memory().unwrap());
-                Participant::install(&store, &kek(), "treasury", share).unwrap();
+                store
+                    .store_share(
+                        "treasury",
+                        &id.serialize(),
+                        &postcard::to_allocvec(&public).unwrap(),
+                        &kek()
+                            .seal(&postcard::to_allocvec(&key_package).unwrap())
+                            .unwrap(),
+                        MIN_SIGNERS,
+                        MAX_SIGNERS,
+                    )
+                    .unwrap();
+                public_package = Some(public);
                 Participant::load(store, kek(), "treasury")
                     .unwrap()
                     .unwrap()
             })
             .collect();
 
-        (loaded, public_package)
+        (loaded, public_package.unwrap())
     }
 
     /// Run a full two-round signing with the given participants.
@@ -575,14 +557,6 @@ mod tests {
         for participant in &all {
             assert_eq!(participant.group_public_key().unwrap(), first);
         }
-    }
-
-    #[test]
-    fn a_share_is_verified_before_it_is_stored() {
-        // A dealer or DKG peer that sent an inconsistent share is caught at the
-        // ceremony rather than at the first withdrawal.
-        let (all, _public) = participants();
-        assert_eq!(all.len(), MAX_SIGNERS as usize);
     }
 
     #[test]

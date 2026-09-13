@@ -29,6 +29,10 @@ pub struct AppState {
     /// would answer every round with the house key's share regardless of who
     /// the round was for, and produce shares that aggregate to nothing.
     pub participant_kek: Option<crate::keystore::Kek>,
+    /// Present on a participant configured for DKG: its transport identity and
+    /// the pinned roster of peer keys (ADR-0023). Without it every DKG round is
+    /// refused rather than run over an unauthenticated channel.
+    pub dkg: Option<crate::dkg::DkgContext>,
     /// Present when this process is running as the coordinator.
     pub coordinator: Option<Arc<crate::threshold::Coordinator>>,
 }
@@ -43,9 +47,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         // cannot be talked into pretending it is a participant.
         .route("/v1/frost/commit", post(frost_commit))
         .route("/v1/frost/share", post(frost_share))
-        // Per-user key lifecycle (ADR-0020).
-        .route("/v1/frost/provision", post(frost_provision))
-        .route("/v1/frost/install", post(frost_install))
+        // Per-user key generation by DKG (ADR-0020, ADR-0023). `init` is the
+        // coordinator's; the four rounds are the participants'. There is no
+        // longer any endpoint that accepts a share in the clear.
+        .route("/v1/frost/dkg/init", post(dkg_init))
+        .route("/v1/frost/dkg/round1", post(dkg_round1))
+        .route("/v1/frost/dkg/round2", post(dkg_round2))
+        .route("/v1/frost/dkg/finalize", post(dkg_finalize))
+        .route("/v1/frost/dkg/commit", post(dkg_commit))
         .with_state(state)
 }
 
@@ -449,24 +458,24 @@ fn authenticate(
     )
 }
 
-/// Provision a per-user 3-of-5 key, and return the address it produces.
+/// Generate a per-user 3-of-5 key by DKG and return the address it produces.
 ///
 /// Coordinator only. The returned group public key IS the user's segregated
-/// Solana address (ADR-0020) — it is not derived from a seed at an index, and
-/// there is no seed.
-async fn frost_provision(
+/// Solana address (ADR-0020). Idempotent on `keyRef`: an existing key is
+/// returned without running any round.
+async fn dkg_init(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
-) -> Result<Json<crate::threshold::ProvisionResponse>> {
-    let request: crate::threshold::ProvisionRequest =
+) -> Result<Json<crate::threshold::DkgInitResponse>> {
+    let request: crate::threshold::DkgInitRequest =
         serde_json::from_str(&body).map_err(|_| MpcError::BadRequest("body_not_json"))?;
 
     authenticate(
         &state,
         &headers,
-        "/v1/frost/provision",
-        &request.key_ref,
+        "/v1/frost/dkg/init",
+        &request.idempotency_key,
         body.as_bytes(),
     )?;
 
@@ -475,63 +484,99 @@ async fn frost_provision(
     };
 
     Ok(Json(
-        coordinator.provision_user_key(&request.key_ref).await?,
+        coordinator
+            .run_dkg(&request.key_ref, &request.idempotency_key)
+            .await?,
     ))
 }
 
-/// Receive and seal one share during provisioning.
-///
-/// Participant only. Refuses to overwrite an existing share: a second install
-/// for a key_ref that already has one would silently orphan whatever the
-/// previous key controlled, and on Solana that means funds at an address
-/// nothing can sign for any more.
-async fn frost_install(
+/// Parse, authenticate as the coordinator, and hand the request to this
+/// participant's DKG state machine.
+fn dkg_participant<'a>(state: &'a AppState) -> Result<crate::dkg::DkgParticipant<'a>> {
+    let (Some(kek), Some(context)) = (state.participant_kek.as_ref(), state.dkg.as_ref()) else {
+        return Err(MpcError::BadRequest("not_a_dkg_participant"));
+    };
+    Ok(crate::dkg::DkgParticipant {
+        store: &state.store,
+        kek,
+        context,
+    })
+}
+
+fn dkg_request<T: serde::de::DeserializeOwned>(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &'static str,
+    body: &str,
+    session_id: impl Fn(&T) -> &str,
+) -> Result<T> {
+    let request: T =
+        serde_json::from_str(body).map_err(|_| MpcError::BadRequest("body_not_json"))?;
+    authenticate(state, headers, path, session_id(&request), body.as_bytes())?;
+    Ok(request)
+}
+
+/// Round 1: commit to a fresh polynomial and prove knowledge of its secret.
+async fn dkg_round1(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
-) -> Result<Json<crate::threshold::InstallShareResponse>> {
-    let request: crate::threshold::InstallShareRequest =
-        serde_json::from_str(&body).map_err(|_| MpcError::BadRequest("body_not_json"))?;
-
-    authenticate(
+) -> Result<Json<crate::dkg::DkgRound1Response>> {
+    let request: crate::dkg::DkgRound1Request = dkg_request(
         &state,
         &headers,
-        "/v1/frost/install",
-        &request.key_ref,
-        body.as_bytes(),
+        "/v1/frost/dkg/round1",
+        &body,
+        |r: &crate::dkg::DkgRound1Request| &r.session_id,
     )?;
+    Ok(Json(dkg_participant(&state)?.round1(&request)?))
+}
 
-    let Some(kek) = state.participant_kek.as_ref() else {
-        return Err(MpcError::BadRequest("not_a_participant"));
-    };
+/// Round 2: verify peers' proofs, return shares sealed to each peer.
+async fn dkg_round2(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<crate::dkg::DkgRound2Response>> {
+    let request: crate::dkg::DkgRound2Request = dkg_request(
+        &state,
+        &headers,
+        "/v1/frost/dkg/round2",
+        &body,
+        |r: &crate::dkg::DkgRound2Request| &r.session_id,
+    )?;
+    Ok(Json(dkg_participant(&state)?.round2(&request)?))
+}
 
-    if state.store.load_share(&request.key_ref)?.is_some() {
-        // Idempotent by refusal, not by overwrite. A retried provisioning is
-        // the coordinator's problem to resolve; silently replacing a share is
-        // how an address becomes unspendable.
-        return Err(MpcError::BadRequest("share_already_installed"));
-    }
+/// Round 3: open and verify received shares against commitments; seal the
+/// final share as pending. Aborts, wiping the session, on any bad share.
+async fn dkg_finalize(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<crate::dkg::DkgFinalizeResponse>> {
+    let request: crate::dkg::DkgFinalizeRequest = dkg_request(
+        &state,
+        &headers,
+        "/v1/frost/dkg/finalize",
+        &body,
+        |r: &crate::dkg::DkgFinalizeRequest| &r.session_id,
+    )?;
+    Ok(Json(dkg_participant(&state)?.finalize(&request)?))
+}
 
-    let share = crate::threshold::decode_secret_share(&request.share)?;
-    let public_package = crate::threshold::decode_public_package(&request.public_package)?;
-
-    let generated = crate::frost::GeneratedShare {
-        identifier: *share.identifier(),
-        secret_share: share,
-        public_package,
-    };
-
-    crate::frost::Participant::install(&state.store, kek, &request.key_ref, &generated)?;
-
-    let installed = crate::frost::Participant::load(
-        Arc::clone(&state.store),
-        kek.duplicate(),
-        &request.key_ref,
-    )?
-    .ok_or(MpcError::Internal("share_install_failed"))?;
-
-    Ok(Json(crate::threshold::InstallShareResponse {
-        identifier: crate::threshold::encode_identifier(&installed.identifier()),
-        group_public_key: hex::encode(installed.group_public_key()?),
-    }))
+/// Install the verified share once every participant agreed on the group.
+async fn dkg_commit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<crate::dkg::DkgCommitResponse>> {
+    let request: crate::dkg::DkgCommitRequest = dkg_request(
+        &state,
+        &headers,
+        "/v1/frost/dkg/commit",
+        &body,
+        |r: &crate::dkg::DkgCommitRequest| &r.session_id,
+    )?;
+    Ok(Json(dkg_participant(&state)?.commit(&request)?))
 }

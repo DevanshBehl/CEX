@@ -212,41 +212,37 @@ export function createRustSigner(options: RustSignerOptions): RustSigner {
     },
 
     /**
-     * Create this user's threshold key, or return the one that exists.
+     * Create this user's threshold key by DKG, or return the one that exists.
      *
-     * Answered by the COORDINATOR. A single-key service rejects it with
-     * `not_a_coordinator`, which is the correct answer rather than a failure
-     * to handle: a deployment without a coordinator has no per-user keys to
-     * hand out, and silently falling back to a derived address would be the
-     * thing ADR-0020 exists to prevent.
+     * Answered by the COORDINATOR, which runs the 3-round ceremony across the
+     * participants and returns only public material: the group key (the
+     * address) and each participant's verification share (ADR-0023). A
+     * single-key service rejects it with `not_a_coordinator`, which is the
+     * correct answer rather than a failure to handle: a deployment without a
+     * coordinator has no per-user keys to hand out, and silently falling back
+     * to a derived address would be the thing ADR-0020 exists to prevent.
      *
-     * Unlike `/v1/sign`, this endpoint authenticates over the request BYTES,
-     * so the body is serialized once and both signed and sent.
+     * The idempotency key is DERIVED from the key reference, so a retry after
+     * a crash — even from a different API instance — is the same logical
+     * request, and the coordinator returns the existing key without running
+     * a round. The coordinator also serialises ceremonies per key reference.
+     *
+     * The response is validated before it is returned. The caller writes the
+     * address to the database on the strength of it, so anything short of a
+     * complete, finalized DKG result is an error here rather than a row there.
      */
     async provisionKey(keyRef: KeyRef): Promise<ProvisionedKey> {
-      const body = JSON.stringify({ keyRef: keyRef.id });
+      const idempotencyKey = dkgIdempotencyKey(keyRef.id);
+      const body = JSON.stringify({ keyRef: keyRef.id, idempotencyKey });
       const headers = authHeaders(
         'POST',
-        '/v1/frost/provision',
-        keyRef.id,
+        '/v1/frost/dkg/init',
+        idempotencyKey,
         Buffer.from(body, 'utf8'),
       );
 
-      const response = await call<{
-        keyRef: string;
-        groupPublicKey: string;
-        threshold: number;
-        participants: number;
-        existing: boolean;
-      }>('POST', '/v1/frost/provision', headers, body);
-
-      return {
-        keyRef: response.keyRef,
-        address: response.groupPublicKey,
-        threshold: response.threshold,
-        participants: response.participants,
-        existing: response.existing,
-      };
+      const response = await call<unknown>('POST', '/v1/frost/dkg/init', headers, body);
+      return parseDkgInitResponse(keyRef.id, response);
     },
 
     async isHealthy(): Promise<boolean> {
@@ -279,6 +275,81 @@ export function createRustSigner(options: RustSignerOptions): RustSigner {
         return undefined;
       }
     },
+  };
+}
+
+/**
+ * The idempotency key for a key reference's ceremony.
+ *
+ * Deterministic, so every retry for one user is the same request, and hashed
+ * so an arbitrary-length key reference fits the service's 128-character limit.
+ */
+export function dkgIdempotencyKey(keyRef: string): string {
+  return `dkg:${createHash('sha256').update(keyRef, 'utf8').digest('hex')}`;
+}
+
+const HEX_32 = /^[0-9a-f]{64}$/;
+const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/**
+ * Validate a `/v1/frost/dkg/init` response, or throw.
+ *
+ * Exported for tests. Strict on purpose: an address is only ever recorded
+ * after every participant finalized, and this is the last place the API can
+ * refuse a result that does not say so.
+ */
+export function parseDkgInitResponse(keyRef: string, raw: unknown): ProvisionedKey {
+  const fail = (reason: string): never => {
+    throw new Error(`MPC service returned an incomplete DKG result: ${reason}`);
+  };
+  if (typeof raw !== 'object' || raw === null) return fail('not an object');
+  const r = raw as Record<string, unknown>;
+
+  if (r['generation'] !== 'dkg') fail('generation is not dkg');
+  if (r['keyRef'] !== keyRef) fail('keyRef mismatch');
+  if (typeof r['groupPublicKey'] !== 'string' || !BASE58_ADDRESS.test(r['groupPublicKey'])) {
+    fail('groupPublicKey is not an address');
+  }
+  const threshold = r['threshold'];
+  const participants = r['participants'];
+  if (
+    typeof threshold !== 'number' ||
+    typeof participants !== 'number' ||
+    !Number.isInteger(threshold) ||
+    !Number.isInteger(participants) ||
+    threshold < 2 ||
+    participants < threshold
+  ) {
+    fail('threshold parameters invalid');
+  }
+  if (typeof r['existing'] !== 'boolean') fail('existing missing');
+  if (typeof r['publicPackageHash'] !== 'string' || !HEX_32.test(r['publicPackageHash'])) {
+    fail('publicPackageHash invalid');
+  }
+
+  const shares = r['verifyingShares'];
+  if (typeof shares !== 'object' || shares === null) return fail('verifyingShares missing');
+  const entries = Object.entries(shares as Record<string, unknown>);
+  // One verification share per participant: a group missing one is a group
+  // that did not finish.
+  if (entries.length !== participants) fail('verifyingShares incomplete');
+  const verifyingShares: Record<string, string> = {};
+  for (const [identifier, share] of entries) {
+    if (!HEX_32.test(identifier) || typeof share !== 'string' || !HEX_32.test(share)) {
+      fail('verifyingShares malformed');
+    }
+    verifyingShares[identifier] = share as string;
+  }
+
+  return {
+    keyRef,
+    address: r['groupPublicKey'] as string,
+    threshold: threshold as number,
+    participants: participants as number,
+    existing: r['existing'] as boolean,
+    generation: 'dkg',
+    verifyingShares,
+    publicPackageHash: r['publicPackageHash'] as string,
   };
 }
 

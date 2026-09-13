@@ -209,26 +209,6 @@ impl Coordinator {
         }
     }
 
-    fn stored_group_key(&self, key_ref: &str) -> Result<Option<String>> {
-        let Some(bytes) = self.store.load_group_key(key_ref)? else {
-            return Ok(None);
-        };
-        let package: frost::keys::PublicKeyPackage = postcard::from_bytes(&bytes)
-            .map_err(|_| MpcError::Internal("public_package_corrupt"))?;
-        Ok(Some(bs58_encode(
-            &package
-                .verifying_key()
-                .serialize()
-                .map_err(|_| MpcError::Internal("group_key_unserializable"))?,
-        )))
-    }
-
-    fn remember_group_key(&self, key_ref: &str, encoded_package: &str) -> Result<()> {
-        let bytes =
-            hex::decode(encoded_package).map_err(|_| MpcError::Internal("package_not_hex"))?;
-        self.store.store_group_key(key_ref, &bytes)
-    }
-
     /// The group verifying key — the treasury's public key.
     pub fn group_public_key(&self) -> Result<Vec<u8>> {
         self.public_package
@@ -239,7 +219,7 @@ impl Coordinator {
             .map_err(|_| MpcError::Internal("group_key_unserializable"))
     }
 
-    /// Adopt a house group after provisioning it (see `provision_user_key`).
+    /// Adopt a house group after generating it (see `run_dkg`).
     ///
     /// Takes `&mut self` so it can only happen at startup, before the
     /// coordinator is shared: a house key that could change while rounds were
@@ -467,37 +447,21 @@ impl Coordinator {
 }
 
 // ---------------------------------------------------------------------------
-// Per-user key provisioning (ADR-0020)
+// Per-user key generation: distributed, no dealer (ADR-0020, ADR-0023)
 // ---------------------------------------------------------------------------
 
-/// Install one participant's share. Sent by the coordinator during provisioning.
 #[derive(Serialize, Deserialize)]
-pub struct InstallShareRequest {
-    #[serde(rename = "keyRef")]
-    pub key_ref: String,
-    /// Hex-encoded, serialized `SecretShare`.
-    pub share: String,
-    /// Hex-encoded, serialized `PublicKeyPackage`.
-    #[serde(rename = "publicPackage")]
-    pub public_package: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct InstallShareResponse {
-    pub identifier: String,
-    #[serde(rename = "groupPublicKey")]
-    pub group_public_key: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ProvisionRequest {
+pub struct DkgInitRequest {
     /// Opaque. The API uses `user:{userId}`; the service never parses it.
     #[serde(rename = "keyRef")]
     pub key_ref: String,
+    /// Scoped to one key_ref: reusing it for a different key is refused.
+    #[serde(rename = "idempotencyKey")]
+    pub idempotency_key: String,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct ProvisionResponse {
+pub struct DkgInitResponse {
     #[serde(rename = "keyRef")]
     pub key_ref: String,
     /// base58 — this IS the user's segregated Solana address.
@@ -505,19 +469,34 @@ pub struct ProvisionResponse {
     pub group_public_key: String,
     pub participants: u16,
     pub threshold: u16,
-    /// True when this key already existed and nothing was generated.
+    /// True when this key already existed and no rounds were run.
     pub existing: bool,
+    /// Identifier (hex) -> verification share `Y_i = s_i·G` (hex). Public.
+    #[serde(rename = "verifyingShares")]
+    pub verifying_shares: BTreeMap<String, String>,
+    /// Hex SHA-256 of the agreed public key package (see `dkg::public_package_hash`).
+    #[serde(rename = "publicPackageHash")]
+    pub public_package_hash: String,
+    /// Always `"dkg"`. Stated so a consumer can refuse anything else.
+    pub generation: String,
 }
 
-pub fn encode_secret_share(value: &frost::keys::SecretShare) -> Result<String> {
-    let bytes = postcard::to_allocvec(value)
-        .map_err(|_| MpcError::Internal("secret_share_encode_failed"))?;
-    Ok(hex::encode(bytes))
+/// Everything the coordinator received during one ceremony, verbatim.
+///
+/// Persisted for audit. It is ALL public or ciphertext by construction: the
+/// wire types it holds have no field that carries a share in the clear.
+#[derive(Default, Serialize)]
+struct CeremonyTranscript {
+    round1: BTreeMap<String, String>,
+    round2: Vec<crate::dkg::DkgRound2Response>,
+    finalize: Vec<crate::dkg::DkgFinalizeResponse>,
+    commit: Vec<crate::dkg::DkgCommitResponse>,
 }
 
-pub fn decode_secret_share(encoded: &str) -> Result<frost::keys::SecretShare> {
-    let bytes = hex::decode(encoded).map_err(|_| MpcError::BadRequest("share_not_hex"))?;
-    postcard::from_bytes(&bytes).map_err(|_| MpcError::BadRequest("share_invalid"))
+impl CeremonyTranscript {
+    fn to_json(&self) -> Result<String> {
+        serde_json::to_string(self).map_err(|_| MpcError::Internal("transcript_unencodable"))
+    }
 }
 
 pub fn encode_public_package(value: &frost::keys::PublicKeyPackage) -> Result<String> {
@@ -532,35 +511,46 @@ pub fn decode_public_package(encoded: &str) -> Result<frost::keys::PublicKeyPack
 }
 
 impl Coordinator {
-    /// Provision a fresh 3-of-5 key for one user (ADR-0020).
+    /// Generate a fresh 3-of-5 key for `key_ref` by distributed key generation.
     ///
-    /// # This uses a TRUSTED DEALER, and that is a real weakness
+    /// # What the coordinator does, and cannot do
     ///
-    /// The coordinator generates all five shares and distributes them, so for
-    /// the duration of this call **one process holds the whole key**. That
-    /// violates the property the rest of the threshold design exists to
-    /// provide, and master-prompt rule 99 forbids reconstructing a complete
-    /// key for convenience.
+    /// It moves messages. It sees round-1 commitments and proofs (public),
+    /// round-2 envelopes (ciphertext sealed peer-to-peer under keys it does not
+    /// hold) and verification shares (public). It never holds a polynomial, a
+    /// share or the group secret, so compromising it during a ceremony yields
+    /// nothing a passive observer of the wire would not already have.
     ///
-    /// It is accepted deliberately and temporarily: it makes the data model,
-    /// the storage, the signing pipeline and the address derivation identical
-    /// to what interactive DKG will need, so the ceremony can replace *how
-    /// shares come to exist* without touching anything else. The service logs
-    /// a warning on every provisioning so this cannot be forgotten.
+    /// It is still a liveness dependency, and it is TRUSTED FOR NOTHING ELSE:
+    /// it recomputes the group package from the public commitments and refuses
+    /// to commit unless all five participants independently derived exactly
+    /// that package. A participant that disagrees is not outvoted.
     ///
-    /// Once DKG lands, each participant generates its own secret and no machine
-    /// ever holds the group key — this function is then deleted, not disabled.
-    pub async fn provision_user_key(&self, key_ref: &str) -> Result<ProvisionResponse> {
+    /// # Idempotency
+    ///
+    /// A key_ref that already has a group returns it without running any
+    /// round. A ceremony that every participant verified but not every
+    /// participant committed is RESUMED rather than restarted — restarting
+    /// would be refused by the participants that already committed, leaving a
+    /// key nobody could complete.
+    pub async fn run_dkg(&self, key_ref: &str, idempotency_key: &str) -> Result<DkgInitResponse> {
         if key_ref.trim().is_empty() || key_ref.len() > 256 {
             return Err(MpcError::BadRequest("key_ref_invalid"));
         }
+        if idempotency_key.trim().is_empty() || idempotency_key.len() > 128 {
+            return Err(MpcError::BadRequest("idempotency_key_invalid"));
+        }
+        if self.participants.len() != MAX_SIGNERS as usize {
+            // DKG needs every member of the group: a share is dealt to each.
+            return Err(MpcError::Internal("roster_size_mismatch"));
+        }
 
         /*
-         * Serialised per key_ref, and the idempotency check is INSIDE the lock.
+         * Serialised per key_ref, and every check is INSIDE the lock.
          *
-         * Outside it, two concurrent requests both read "no key", both generate
-         * a share set, and both distribute — see the `provisioning` field. The
-         * second one through finds the first one's key and returns it.
+         * Outside it, two concurrent requests both read "no key" and both start
+         * a ceremony — see the `provisioning` field. The second one through
+         * finds the first one's key and returns it.
          */
         let gate = {
             let mut locks = self.provisioning.lock().await;
@@ -572,108 +562,356 @@ impl Coordinator {
         };
         let _provisioning = gate.lock().await;
 
-        // Idempotent: a retried signup must not mint a second key for a user
-        // whose address is already published and possibly already funded.
-        if let Some(existing) = self.stored_group_key(key_ref)? {
-            return Ok(ProvisionResponse {
-                key_ref: key_ref.to_owned(),
-                group_public_key: existing,
-                participants: MAX_SIGNERS,
-                threshold: MIN_SIGNERS,
-                existing: true,
-            });
+        if let Some(package) = self.stored_package(key_ref)? {
+            return self.init_response(key_ref, &package, true);
         }
 
-        tracing::warn!(
-            key_ref,
-            "provisioning a per-user key with a TRUSTED DEALER: this process briefly holds the \
-             whole key. Interim only — see ADR-0020."
-        );
-
-        let (shares, public_package) =
-            crate::frost::generate_with_dealer(MIN_SIGNERS, MAX_SIGNERS)?;
-
-        if shares.len() != self.participants.len() {
-            return Err(MpcError::Internal("roster_size_mismatch"));
+        if let Some(owner) = self.store.idempotency_key_owner(idempotency_key)? {
+            if owner != key_ref {
+                return Err(MpcError::BadRequest("idempotency_key_reused"));
+            }
         }
 
-        let encoded_package = encode_public_package(&public_package)?;
-
-        // Distributed before anything is stored locally. A share that cannot be
-        // delivered means the key does not exist anywhere as far as the rest of
-        // the system is concerned, which is the safe direction to fail: a user
-        // with no address, rather than an address nobody can sign for.
-        //
-        // Matched by IDENTIFIER, never by position. Round 2 selects signers by
-        // `participant.identifier` from the roster, so a share handed to the
-        // wrong host would produce shares that aggregate to nothing — an
-        // address that receives deposits and can never spend them. Zipping the
-        // two lists would have made that depend on the roster's order in an
-        // environment variable.
-        for participant in &self.participants {
-            let wanted = decode_identifier(&participant.identifier)?;
-            let Some(share) = shares.iter().find(|share| share.identifier == wanted) else {
-                return Err(MpcError::Internal("roster_identifier_not_in_share_set"));
-            };
-            self.install_share(participant, key_ref, share, &encoded_package)
+        if let Some((session_id, bytes)) = self.store.resumable_coordinator_dkg_session(key_ref)? {
+            let package: frost::keys::PublicKeyPackage = postcard::from_bytes(&bytes)
+                .map_err(|_| MpcError::Internal("public_package_corrupt"))?;
+            tracing::warn!(key_ref, session_id = %session_id, "resuming an incompletely committed DKG");
+            let mut transcript = CeremonyTranscript::default();
+            self.commit_all(&session_id, key_ref, &package, &mut transcript)
                 .await?;
+            return self.complete(&session_id, key_ref, &package, &transcript);
         }
 
-        let group_public_key = bs58_encode(
-            &public_package
-                .verifying_key()
-                .serialize()
-                .map_err(|_| MpcError::Internal("group_key_unserializable"))?,
-        );
+        let session_id = new_session_id();
+        self.store
+            .create_coordinator_dkg_session(&session_id, key_ref, idempotency_key)?;
+        tracing::info!(key_ref, session_id = %session_id, "starting DKG ceremony");
 
-        self.remember_group_key(key_ref, &encoded_package)?;
+        let mut transcript = CeremonyTranscript::default();
+        let package = match self.ceremony(&session_id, key_ref, &mut transcript).await {
+            Ok(package) => package,
+            Err(error) => {
+                let reason = error.reason();
+                self.store.update_coordinator_dkg_session(
+                    &session_id,
+                    &crate::store::CoordinatorDkgUpdate {
+                        phase: "aborted",
+                        public_package: None,
+                        public_package_hash: None,
+                        transcript: Some(&transcript.to_json()?),
+                        failure_reason: Some(&reason),
+                    },
+                )?;
+                tracing::error!(key_ref, session_id = %session_id, reason = %reason, "DKG aborted");
+                return Err(error);
+            }
+        };
 
-        tracing::info!(key_ref, address = %group_public_key, "per-user key provisioned");
+        // Verified by everyone; now install. A failure from here on leaves the
+        // session `committing`, which the next call resumes.
+        if let Err(error) = self
+            .commit_all(&session_id, key_ref, &package, &mut transcript)
+            .await
+        {
+            self.store.update_coordinator_dkg_session(
+                &session_id,
+                &crate::store::CoordinatorDkgUpdate {
+                    phase: "committing",
+                    public_package: None,
+                    public_package_hash: None,
+                    transcript: Some(&transcript.to_json()?),
+                    failure_reason: Some(&error.reason()),
+                },
+            )?;
+            return Err(error);
+        }
 
-        Ok(ProvisionResponse {
-            key_ref: key_ref.to_owned(),
-            group_public_key,
-            participants: MAX_SIGNERS,
-            threshold: MIN_SIGNERS,
-            existing: false,
-        })
+        self.complete(&session_id, key_ref, &package, &transcript)
     }
 
-    async fn install_share(
+    /// Rounds 1-3. Returns the group package all five participants verified.
+    async fn ceremony(
         &self,
-        participant: &ParticipantEndpoint,
+        session_id: &str,
         key_ref: &str,
-        share: &crate::frost::GeneratedShare,
-        public_package: &str,
-    ) -> Result<()> {
-        let installed: InstallShareResponse = self
-            .post(
-                participant,
-                "/v1/frost/install",
-                key_ref,
-                &InstallShareRequest {
-                    key_ref: key_ref.to_owned(),
-                    share: encode_secret_share(&share.secret_share)?,
-                    public_package: public_package.to_owned(),
-                },
-                "participant_refused_install",
-            )
-            .await?;
+        transcript: &mut CeremonyTranscript,
+    ) -> Result<frost::keys::PublicKeyPackage> {
+        use crate::dkg::{
+            DkgFinalizeRequest, DkgFinalizeResponse, DkgRound1Request, DkgRound1Response,
+            DkgRound2Request, DkgRound2Response, ShareEnvelope,
+        };
 
-        // The participant reports which identifier it now holds for this key.
-        // If that is not the roster entry the coordinator addressed, the roster
-        // does not describe reality and every later round for this key would
-        // address the wrong host.
-        if installed.identifier != participant.identifier {
-            tracing::error!(
-                expected = %participant.identifier,
-                installed = %installed.identifier,
-                "participant installed a share under a different identifier"
+        // --- Round 1: commitments and proofs of knowledge -----------------
+        let mut round1 = BTreeMap::new();
+        for participant in &self.participants {
+            let response: DkgRound1Response = self
+                .post(
+                    participant,
+                    "/v1/frost/dkg/round1",
+                    session_id,
+                    &DkgRound1Request {
+                        session_id: session_id.to_owned(),
+                        key_ref: key_ref.to_owned(),
+                        min_signers: MIN_SIGNERS,
+                        max_signers: MAX_SIGNERS,
+                    },
+                    "participant_refused_dkg_round1",
+                )
+                .await?;
+            expect_identifier(participant, &response.identifier)?;
+            transcript
+                .round1
+                .insert(response.identifier.clone(), response.package.clone());
+            round1.insert(response.identifier, response.package);
+        }
+
+        let mut decoded = BTreeMap::new();
+        for (identifier, package) in &round1 {
+            let bytes =
+                hex::decode(package).map_err(|_| MpcError::Internal("dkg_package_not_hex"))?;
+            decoded.insert(
+                decode_identifier(identifier)?,
+                postcard::from_bytes::<frost::keys::dkg::round1::Package>(&bytes)
+                    .map_err(|_| MpcError::Internal("dkg_package_invalid"))?,
             );
-            return Err(MpcError::Internal("participant_identifier_mismatch"));
+        }
+        // What the result MUST be, computed from public data alone.
+        let expected = crate::dkg::expected_public_package(&decoded)?;
+        let expected_hash = hex::encode(crate::dkg::public_package_hash(&expected)?);
+        let expected_group = hex::encode(crate::dkg::group_key_bytes(&expected)?);
+
+        // --- Round 2: sealed share exchange -------------------------------
+        let mut inbox: BTreeMap<String, Vec<ShareEnvelope>> = BTreeMap::new();
+        let mut transcript_hash: Option<String> = None;
+        for participant in &self.participants {
+            let response: DkgRound2Response = self
+                .post(
+                    participant,
+                    "/v1/frost/dkg/round2",
+                    session_id,
+                    &DkgRound2Request {
+                        session_id: session_id.to_owned(),
+                        key_ref: key_ref.to_owned(),
+                        round1_packages: round1.clone(),
+                    },
+                    "participant_refused_dkg_round2",
+                )
+                .await?;
+            expect_identifier(participant, &response.identifier)?;
+
+            // All participants were shown the same set, so all must report the
+            // same transcript. Checked here for a legible error; the envelopes'
+            // AEAD binding is what enforces it against a coordinator that lies.
+            match &transcript_hash {
+                None => transcript_hash = Some(response.transcript_hash.clone()),
+                Some(seen) if *seen != response.transcript_hash => {
+                    return Err(MpcError::Internal("dkg_transcript_divergence"))
+                }
+                Some(_) => {}
+            }
+
+            let mut recipients = std::collections::BTreeSet::new();
+            for envelope in &response.envelopes {
+                if envelope.sender != participant.identifier
+                    || envelope.recipient == participant.identifier
+                    || !self
+                        .participants
+                        .iter()
+                        .any(|p| p.identifier == envelope.recipient)
+                    || !recipients.insert(envelope.recipient.clone())
+                {
+                    return Err(MpcError::Internal("dkg_envelope_routing_invalid"));
+                }
+            }
+            if recipients.len() != MAX_SIGNERS as usize - 1 {
+                return Err(MpcError::Internal("dkg_envelope_count_invalid"));
+            }
+
+            for envelope in &response.envelopes {
+                inbox
+                    .entry(envelope.recipient.clone())
+                    .or_default()
+                    .push(envelope.clone());
+            }
+            transcript.round2.push(response);
+        }
+
+        // --- Round 3: verify and derive -----------------------------------
+        for participant in &self.participants {
+            let response: DkgFinalizeResponse = self
+                .post(
+                    participant,
+                    "/v1/frost/dkg/finalize",
+                    session_id,
+                    &DkgFinalizeRequest {
+                        session_id: session_id.to_owned(),
+                        key_ref: key_ref.to_owned(),
+                        envelopes: inbox.remove(&participant.identifier).unwrap_or_default(),
+                    },
+                    "participant_refused_dkg_finalize",
+                )
+                .await?;
+            expect_identifier(participant, &response.identifier)?;
+
+            let wanted_share = expected
+                .verifying_shares()
+                .get(&decode_identifier(&participant.identifier)?)
+                .ok_or(MpcError::Internal("dkg_verifying_share_missing"))?
+                .serialize()
+                .map_err(|_| MpcError::Internal("verifying_share_unserializable"))?;
+
+            if response.public_package_hash != expected_hash
+                || response.group_public_key != expected_group
+                || response.verifying_share != hex::encode(wanted_share)
+            {
+                tracing::error!(
+                    participant = %participant.identifier,
+                    "DKG: participant derived a different group than the public commitments imply"
+                );
+                return Err(MpcError::Internal("dkg_participants_disagree"));
+            }
+            transcript.finalize.push(response);
+        }
+
+        self.store.update_coordinator_dkg_session(
+            session_id,
+            &crate::store::CoordinatorDkgUpdate {
+                phase: "committing",
+                public_package: Some(
+                    &postcard::to_allocvec(&expected)
+                        .map_err(|_| MpcError::Internal("public_package_encode_failed"))?,
+                ),
+                public_package_hash: Some(
+                    &hex::decode(&expected_hash).map_err(|_| MpcError::Internal("hash_not_hex"))?,
+                ),
+                transcript: Some(&transcript.to_json()?),
+                failure_reason: None,
+            },
+        )?;
+
+        Ok(expected)
+    }
+
+    /// Ask every participant to install its verified share.
+    async fn commit_all(
+        &self,
+        session_id: &str,
+        key_ref: &str,
+        package: &frost::keys::PublicKeyPackage,
+        transcript: &mut CeremonyTranscript,
+    ) -> Result<()> {
+        let hash = hex::encode(crate::dkg::public_package_hash(package)?);
+        let group = hex::encode(crate::dkg::group_key_bytes(package)?);
+
+        for participant in &self.participants {
+            let response: crate::dkg::DkgCommitResponse = self
+                .post(
+                    participant,
+                    "/v1/frost/dkg/commit",
+                    session_id,
+                    &crate::dkg::DkgCommitRequest {
+                        session_id: session_id.to_owned(),
+                        key_ref: key_ref.to_owned(),
+                        public_package_hash: hash.clone(),
+                    },
+                    "participant_refused_dkg_commit",
+                )
+                .await?;
+            expect_identifier(participant, &response.identifier)?;
+            if response.group_public_key != group {
+                return Err(MpcError::Internal("dkg_participants_disagree"));
+            }
+            transcript.commit.push(response);
         }
         Ok(())
     }
+
+    /// Record the group key — only now, after all five committed.
+    fn complete(
+        &self,
+        session_id: &str,
+        key_ref: &str,
+        package: &frost::keys::PublicKeyPackage,
+        transcript: &CeremonyTranscript,
+    ) -> Result<DkgInitResponse> {
+        let bytes = postcard::to_allocvec(package)
+            .map_err(|_| MpcError::Internal("public_package_encode_failed"))?;
+        self.store.store_group_key(key_ref, &bytes)?;
+        self.store.update_coordinator_dkg_session(
+            session_id,
+            &crate::store::CoordinatorDkgUpdate {
+                phase: "finalized",
+                public_package: None,
+                public_package_hash: None,
+                transcript: Some(&transcript.to_json()?),
+                failure_reason: None,
+            },
+        )?;
+
+        let response = self.init_response(key_ref, package, false)?;
+        tracing::info!(
+            key_ref,
+            session_id = %session_id,
+            address = %response.group_public_key,
+            "per-user key generated by DKG"
+        );
+        Ok(response)
+    }
+
+    fn stored_package(&self, key_ref: &str) -> Result<Option<frost::keys::PublicKeyPackage>> {
+        self.stored_house_package(key_ref)
+    }
+
+    fn init_response(
+        &self,
+        key_ref: &str,
+        package: &frost::keys::PublicKeyPackage,
+        existing: bool,
+    ) -> Result<DkgInitResponse> {
+        let mut verifying_shares = BTreeMap::new();
+        for (identifier, share) in package.verifying_shares() {
+            verifying_shares.insert(
+                encode_identifier(identifier),
+                hex::encode(
+                    share
+                        .serialize()
+                        .map_err(|_| MpcError::Internal("verifying_share_unserializable"))?,
+                ),
+            );
+        }
+        Ok(DkgInitResponse {
+            key_ref: key_ref.to_owned(),
+            group_public_key: bs58_encode(&crate::dkg::group_key_bytes(package)?),
+            participants: MAX_SIGNERS,
+            threshold: MIN_SIGNERS,
+            existing,
+            verifying_shares,
+            public_package_hash: hex::encode(crate::dkg::public_package_hash(package)?),
+            generation: "dkg".to_owned(),
+        })
+    }
+}
+
+/// A participant answered as some identifier other than the roster entry the
+/// coordinator addressed: the roster does not describe reality, and every
+/// later round for this key would address the wrong host.
+fn expect_identifier(participant: &ParticipantEndpoint, reported: &str) -> Result<()> {
+    if reported != participant.identifier {
+        tracing::error!(
+            expected = %participant.identifier,
+            reported = %reported,
+            "participant answered under a different identifier"
+        );
+        return Err(MpcError::Internal("participant_identifier_mismatch"));
+    }
+    Ok(())
+}
+
+fn new_session_id() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    format!("dkg-{}", hex::encode(bytes))
 }
 
 /// base58, for Solana addresses. Hand-rolled to avoid a dependency for one use.

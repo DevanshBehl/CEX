@@ -98,6 +98,19 @@ export interface ProvisionedKey {
   readonly participants: number;
   /** True when this key already existed and was returned unchanged. */
   readonly existing: boolean;
+  /**
+   * How the key came to exist. `dkg` means distributed key generation: no
+   * machine ever held the private key (ADR-0023). `mock` is the in-process
+   * test signer and must never appear in a deployment.
+   */
+  readonly generation: 'dkg' | 'mock';
+  /**
+   * Participant identifier (hex) -> public verification share (hex). Public
+   * metadata only; present for `dkg`.
+   */
+  readonly verifyingShares?: Readonly<Record<string, string>>;
+  /** Hex SHA-256 of the group's public key package every participant agreed on. */
+  readonly publicPackageHash?: string;
 }
 
 /**

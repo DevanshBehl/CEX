@@ -31,6 +31,47 @@ pub struct RecordedSignature {
     pub public_key: Vec<u8>,
 }
 
+/// A participant's DKG session row (ADR-0023).
+///
+/// `sealed_secret` is KEK ciphertext and is `None` once the session is
+/// committed or aborted.
+pub struct DkgSessionRow {
+    pub session_id: String,
+    pub key_ref: String,
+    pub identifier: Vec<u8>,
+    pub phase: String,
+    pub sealed_secret: Option<Vec<u8>>,
+    pub round1_package: Vec<u8>,
+    pub round1_packages: Option<Vec<u8>>,
+    pub transcript_hash: Option<Vec<u8>>,
+    pub public_package: Option<Vec<u8>>,
+    pub failure_reason: Option<String>,
+}
+
+/// `(key_ref, identifier, phase, sealed_secret, public_package)` as read inside
+/// the commit transaction.
+type CommitCandidate = (String, Vec<u8>, String, Option<Vec<u8>>, Option<Vec<u8>>);
+
+pub enum DkgCommitOutcome {
+    Committed,
+    /// This session was already committed; a retried commit is a success.
+    AlreadyCommitted,
+    /// The session is not in `verified` (or does not exist).
+    NotVerified,
+    /// A share for the key_ref exists from some OTHER ceremony.
+    ShareAlreadyInstalled,
+}
+
+/// A coordinator session update. `None` fields keep their stored value, except
+/// `failure_reason`, which is always written.
+pub struct CoordinatorDkgUpdate<'a> {
+    pub phase: &'a str,
+    pub public_package: Option<&'a [u8]>,
+    pub public_package_hash: Option<&'a [u8]>,
+    pub transcript: Option<&'a str>,
+    pub failure_reason: Option<&'a str>,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
@@ -150,6 +191,76 @@ impl Store {
                 created_at   TEXT NOT NULL,
                 used_at      TEXT
             );
+
+            -- ---------------------------------------------------------------
+            -- Distributed key generation (ADR-0023)
+            -- ---------------------------------------------------------------
+
+            -- This participant's long-term X25519 transport identity.
+            --
+            -- Round-2 shares are routed through the coordinator, so each one is
+            -- encrypted to the recipient's key AND authenticated by the
+            -- sender's. The public half is pinned in every peer's
+            -- MPC_DKG_PEERS; the secret half is sealed under the KEK like any
+            -- share. One row, enforced by the CHECK.
+            CREATE TABLE IF NOT EXISTS dkg_identity (
+                id            INTEGER PRIMARY KEY CHECK (id = 1),
+                public_key    BLOB NOT NULL,
+                sealed_secret BLOB NOT NULL,
+                created_at    TEXT NOT NULL
+            );
+
+            -- A participant's side of one DKG ceremony.
+            --
+            -- `sealed_secret` holds whichever secret the current phase needs —
+            -- the round-1 polynomial, then the round-2 package, then the final
+            -- KeyPackage awaiting commit — always under the KEK, and set to NULL
+            -- the moment the session is committed or aborted. A secret that
+            -- outlives its ceremony is a secret that can leak later.
+            --
+            -- phase: round1 -> round2 -> verified -> committed, or aborted.
+            CREATE TABLE IF NOT EXISTS frost_dkg_sessions (
+                session_id      TEXT PRIMARY KEY,
+                key_ref         TEXT NOT NULL,
+                identifier      BLOB NOT NULL,
+                phase           TEXT NOT NULL,
+                sealed_secret   BLOB,
+                round1_package  BLOB NOT NULL,
+                round1_packages BLOB,
+                transcript_hash BLOB,
+                public_package  BLOB,
+                failure_reason  TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS frost_dkg_sessions_key_ref
+                ON frost_dkg_sessions (key_ref);
+
+            -- The coordinator's side of a ceremony. PUBLIC MATERIAL ONLY.
+            --
+            -- `transcript` is every response the coordinator received, verbatim:
+            -- commitments, proofs of knowledge, ciphertext envelopes and
+            -- verification shares. It is kept so an audit can replay what the
+            -- coordinator saw — and so a test can prove that everything it saw
+            -- is useless for recovering a key.
+            CREATE TABLE IF NOT EXISTS frost_dkg_coordinator_sessions (
+                session_id          TEXT PRIMARY KEY,
+                key_ref             TEXT NOT NULL,
+                idempotency_key     TEXT NOT NULL,
+                phase               TEXT NOT NULL,
+                public_package      BLOB,
+                public_package_hash BLOB,
+                transcript          TEXT NOT NULL DEFAULT '{}',
+                failure_reason      TEXT,
+                created_at          TEXT NOT NULL,
+                updated_at          TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS frost_dkg_coordinator_sessions_key_ref
+                ON frost_dkg_coordinator_sessions (key_ref);
+            CREATE INDEX IF NOT EXISTS frost_dkg_coordinator_sessions_idempotency
+                ON frost_dkg_coordinator_sessions (idempotency_key);
             "#,
         )?;
         Ok(())
@@ -435,6 +546,349 @@ impl Store {
             }
             None => Ok(false),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // DKG (ADR-0023) — participant side
+    // -----------------------------------------------------------------------
+
+    /// Store the transport identity. First writer wins: an identity that
+    /// changed after peers pinned it would make this participant unreachable
+    /// for every future ceremony.
+    pub fn store_dkg_identity(&self, public_key: &[u8], sealed_secret: &[u8]) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO dkg_identity (id, public_key, sealed_secret, created_at)
+             VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT (id) DO NOTHING",
+            params![public_key, sealed_secret, now()],
+        )?;
+        Ok(())
+    }
+
+    /// `(public_key, sealed_secret)`.
+    pub fn load_dkg_identity(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT public_key, sealed_secret FROM dkg_identity WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(MpcError::from)
+    }
+
+    /// Open a participant session, superseding any unfinished one for the
+    /// same key.
+    ///
+    /// Returns false when `session_id` already exists. Superseded sessions have
+    /// their secrets wiped in the same transaction: a coordinator that
+    /// abandoned a ceremony and started another must not leave a live round-1
+    /// polynomial behind.
+    pub fn begin_dkg_session(
+        &self,
+        session_id: &str,
+        key_ref: &str,
+        identifier: &[u8],
+        sealed_secret: &[u8],
+        round1_package: &[u8],
+    ) -> Result<bool> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+
+        let inserted = transaction.execute(
+            "INSERT INTO frost_dkg_sessions
+                (session_id, key_ref, identifier, phase, sealed_secret, round1_package,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'round1', ?4, ?5, ?6, ?6)
+             ON CONFLICT (session_id) DO NOTHING",
+            params![
+                session_id,
+                key_ref,
+                identifier,
+                sealed_secret,
+                round1_package,
+                now()
+            ],
+        )?;
+
+        if inserted == 1 {
+            transaction.execute(
+                "UPDATE frost_dkg_sessions
+                 SET phase = 'aborted', sealed_secret = NULL,
+                     failure_reason = 'superseded', updated_at = ?3
+                 WHERE key_ref = ?1 AND session_id != ?2
+                   AND phase IN ('round1', 'round2', 'verified')",
+                params![key_ref, session_id, now()],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(inserted == 1)
+    }
+
+    pub fn load_dkg_session(&self, session_id: &str) -> Result<Option<DkgSessionRow>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT session_id, key_ref, identifier, phase, sealed_secret, round1_package,
+                        round1_packages, transcript_hash, public_package, failure_reason
+                 FROM frost_dkg_sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok(DkgSessionRow {
+                        session_id: row.get(0)?,
+                        key_ref: row.get(1)?,
+                        identifier: row.get(2)?,
+                        phase: row.get(3)?,
+                        sealed_secret: row.get(4)?,
+                        round1_package: row.get(5)?,
+                        round1_packages: row.get(6)?,
+                        transcript_hash: row.get(7)?,
+                        public_package: row.get(8)?,
+                        failure_reason: row.get(9)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(MpcError::from)
+    }
+
+    /// The most recently started session for a key, for operators diagnosing
+    /// a failed ceremony. Never includes the plaintext of anything.
+    pub fn latest_dkg_session(&self, key_ref: &str) -> Result<Option<DkgSessionRow>> {
+        let session_id: Option<String> = {
+            let connection = self.lock()?;
+            connection
+                .query_row(
+                    "SELECT session_id FROM frost_dkg_sessions WHERE key_ref = ?1
+                     ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    params![key_ref],
+                    |row| row.get(0),
+                )
+                .optional()?
+        };
+        match session_id {
+            Some(id) => self.load_dkg_session(&id),
+            None => Ok(None),
+        }
+    }
+
+    /// round1 -> round2. Conditional on the phase, so a replayed round-2
+    /// request loses the race instead of re-running the round.
+    pub fn advance_dkg_to_round2(
+        &self,
+        session_id: &str,
+        sealed_secret: &[u8],
+        round1_packages: &[u8],
+        transcript_hash: &[u8],
+    ) -> Result<bool> {
+        let connection = self.lock()?;
+        let changed = connection.execute(
+            "UPDATE frost_dkg_sessions
+             SET phase = 'round2', sealed_secret = ?2, round1_packages = ?3,
+                 transcript_hash = ?4, updated_at = ?5
+             WHERE session_id = ?1 AND phase = 'round1'",
+            params![
+                session_id,
+                sealed_secret,
+                round1_packages,
+                transcript_hash,
+                now()
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// round2 -> verified: every share checked, final share sealed, NOT yet
+    /// installed. Installation is `commit_dkg_session`.
+    pub fn advance_dkg_to_verified(
+        &self,
+        session_id: &str,
+        sealed_key_package: &[u8],
+        public_package: &[u8],
+    ) -> Result<bool> {
+        let connection = self.lock()?;
+        let changed = connection.execute(
+            "UPDATE frost_dkg_sessions
+             SET phase = 'verified', sealed_secret = ?2, public_package = ?3, updated_at = ?4
+             WHERE session_id = ?1 AND phase = 'round2'",
+            params![session_id, sealed_key_package, public_package, now()],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Abort a session and wipe its secret. A committed session is final and
+    /// is never touched.
+    pub fn abort_dkg_session(&self, session_id: &str, reason: &str) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE frost_dkg_sessions
+             SET phase = 'aborted', sealed_secret = NULL, failure_reason = ?2, updated_at = ?3
+             WHERE session_id = ?1 AND phase != 'committed'",
+            params![session_id, reason, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Install a verified session's share as THE share for its key_ref.
+    ///
+    /// One transaction: the share row is inserted and the session marked
+    /// committed together, or neither happens. The insert refuses to replace
+    /// an existing share for the key — the same never-overwrite rule the
+    /// signing path has always relied on (ADR-0020).
+    pub fn commit_dkg_session(
+        &self,
+        session_id: &str,
+        min_signers: u16,
+        max_signers: u16,
+    ) -> Result<DkgCommitOutcome> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+
+        let row: Option<CommitCandidate> = transaction
+            .query_row(
+                "SELECT key_ref, identifier, phase, sealed_secret, public_package
+                 FROM frost_dkg_sessions WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((key_ref, identifier, phase, sealed, public_package)) = row else {
+            return Ok(DkgCommitOutcome::NotVerified);
+        };
+
+        match phase.as_str() {
+            "committed" => return Ok(DkgCommitOutcome::AlreadyCommitted),
+            "verified" => {}
+            _ => return Ok(DkgCommitOutcome::NotVerified),
+        }
+
+        let (Some(sealed), Some(public_package)) = (sealed, public_package) else {
+            return Err(MpcError::Internal("verified_session_incomplete"));
+        };
+
+        let inserted = transaction.execute(
+            "INSERT INTO frost_shares
+                (key_ref, identifier, group_public, encrypted_share, min_signers, max_signers, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (key_ref) DO NOTHING",
+            params![
+                key_ref,
+                identifier,
+                public_package,
+                sealed,
+                min_signers,
+                max_signers,
+                now()
+            ],
+        )?;
+
+        if inserted == 0 {
+            // Dropping the transaction rolls it back; the session stays
+            // `verified` and the existing share is untouched.
+            return Ok(DkgCommitOutcome::ShareAlreadyInstalled);
+        }
+
+        transaction.execute(
+            "UPDATE frost_dkg_sessions
+             SET phase = 'committed', sealed_secret = NULL, updated_at = ?2
+             WHERE session_id = ?1",
+            params![session_id, now()],
+        )?;
+        transaction.commit()?;
+        Ok(DkgCommitOutcome::Committed)
+    }
+
+    // -----------------------------------------------------------------------
+    // DKG (ADR-0023) — coordinator side. Public material only.
+    // -----------------------------------------------------------------------
+
+    pub fn create_coordinator_dkg_session(
+        &self,
+        session_id: &str,
+        key_ref: &str,
+        idempotency_key: &str,
+    ) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO frost_dkg_coordinator_sessions
+                (session_id, key_ref, idempotency_key, phase, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'round1', ?4, ?4)",
+            params![session_id, key_ref, idempotency_key, now()],
+        )?;
+        Ok(())
+    }
+
+    /// The key_ref an idempotency key was first used for, if any.
+    pub fn idempotency_key_owner(&self, idempotency_key: &str) -> Result<Option<String>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT key_ref FROM frost_dkg_coordinator_sessions
+                 WHERE idempotency_key = ?1 ORDER BY created_at LIMIT 1",
+                params![idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(MpcError::from)
+    }
+
+    /// A ceremony every participant verified but not every participant
+    /// committed. `(session_id, public_package)`.
+    pub fn resumable_coordinator_dkg_session(
+        &self,
+        key_ref: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        let connection = self.lock()?;
+        connection
+            .query_row(
+                "SELECT session_id, public_package FROM frost_dkg_coordinator_sessions
+                 WHERE key_ref = ?1 AND phase = 'committing' AND public_package IS NOT NULL
+                 ORDER BY created_at DESC LIMIT 1",
+                params![key_ref],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(MpcError::from)
+    }
+
+    pub fn update_coordinator_dkg_session(
+        &self,
+        session_id: &str,
+        update: &CoordinatorDkgUpdate<'_>,
+    ) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "UPDATE frost_dkg_coordinator_sessions
+             SET phase = ?2,
+                 public_package = COALESCE(?3, public_package),
+                 public_package_hash = COALESCE(?4, public_package_hash),
+                 transcript = COALESCE(?5, transcript),
+                 failure_reason = ?6,
+                 updated_at = ?7
+             WHERE session_id = ?1",
+            params![
+                session_id,
+                update.phase,
+                update.public_package,
+                update.public_package_hash,
+                update.transcript,
+                update.failure_reason,
+                now()
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn is_healthy(&self) -> bool {

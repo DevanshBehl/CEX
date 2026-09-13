@@ -9,7 +9,7 @@
 //! idempotency contract, the authorization check and the audit trail are
 //! already the right shape for a threshold (ADR-0015).
 
-use wallet_mpc::{auth, error, frost, http, keystore, signer, store, threshold};
+use wallet_mpc::{auth, dkg, error, frost, http, keystore, signer, store, threshold};
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -50,6 +50,10 @@ struct Config {
     participant_identifier: Option<String>,
     /// `role = Coordinator`: `identifier@url` for each participant.
     roster: Vec<String>,
+    /// `role = Participant`: `identifier=base64_x25519_key` for all five
+    /// members, this one included (ADR-0023). Pinned out of band — never
+    /// learned from the coordinator. Absent means DKG rounds are refused.
+    dkg_peers: Option<String>,
     /// `role = Coordinator`: the key it authenticates to participants with.
     ///
     /// A participant's only legitimate caller is the coordinator, so each
@@ -200,6 +204,9 @@ fn load_config() -> std::result::Result<Config, Vec<String>> {
         role,
         participant_identifier,
         roster,
+        dkg_peers: std::env::var("MPC_DKG_PEERS")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
         coordinator_key,
         bootstrap_key_ref: std::env::var("MPC_BOOTSTRAP_KEY_REF").ok(),
         approval_public_key: std::env::var("MPC_APPROVAL_PUBLIC_KEY")
@@ -218,6 +225,32 @@ async fn main() {
         )
         .init();
 
+    /*
+     * `wallet-mpc dkg-identity`: print this participant's DKG transport public
+     * key and exit (ADR-0023).
+     *
+     * Every participant's MPC_DKG_PEERS pins every other participant's key, so
+     * the keys must exist before any participant can be fully configured. The
+     * key is generated inside the store, sealed under MPC_KEK, and only its
+     * public half is printed — the same "generated here, never exported" rule
+     * as a share.
+     */
+    if std::env::args().nth(1).as_deref() == Some("dkg-identity") {
+        match print_dkg_identity() {
+            Ok(public) => {
+                println!("{public}");
+                return;
+            }
+            Err(error) => {
+                eprintln!(
+                    "\n  ✗ Could not load the DKG identity: {}\n",
+                    error.reason()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     let config = match load_config() {
         Ok(config) => config,
         Err(problems) => {
@@ -234,6 +267,15 @@ async fn main() {
         eprintln!("\n  ✗ Failed to start: {}\n", error.reason());
         std::process::exit(1);
     }
+}
+
+fn print_dkg_identity() -> std::result::Result<String, MpcError> {
+    let kek = std::env::var("MPC_KEK").map_err(|_| MpcError::Internal("MPC_KEK_not_set"))?;
+    let path = PathBuf::from(
+        std::env::var("MPC_DATABASE_PATH").unwrap_or_else(|_| "./mpc.sqlite".to_string()),
+    );
+    let store = Store::open(&path)?;
+    Ok(dkg::DkgIdentity::load_or_create(&store, &Kek::from_base64(&kek)?)?.public_key_base64())
 }
 
 async fn run(config: Config) -> std::result::Result<(), MpcError> {
@@ -266,6 +308,7 @@ async fn run(config: Config) -> std::result::Result<(), MpcError> {
     // Kept so shares provisioned AFTER boot can be sealed (ADR-0020). A
     // participant no longer receives its share only at startup.
     let mut participant_kek: Option<Kek> = None;
+    let mut dkg_context: Option<dkg::DkgContext> = None;
 
     match config.role {
         Role::SingleKey => {
@@ -284,6 +327,38 @@ async fn run(config: Config) -> std::result::Result<(), MpcError> {
         }
 
         Role::Participant => {
+            let identity = dkg::DkgIdentity::load_or_create(&store, &kek_for_frost)?;
+            tracing::info!(
+                dkg_public_key = %identity.public_key_base64(),
+                "DKG transport identity: pin this value for this participant in every peer's \
+                 MPC_DKG_PEERS"
+            );
+            match &config.dkg_peers {
+                Some(peers) => {
+                    let context =
+                        dkg::DkgContext::new(identity, dkg::DkgContext::parse_peers(peers)?)?;
+                    let own = threshold::encode_identifier(&context.identifier());
+                    // Two sources for "who am I" must agree, or the coordinator's
+                    // roster and the DKG roster describe different deployments.
+                    if let Some(configured) = &config.participant_identifier {
+                        if configured.trim() != own {
+                            tracing::error!(
+                                configured = %configured,
+                                from_roster = %own,
+                                "MPC_PARTICIPANT_IDENTIFIER does not match this participant's \
+                                 entry in MPC_DKG_PEERS"
+                            );
+                            return Err(MpcError::Internal("participant_identifier_mismatch"));
+                        }
+                    }
+                    dkg_context = Some(context);
+                }
+                None => tracing::warn!(
+                    "MPC_DKG_PEERS is not set: this participant will refuse DKG rounds and so \
+                     cannot receive new keys (ADR-0023)"
+                ),
+            }
+
             let key_ref = config
                 .bootstrap_key_ref
                 .clone()
@@ -379,23 +454,24 @@ async fn run(config: Config) -> std::result::Result<(), MpcError> {
             )?;
 
             /*
-             * FIRST BOOT: provision the house key.
+             * FIRST BOOT: generate the house key.
              *
-             * The same trusted-dealer path every user key takes, and warned
-             * about just as loudly (ADR-0020). The single-key service has
-             * always generated its key on first boot; this is the threshold
-             * equivalent, and doing it here rather than by hand means the
-             * house key cannot be created by a procedure nobody wrote down.
+             * By DKG, exactly as every user key is (ADR-0023): the coordinator
+             * routes the ceremony and holds only the resulting public package.
+             * The single-key service has always generated its key on first
+             * boot; this is the threshold equivalent, and doing it here rather
+             * than by hand means the house key cannot be created by a
+             * procedure nobody wrote down.
              *
              * Idempotent: a coordinator that already has one does nothing.
              */
             if public_package.is_none() {
-                let provisioned = built.provision_user_key(&key_ref).await?;
+                let generated = built.run_dkg(&key_ref, &format!("boot:{key_ref}")).await?;
                 tracing::warn!(
                     key_ref = %key_ref,
-                    address = %provisioned.group_public_key,
-                    "provisioned the HOUSE key with a trusted dealer. Fund TREASURY_ADDRESS \
-                     with exactly this address (ADR-0020)."
+                    address = %generated.group_public_key,
+                    "generated the HOUSE key by DKG. Fund TREASURY_ADDRESS with exactly this \
+                     address (ADR-0020, ADR-0023)."
                 );
 
                 let adopted = built
@@ -413,6 +489,7 @@ async fn run(config: Config) -> std::result::Result<(), MpcError> {
         store,
         caller,
         participant_kek,
+        dkg: dkg_context,
         coordinator,
     });
 

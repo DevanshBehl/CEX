@@ -22,14 +22,18 @@ cargo build --release --manifest-path services/mpc/Cargo.toml
    **coordinator's** caller key. The coordinator's public half becomes every
    participant's `MPC_CALLER_PUBLIC_KEY` — a participant's only legitimate
    caller is the coordinator.
-2. Starts five participants on 7071–7075 with FROST identifiers 1–5.
-3. Starts the coordinator on 7070, which **provisions the house key on first
-   boot** by trusted dealer and prints the address.
+2. Runs `wallet-mpc dkg-identity` against each participant's store to generate
+   its DKG transport key (sealed under its KEK) and collect the public halves.
+   It then starts five participants on 7071–7075 with FROST identifiers 1–5,
+   each with all five keys pinned in `MPC_DKG_PEERS`.
+3. Starts the coordinator on 7070, which **generates the house key on first
+   boot by DKG** across the five participants (ADR-0023) and prints the
+   address. The coordinator never holds the key.
 4. Writes `scripts/.mpc-cluster.env` with `TREASURY_ADDRESS` set to that
    address, `SEGREGATED_CUSTODY=true` and `SIGNER_KIND=real`.
 
 The script refuses to start if any of those six ports is taken. That is not
-tidiness: a coordinator that provisions a house key and then fails to bind
+tidiness: a coordinator that generates a house key and then fails to bind
 leaves _something else_ answering on 7070, and every later request
 authenticates against the wrong service's caller key. The symptom is
 `UNAUTHENTICATED` with nothing pointing at the cause.

@@ -7,6 +7,7 @@
 
 pub mod auth;
 pub mod custody;
+pub mod dkg;
 pub mod error;
 pub mod frost;
 pub mod http;

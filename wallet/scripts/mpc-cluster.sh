@@ -29,7 +29,7 @@ start() {
 
   # A port already in use is the failure worth catching here.
   #
-  # Without this the coordinator starts, provisions a house key, fails to bind,
+  # Without this the coordinator starts, generates a house key, fails to bind,
   # and exits — while something ELSE answers on that port. Every subsequent
   # request is then authenticated against the wrong service's caller key, and
   # the symptom is `UNAUTHENTICATED` with nothing pointing at the cause. That
@@ -89,18 +89,33 @@ JS
   # --- participants ---------------------------------------------------------
   #
   # Identifiers 1..5 as FROST encodes them: a 32-byte little-endian scalar,
-  # hex. The coordinator matches shares to roster entries BY identifier, so
-  # these must be the real encoding rather than "01".
+  # hex. The coordinator matches roster entries BY identifier, so these must
+  # be the real encoding rather than "01".
+  #
+  # DKG transport identities first (ADR-0023). Each participant generates its
+  # X25519 key INSIDE its own store (`wallet-mpc dkg-identity`), sealed under
+  # its own KEK, and prints only the public half. Every participant is then
+  # started with all five public keys pinned in MPC_DKG_PEERS — the
+  # coordinator never supplies them, because a coordinator that could
+  # substitute them could read the shares.
+  PEERS=""
+  for i in 1 2 3 4 5; do
+    id=$(printf '%02x' "$i")$(printf '0%.0s' $(seq 1 62))
+    kek=$(openssl rand -base64 32)
+    echo "$kek" > "$STATE/kek-$i"
+    dkg_pub=$(MPC_KEK="$kek" MPC_DATABASE_PATH="$STATE/participant-$i.sqlite" "$BIN" dkg-identity)
+    PEERS="${PEERS:+$PEERS,}$id=$dkg_pub"
+  done
+
   ROSTER=""
   for i in 1 2 3 4 5; do
     port=$((BASE_PORT + i - 1))
     id=$(printf '%02x' "$i")$(printf '0%.0s' $(seq 1 62))
-    kek=$(openssl rand -base64 32)
-    echo "$kek" > "$STATE/kek-$i"
 
     MPC_ROLE=participant \
     MPC_PARTICIPANT_IDENTIFIER="$id" \
-    MPC_KEK="$kek" \
+    MPC_DKG_PEERS="$PEERS" \
+    MPC_KEK="$(cat "$STATE/kek-$i")" \
     MPC_CALLER_PUBLIC_KEY="$COORD_PUB" \
     MPC_APPROVAL_PUBLIC_KEY="$APPROVAL_PUB" \
     MPC_DATABASE_PATH="$STATE/participant-$i.sqlite" \

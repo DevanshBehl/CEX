@@ -5,7 +5,9 @@ export { authorizationMessage, signAuthorization } from './approval.js';
 export * from './adapter.js';
 export {
   createRustSigner,
+  dkgIdempotencyKey,
   mpcCanonicalString,
+  parseDkgInitResponse,
   type MpcRole,
   type RustSigner,
   type RustSignerOptions,

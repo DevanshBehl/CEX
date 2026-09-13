@@ -22,6 +22,10 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 use wallet_mpc::auth::CallerVerifier;
+use wallet_mpc::dkg::{
+    DkgCommitRequest, DkgContext, DkgFinalizeRequest, DkgIdentity, DkgParticipant,
+    DkgRound1Request, DkgRound2Request,
+};
 use wallet_mpc::frost::{self, Participant, MAX_SIGNERS, MIN_SIGNERS};
 use wallet_mpc::http::{router, AppState};
 use wallet_mpc::keystore::Kek;
@@ -43,38 +47,139 @@ struct Cluster {
     approval: SigningKey,
 }
 
+/// Generate the group key the way production does: the participants' own DKG
+/// state machine (ADR-0023), run in-process with this test as the router.
+///
+/// Returns each participant's store, KEK seed and DKG context, in identifier
+/// order, with the committed share already installed.
+/// A participant's store, KEK seed and DKG context.
+type GeneratedNode = (Arc<Store>, [u8; 32], DkgContext);
+
+fn distributed_key(key_ref: &str) -> (Vec<GeneratedNode>, frost_ed25519::keys::PublicKeyPackage) {
+    let seeds: Vec<[u8; 32]> = (0..MAX_SIGNERS).map(|i| [40u8 + i as u8; 32]).collect();
+    let stores: Vec<_> = seeds
+        .iter()
+        .map(|_| Arc::new(Store::in_memory().expect("store")))
+        .collect();
+    let identities: Vec<_> = stores
+        .iter()
+        .zip(&seeds)
+        .map(|(store, seed)| {
+            DkgIdentity::load_or_create(store, &Kek::from_base64(&B64.encode(seed)).unwrap())
+                .expect("identity")
+        })
+        .collect();
+    let roster: BTreeMap<_, _> = identities
+        .iter()
+        .enumerate()
+        .map(|(i, identity)| {
+            (
+                frost_ed25519::Identifier::try_from(i as u16 + 1).unwrap(),
+                identity.public_key(),
+            )
+        })
+        .collect();
+    let contexts: Vec<_> = identities
+        .into_iter()
+        .map(|identity| DkgContext::new(identity, roster.clone()).expect("context"))
+        .collect();
+    let keks: Vec<_> = seeds
+        .iter()
+        .map(|seed| Kek::from_base64(&B64.encode(seed)).unwrap())
+        .collect();
+    let participant = |i: usize| DkgParticipant {
+        store: &stores[i],
+        kek: &keks[i],
+        context: &contexts[i],
+    };
+
+    let session = "dkg-threshold-suite";
+    let round1: BTreeMap<String, String> = (0..stores.len())
+        .map(|i| {
+            let r = participant(i)
+                .round1(&DkgRound1Request {
+                    session_id: session.into(),
+                    key_ref: key_ref.into(),
+                    min_signers: MIN_SIGNERS,
+                    max_signers: MAX_SIGNERS,
+                })
+                .expect("round1");
+            (r.identifier, r.package)
+        })
+        .collect();
+
+    let mut envelopes = Vec::new();
+    for i in 0..stores.len() {
+        envelopes.extend(
+            participant(i)
+                .round2(&DkgRound2Request {
+                    session_id: session.into(),
+                    key_ref: key_ref.into(),
+                    round1_packages: round1.clone(),
+                })
+                .expect("round2")
+                .envelopes,
+        );
+    }
+
+    let mut hash = String::new();
+    for (i, context) in contexts.iter().enumerate() {
+        let me = threshold::encode_identifier(&context.identifier());
+        hash = participant(i)
+            .finalize(&DkgFinalizeRequest {
+                session_id: session.into(),
+                key_ref: key_ref.into(),
+                envelopes: envelopes
+                    .iter()
+                    .filter(|e| e.recipient == me)
+                    .cloned()
+                    .collect(),
+            })
+            .expect("finalize")
+            .public_package_hash;
+    }
+    for i in 0..stores.len() {
+        participant(i)
+            .commit(&DkgCommitRequest {
+                session_id: session.into(),
+                key_ref: key_ref.into(),
+                public_package_hash: hash.clone(),
+            })
+            .expect("commit");
+    }
+
+    let (_, group, _, _) = stores[0].load_share(key_ref).unwrap().expect("share");
+    let public_package = postcard::from_bytes(&group).expect("package");
+    drop(keks);
+
+    let nodes = stores
+        .into_iter()
+        .zip(seeds)
+        .zip(contexts)
+        .map(|((store, seed), context)| (store, seed, context))
+        .collect();
+    (nodes, public_package)
+}
+
 fn cluster(with_approval_key: bool) -> Cluster {
     let client = SigningKey::from_bytes(&[3u8; 32]);
     let approval = SigningKey::from_bytes(&[9u8; 32]);
 
-    let (shares, public_package) =
-        frost::generate_with_dealer(MIN_SIGNERS, MAX_SIGNERS).expect("dealer");
+    let (generated, public_package) = distributed_key(KEY_REF);
 
-    let nodes = shares
-        .iter()
-        .enumerate()
-        .map(|(index, share)| {
+    let nodes = generated
+        .into_iter()
+        .map(|(store, seed, context)| {
             // Its OWN store and its OWN key-encryption key. A shared KEK would
             // mean one disclosure decrypts every share, which is the thing the
             // threshold exists to prevent.
-            let store = Arc::new(Store::in_memory().expect("store"));
-            let kek = Kek::from_base64(&B64.encode([40u8 + index as u8; 32])).expect("kek");
-
-            Participant::install(&store, &kek, KEY_REF, share).expect("install");
-            // A second handle to the same KEK rather than a clone: `Kek` is
-            // deliberately not `Clone`, so key material cannot be duplicated
-            // by accident (ADR-0014).
-            let participant_kek =
-                Kek::from_base64(&B64.encode([40u8 + index as u8; 32])).expect("kek");
-            let participant = Participant::load(Arc::clone(&store), participant_kek, KEY_REF)
+            let kek = || Kek::from_base64(&B64.encode(seed)).expect("kek");
+            let participant = Participant::load(Arc::clone(&store), kek(), KEY_REF)
                 .expect("load")
                 .expect("share");
             let identifier = threshold::encode_identifier(&participant.identifier());
-            let participant_kek_for_state =
-                Kek::from_base64(&B64.encode([40u8 + index as u8; 32])).expect("kek");
 
-            let signer_kek = Kek::from_base64(&B64.encode([40u8 + index as u8; 32])).expect("kek");
-            let signer = SigningService::new(Arc::clone(&store), signer_kek);
+            let signer = SigningService::new(Arc::clone(&store), kek());
             let signer = if with_approval_key {
                 signer
                     .with_approval_key(&B64.encode(approval.verifying_key().to_bytes()))
@@ -94,7 +199,8 @@ fn cluster(with_approval_key: bool) -> Cluster {
                     // Per-user keys: the share to use is chosen per request by
                     // key_ref, so a participant holds a KEK rather than one
                     // preloaded share (ADR-0020).
-                    participant_kek: Some(participant_kek_for_state),
+                    participant_kek: Some(kek()),
+                    dkg: Some(context),
                     coordinator: None,
                 })),
                 identifier,
@@ -374,6 +480,7 @@ async fn a_non_participant_service_refuses_the_round_endpoints() {
         store,
         caller,
         participant_kek: None,
+        dkg: None,
         coordinator: None,
     }));
 

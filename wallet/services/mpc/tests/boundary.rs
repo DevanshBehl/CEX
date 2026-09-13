@@ -43,6 +43,7 @@ fn harness() -> Harness {
             store,
             caller,
             participant_kek: None,
+            dkg: None,
             coordinator: None,
         })),
         client,
