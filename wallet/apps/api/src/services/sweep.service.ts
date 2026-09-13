@@ -1,39 +1,47 @@
 import type { ChainReader } from '@wallet/blockchain';
-import { createCustodyRepository, type PrismaClient } from '@wallet/db';
+import type { PrismaClient } from '@wallet/db';
 import { postSweepFee, toAmount } from '@wallet/ledger';
-import { logSecurityEvent, type Logger } from '@wallet/logger';
-import { planNativeSweep, type SweepPlan } from '@wallet/solana';
+import type { Logger } from '@wallet/logger';
+import type { SweepPlan } from '@wallet/solana';
 import type { AssetRegistry } from '@wallet/types';
 
 /**
- * Sweeps: consolidating deposit addresses into the hot wallet (ADR-0017).
+ * Sweeps — DISABLED under segregated custody (ADR-0020).
  *
- * # What a sweep is
+ * # Why this code still exists but is not wired
  *
- * ADR-0004 gives every user their own deposit address, so money arrives spread
- * across as many addresses as there are users. A sweep consolidates it.
+ * A sweep consolidates user deposit addresses into a pooled hot wallet. That is
+ * correct for an omnibus exchange and is **exactly the act segregated custody
+ * rules out**: the moment funds pool, one user's balance stops being
+ * identifiable on-chain, and the bankruptcy-remoteness and per-user
+ * reconciliation that segregation exists to provide are both gone.
  *
- * # What a sweep is NOT
+ * So nothing calls this. It is not registered as a worker, and
+ * `apps/api/src/server.ts` never constructs it.
  *
- * It is not a change in what the platform owes anyone. Both addresses are
- * ours, the chart of accounts has one `chain_assets` account per asset, and
- * the ledger's answer to "how much does the platform control" is identical
- * before and after. The ONLY posting is the network fee, drawn from the
- * prepaid house balance rather than from pooled customer funds.
+ * It is RETAINED rather than deleted because the hard part was never the
+ * mechanics — it was the accounting. `postSweepFee` establishes that a transfer
+ * between two platform-owned addresses posts **only its fee**, because the
+ * ledger has one `chain_assets` account per (owner, asset) and moving value
+ * between two addresses of the same owner is not an entry. Rebalancing between
+ * HOUSE tiers (ADR-0018) is still a real future need and has precisely that
+ * shape. Deleting this would mean rediscovering it.
  *
- * **The invariant: total user liabilities are bit-identical across a sweep.**
- * A sweep that moves a user balance is not a sweep with a bug; it is a
- * different operation wearing the name.
+ * # If you are about to re-enable this
  *
- * # Why this is planning only
- *
- * Executing a sweep means signing with a DEPOSIT key, and deposit keys are a
- * separate, lower-privilege class whose only authority is to pay one hardcoded
- * destination (ADR-0005, ADR-0017 §3). That destination lives in the signing
- * service, not in a request — so this service decides WHAT should be swept and
- * the signing boundary decides WHERE it goes. Putting the destination here
- * would hand back exactly the authority ADR-0005 removed.
+ * Do not, for user addresses. Check ADR-0020 first. If the requirement has
+ * genuinely changed back to an omnibus model, that is an ADR, not a wiring
+ * change — the per-user reconciliation invariant and the segregated chart of
+ * accounts both have to come out with it.
  */
+
+/** Guard rail: a sweep planner must never be pointed at user-owned addresses. */
+export class SegregatedCustodyViolation extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SegregatedCustodyViolation';
+  }
+}
 
 export interface SweepCandidate {
   readonly addressId: string;
@@ -65,61 +73,28 @@ export interface SweepService {
   feePosting(sweepId: string, asset: string, fee: string): ReturnType<typeof postSweepFee>;
 }
 
-export function createSweepService(deps: SweepDeps): SweepService {
-  const custody = createCustodyRepository(deps.db);
-
+export function createSweepService(_deps: SweepDeps): SweepService {
   return {
-    async plan() {
-      const addresses = await deps.db.address.findMany({
-        where: { chain: deps.chain, status: 'active', custodyRole: 'deposit' },
-        select: { id: true, address: true, walletId: true },
-        take: deps.batchSize,
-      });
-
-      // Read once per address, from the chain, at the configured commitment.
-      // The LEDGER cannot answer this: it records what the platform controls
-      // in aggregate, not what sits at any particular address (ADR-0017).
-      const rentExemptMinimum = await deps.reader.getMinimumAccountBalance(
-        deps.assets.keys[0] ?? 'SOL',
+    async plan(): Promise<SweepCandidate[]> {
+      /*
+       * Refused, not empty.
+       *
+       * An empty plan would let a future caller wire this up, see "nothing to
+       * sweep", and conclude it works. Sweeping user addresses is a custody
+       * violation under ADR-0020, and the failure should be loud enough that
+       * nobody re-enables it by accident.
+       *
+       * The planning ARITHMETIC is retained where it is reusable and safe:
+       * `planNativeSweep` in `packages/solana` (never sweep the rent-exempt
+       * minimum) and `postSweepFee` in `packages/ledger` (a transfer between
+       * two addresses of one owner posts only its fee). House-tier rebalancing
+       * (ADR-0018) has exactly that shape and will want both.
+       */
+      await Promise.resolve();
+      throw new SegregatedCustodyViolation(
+        'Sweeping user deposit addresses would commingle segregated funds (ADR-0020). ' +
+          'House-tier rebalancing is not implemented.',
       );
-
-      const candidates: SweepCandidate[] = [];
-
-      for (const address of addresses) {
-        const balance = await deps.reader.getBalance(address.address, 'SOL').catch(() => null);
-        if (balance === null) continue;
-
-        const plan = planNativeSweep({
-          balance,
-          // NEVER swept. A swept-to-zero account ceases to exist, and the next
-          // deposit pays to recreate it — so the value this appears to release
-          // is spent again immediately, plus a fee (rule 133).
-          rentExemptMinimum,
-          feeReserve: deps.feeReserve,
-          threshold: deps.threshold,
-        });
-
-        if (!plan.shouldSweep) continue;
-
-        candidates.push({
-          addressId: address.id,
-          address: address.address,
-          walletId: address.walletId,
-          asset: 'SOL',
-          balance,
-          plan,
-        });
-      }
-
-      if (candidates.length > 0) {
-        logSecurityEvent(deps.logger, 'sweep.started', {
-          outcome: 'success',
-          count: candidates.length,
-        });
-      }
-
-      void custody;
-      return candidates;
     },
 
     feePosting(sweepId, asset, fee) {

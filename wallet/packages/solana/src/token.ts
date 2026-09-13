@@ -2,7 +2,8 @@ import { PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import type { Address, TransferEvent } from '@wallet/blockchain';
 import { ChainError } from '@wallet/errors';
 import type { ParsedTransactionWithMeta } from '@solana/web3.js';
-import { SOLANA_CHAIN_ID } from './constants.js';
+import { ledgerAssetKey, type Cluster } from '@wallet/types';
+import { solanaChainId } from './constants.js';
 import { toConfirmation } from './rpc.js';
 import { toPublicKey } from './rpc.js';
 
@@ -49,6 +50,8 @@ export function deriveAssociatedTokenAddress(owner: Address, mint: string): Addr
 }
 
 export interface ParseTokenOptions {
+  /** Which cluster these bytes came from. See `ParseOptions.cluster`. */
+  readonly cluster: Cluster;
   /**
    * Deposit addresses to watch — the OWNERS, not their token accounts.
    *
@@ -126,9 +129,11 @@ export function parseTokenTransfers(
     if (delta <= 0n) continue;
 
     events.push({
-      chain: SOLANA_CHAIN_ID,
-      // The MINT is the asset key, not the symbol (ADR-0016).
-      asset: entry.mint,
+      chain: solanaChainId(options.cluster),
+      // The MINT is the asset key, not the symbol (ADR-0016) — qualified by
+      // the cluster, because the same mint address on devnet and mainnet is
+      // two different assets with two different values (ADR-0021).
+      asset: ledgerAssetKey(options.cluster, entry.mint),
       amount: delta.toString(),
       to: owner,
       from: null,
@@ -200,8 +205,17 @@ function encodeTransferInstruction(amount: bigint): Buffer {
 const CREATE_ATA_DATA = Buffer.alloc(0);
 
 export interface BuildTokenTransferInput {
-  /** The OWNER paying and signing, not its token account. */
+  /** The OWNER whose tokens move, and who signs for them — not its token account. */
   readonly owner: string;
+  /**
+   * Who pays the network fee and any ATA rent. Defaults to `owner`.
+   *
+   * For a user withdrawal this is the house (ADR-0020 §3): a token account
+   * holds no SOL of its own, so a segregated user address would otherwise be
+   * unable to move its own tokens. When it differs from `owner` the
+   * transaction has two signers.
+   */
+  readonly feePayer?: string | undefined;
   readonly ownerTokenAccount: string;
   readonly destinationOwner: string;
   readonly mint: string;
@@ -229,17 +243,19 @@ export interface BuildTokenTransferInput {
  * reuse the withdrawal state machine, the state machine would be
  * chain-specific and that would be the defect (rule 126).
  *
- * NOTE ON THE FEE: this transaction's fee payer is `owner`, who must therefore
- * hold SOL. A token account holds no SOL of its own, so for a sweep out of a
- * deposit address the funding step must already have run (rule 119). That
- * ordering is not an optimisation — an unfunded token sweep fails at broadcast,
- * after signing, having consumed a nonce.
+ * NOTE ON THE FEE: the fee payer defaults to `owner`, who must then hold SOL.
+ * A token account holds no SOL of its own, so where `owner` pays, a funding
+ * step must already have run (rule 119) — an unfunded transfer fails at
+ * broadcast, after signing, having consumed a nonce. A user withdrawal avoids
+ * that entirely by naming the house as `feePayer` (ADR-0020 §3), which is also
+ * what makes a token-only balance spendable without the user holding SOL.
  */
 export function buildTokenTransferTransaction(input: BuildTokenTransferInput): {
   readonly message: Uint8Array;
   readonly transaction: Transaction;
   readonly nonce: string;
   readonly destinationTokenAccount: string;
+  readonly signers: readonly string[];
 } {
   const amount = BigInt(input.amount);
   if (amount <= 0n) {
@@ -253,8 +269,10 @@ export function buildTokenTransferTransaction(input: BuildTokenTransferInput): {
 
   const destinationTokenAccount = deriveAssociatedTokenAddress(input.destinationOwner, input.mint);
 
+  const feePayer = input.feePayer ?? input.owner;
+
   const transaction = new Transaction({
-    feePayer: toPublicKey(input.owner),
+    feePayer: toPublicKey(feePayer),
     nonceInfo: {
       nonce: input.nonce,
       nonceInstruction: SystemProgram.nonceAdvance({
@@ -270,7 +288,10 @@ export function buildTokenTransferTransaction(input: BuildTokenTransferInput): {
     transaction.add({
       programId: ASSOCIATED_TOKEN_PROGRAM_ID,
       keys: [
-        { pubkey: toPublicKey(input.owner), isSigner: true, isWritable: true },
+        // The FUNDING account, which is charged the rent — the fee payer, so
+        // rent lands on house_rent exactly as `postTokenAccountRent` records
+        // it, and never on the user whose tokens are moving.
+        { pubkey: toPublicKey(feePayer), isSigner: true, isWritable: true },
         { pubkey: toPublicKey(destinationTokenAccount), isSigner: false, isWritable: true },
         { pubkey: toPublicKey(input.destinationOwner), isSigner: false, isWritable: false },
         { pubkey: toPublicKey(input.mint), isSigner: false, isWritable: false },
@@ -296,6 +317,7 @@ export function buildTokenTransferTransaction(input: BuildTokenTransferInput): {
     transaction,
     nonce: input.nonce,
     destinationTokenAccount,
+    signers: [...new Set([feePayer, input.owner, input.nonceAuthority])],
   };
 }
 

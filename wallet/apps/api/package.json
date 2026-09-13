@@ -28,6 +28,7 @@
     "@wallet/errors": "workspace:*",
     "@wallet/ledger": "workspace:*",
     "@wallet/logger": "workspace:*",
+    "@wallet/portfolio": "workspace:*",
     "@wallet/risk": "workspace:*",
     "@wallet/solana": "workspace:*",
     "@wallet/types": "workspace:*",

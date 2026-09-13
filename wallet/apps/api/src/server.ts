@@ -11,6 +11,7 @@ import {
   createMockSigner,
   createRustSigner,
   type ChainAdapter,
+  type KeyProvisioner,
   type Signer,
 } from '@wallet/blockchain';
 import {
@@ -30,22 +31,17 @@ import {
   type PrismaClient,
 } from '@wallet/db';
 import { createLogger, type Logger } from '@wallet/logger';
+import { GENESIS_HASHES, type NonceManager, type WithdrawalBroadcaster } from '@wallet/solana';
+import type { Cluster } from '@wallet/types';
+import type { MpcRole } from '@wallet/blockchain';
 import {
-  createNonceManager,
-  createSolanaAdapter,
-  deriveAssociatedTokenAddress,
-  GENESIS_HASHES,
-  createSolanaAddressDeriver,
-  createSolanaAddressValidator,
-  createSolanaRpc,
-  createWithdrawalBroadcaster,
-  NATIVE_ASSET,
-  SOLANA_CHAIN_ID,
-  type NonceManager,
-  type WithdrawalBroadcaster,
-} from '@wallet/solana';
+  createClusterRuntime,
+  type ClusterOverrides,
+  type ClusterRuntime,
+} from './cluster/runtime.js';
 
 import { requestContextPlugin } from './plugins/request-context.js';
+import { clusterContextPlugin } from './plugins/cluster-context.js';
 import { securityPlugin } from './plugins/security.js';
 import { registerErrorHandler } from './errors/handler.js';
 import {
@@ -56,18 +52,21 @@ import {
 } from './middleware/guards.js';
 import { createAuthControllers } from './controllers/auth.controller.js';
 import { createCustodyControllers } from './controllers/custody.controller.js';
-import { createCustodyService } from './services/custody.service.js';
-import { createDepositPipeline } from './services/deposit.service.js';
-import { createReconciliationService } from './services/reconciliation.service.js';
+import { createPortfolioControllers } from './controllers/portfolio.controller.js';
 import {
   createReconciliationWorker,
   type ReconciliationWorker,
 } from './workers/reconciliation-worker.js';
-import { createIndexer, type Indexer } from './workers/indexer.js';
+import type { Indexer } from './workers/indexer.js';
 import { createCustodyRoutes } from './routes/custody.routes.js';
+import { createPortfolioRoutes } from './routes/portfolio.routes.js';
 import { createWithdrawalControllers } from './controllers/withdrawal.controller.js';
-import { createWithdrawalService } from './services/withdrawal.service.js';
-import { createWithdrawalWorkers, type WithdrawalWorkers } from './workers/withdrawal-workers.js';
+import type { WithdrawalWorkers } from './workers/withdrawal-workers.js';
+import { createPricer, type Pricer } from './workers/pricer.js';
+import { createCoinGeckoSource } from './services/prices/coingecko.js';
+import { createPythSource } from './services/prices/pyth.js';
+import { createStaticSource } from './services/prices/static.js';
+import type { PriceSource } from './services/prices/source.js';
 import { createWalletMetrics } from './observability/metrics.js';
 import { createDeadLetterQueue } from './observability/dead-letter.js';
 import { createOperationsRoutes } from './routes/operations.routes.js';
@@ -87,8 +86,14 @@ declare module 'fastify' {
   interface FastifyInstance {
     log2: Logger;
     appDeps: AppDeps;
+    /** The DEFAULT cluster's indexer. Others live in `clusters` (ADR-0021). */
     indexer: Indexer | null;
+    /** The DEFAULT cluster's workers. */
     withdrawalWorkers: WithdrawalWorkers;
+    /** Every served cluster's object graph, keyed by cluster. */
+    clusters: ReadonlyMap<Cluster, ClusterRuntime>;
+    /** The price ingestion worker. Tests drive `runOnce()` (Task 3). */
+    pricer: Pricer;
     signer: Signer;
     reconcile: () => Promise<unknown>;
     reconciliationWorker: ReconciliationWorker;
@@ -124,11 +129,52 @@ export interface BuildServerOptions {
   readonly nonceManager?: NonceManager;
   readonly broadcaster?: WithdrawalBroadcaster;
   readonly startWithdrawalWorkers?: boolean;
+  readonly startPricer?: boolean;
+  /** Per-cluster test seams. See `overridesFor`. */
+  readonly clusterOverrides?: Partial<Record<Cluster, ClusterOverrides>>;
+}
+
+/**
+ * The configured price source (Task 3).
+ *
+ * `none` still returns a source — one that prices nothing. The alternative is
+ * an optional worker and a null check at every call site, and the behaviour is
+ * identical: no ticks, so the dashboard says it has no prices.
+ */
+function buildPriceSource(config: ApiConfig): PriceSource {
+  const shared = {
+    apiKey: config.prices.apiKey.trim() === '' ? undefined : config.prices.apiKey,
+    requestTimeoutMs: config.prices.requestTimeoutMs,
+    ...(config.prices.endpoint.trim() === '' ? {} : { endpoint: config.prices.endpoint }),
+  };
+
+  switch (config.prices.source) {
+    case 'coingecko':
+      return createCoinGeckoSource({ ...shared, ids: config.prices.feeds });
+    case 'pyth':
+      return createPythSource({ ...shared, feeds: config.prices.feeds });
+    case 'static':
+      return createStaticSource(config.prices.fixed);
+    case 'none':
+      return { name: 'none', fetch: async () => Promise.resolve([]) };
+  }
+}
+
+/** A signer that can also create per-user threshold keys (ADR-0020). */
+function isKeyProvisioner(signer: Signer): signer is Signer & KeyProvisioner {
+  return typeof (signer as { provisionKey?: unknown }).provisionKey === 'function';
 }
 
 /** A signer that can report its own liveness. Only the real one can. */
 function isHealthCheckable(signer: Signer): signer is Signer & { isHealthy(): Promise<boolean> } {
   return typeof (signer as { isHealthy?: unknown }).isHealthy === 'function';
+}
+
+/** A signer that can say what the service behind it actually is. */
+function isDescribable(
+  signer: Signer,
+): signer is Signer & { describe(): Promise<MpcRole | undefined> } {
+  return typeof (signer as { describe?: unknown }).describe === 'function';
 }
 
 /**
@@ -238,204 +284,191 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
 
   const signer = options.signer ?? buildSigner(config);
 
-  // --- Chain and custody (Phase 2) -----------------------------------------
-  const chainAdapter =
-    options.chainAdapter ??
-    createSolanaAdapter({
-      endpoint: config.chain.rpcUrl,
-      commitment: config.chain.commitment,
-      requestTimeoutMs: config.chain.rpcTimeoutMs,
-      maxRetries: config.chain.rpcMaxRetries,
-      pageSize: config.indexer.pageSize,
-    });
+  /*
+   * Per-user threshold keys (ADR-0020), when the deployment is segregated.
+   *
+   * `SEGREGATED_CUSTODY` is validated at config load, so by here a true value
+   * means the signer really is the MPC client. The narrowing is checked: only
+   * that client implements `provisionKey`.
+   */
+  const keyProvisioner: KeyProvisioner | undefined =
+    config.withdrawal.segregatedCustody && isKeyProvisioner(signer) ? signer : undefined;
+
+  if (config.withdrawal.segregatedCustody && !keyProvisioner) {
+    throw new Error(
+      'SEGREGATED_CUSTODY is enabled but the signer cannot provision keys — ' +
+        'a user would be handed a seed-derived address, which is the opposite of segregation',
+    );
+  }
+
+  const approvalKey =
+    config.withdrawal.mpc.approvalPrivateKey.trim() !== ''
+      ? createPrivateKey(
+          Buffer.from(config.withdrawal.mpc.approvalPrivateKey, 'base64').toString('utf8'),
+        )
+      : undefined;
+
+  /*
+   * ONE OBJECT GRAPH PER CLUSTER (ADR-0021).
+   *
+   * Each runtime holds its own RPC connection, adapter, nonce pool, indexer,
+   * allowlist and risk limits. Nothing is shared between them except the
+   * database, the signer and this process — so code holding the devnet runtime
+   * has no reference through which mainnet could be reached.
+   *
+   * The test seams apply to the DEFAULT cluster only. A fake broadcaster has
+   * no notion of which cluster it belongs to, and injecting one into two
+   * clusters would make "did this land?" ambiguous in exactly the way durable
+   * nonces exist to prevent.
+   */
+  /**
+   * Test seams, per cluster.
+   *
+   * The unsuffixed options belong to the DEFAULT cluster, which is what every
+   * single-cluster suite means by "the chain". `clusterOverrides` is for the
+   * suites that serve more than one and need each to behave differently —
+   * without it a fake injected into two clusters would make "did this land?"
+   * ambiguous in exactly the way durable nonces exist to prevent.
+   */
+  function overridesFor(cluster: Cluster): ClusterOverrides | undefined {
+    const explicit = options.clusterOverrides?.[cluster];
+    if (explicit) return explicit;
+    if (cluster !== config.chain.defaultCluster) return undefined;
+    return {
+      adapter: options.chainAdapter,
+      nonceManager: options.nonceManager,
+      broadcaster: options.broadcaster,
+    };
+  }
+
+  const clusters = new Map<Cluster, ClusterRuntime>();
+  for (const cluster of config.chain.clusters) {
+    const chain = config.chain.byCluster[cluster];
+    if (!chain) {
+      // Unreachable: config guarantees an entry for every served cluster.
+      throw new Error(`cluster ${cluster} is served but has no configuration`);
+    }
+
+    clusters.set(
+      cluster,
+      createClusterRuntime({
+        config,
+        chain,
+        db,
+        logger,
+        signer,
+        keyProvisioner,
+        metrics,
+        deadLetters,
+        approvalKey,
+        ...(overridesFor(cluster) ? { overrides: overridesFor(cluster)! } : {}),
+      }),
+    );
+  }
+
+  const defaultRuntime = clusters.get(config.chain.defaultCluster);
+  if (!defaultRuntime) throw new Error('the default cluster has no runtime');
+
+  /** The runtime for a request's cluster. Never a silent fallback. */
+  function runtimeFor(cluster: Cluster): ClusterRuntime {
+    const runtime = clusters.get(cluster);
+    if (!runtime) {
+      // A cluster this deployment does not serve is a client error, and it is
+      // reported as one by the plugin before any handler runs. Reaching here
+      // means the plugin was bypassed.
+      throw new Error(`cluster ${cluster} is not served by this deployment`);
+    }
+    return runtime;
+  }
 
   /**
    * Readiness covers every dependency a request can fail on
    * (master-prompt rule 170, prompt_phase4.md rule 223).
    *
-   * Built here rather than beside the signer because the chain adapter has to
-   * exist first. `solana` matters as much as the others: an unreachable RPC
-   * means deposits stop being detected and withdrawals cannot be broadcast,
-   * and without a probe that failure is invisible until someone notices the
-   * indexer has gone quiet.
+   * One probe PER CLUSTER: an unreachable devnet endpoint and an unreachable
+   * mainnet endpoint are different incidents with different urgency, and a
+   * single `solana` check would report the more optimistic of the two.
    */
+  /*
+   * Probed once, at boot. The role changes on deploy, not while someone is
+   * looking at a page, and probing per request would put the signing service
+   * on the path of an unauthenticated endpoint.
+   */
+  const signerRole = isDescribable(signer) ? await signer.describe() : undefined;
+
   const health = createHealthService(db, redis, [
-    { name: 'solana', check: () => chainAdapter.isHealthy() },
+    ...[...clusters.values()].map((runtime) => ({
+      name: `solana:${runtime.cluster}`,
+      check: () => runtime.adapter.isHealthy(),
+    })),
     ...(isHealthCheckable(signer) ? [{ name: 'mpc', check: () => signer.isHealthy() }] : []),
   ]);
 
   /**
-   * VERIFY THAT THE ENDPOINT SERVES THE NETWORK WE CLAIM (rule 172).
+   * VERIFY THAT EACH ENDPOINT SERVES THE CLUSTER WE CLAIM (rule 172).
    *
-   * `SOLANA_NETWORK` is a label. It is rendered on the deposit page as the
+   * A cluster name is a label. It is rendered on the deposit page as the
    * network the user must send on — and until this check existed, nothing tied
-   * it to `SOLANA_RPC_URL`. A deployment naming `mainnet-beta` while pointing
-   * at devnet would tell people to send real funds to an address the indexer
-   * watches on another cluster: the money is real, the credit never comes, and
-   * the interface said it was fine.
+   * it to the URL. A deployment naming `mainnet-beta` while pointing at devnet
+   * would tell people to send real funds to an address the indexer watches on
+   * another cluster: the money is real, the credit never comes, and the
+   * interface said it was fine.
    *
    * The genesis hash is the authoritative answer and works with any provider;
-   * hostname matching does not, because a custom RPC has an arbitrary
-   * hostname and that is precisely the case worth catching.
+   * hostname matching does not, because a custom RPC has an arbitrary hostname
+   * and that is precisely the case worth catching.
    *
    * `localnet` is skipped: a fresh validator generates a new genesis hash on
    * every reset, so there is nothing to compare against.
    */
-  const expectedGenesis = GENESIS_HASHES[config.chain.network];
-  if (expectedGenesis !== undefined) {
-    const actual = await chainAdapter.getNetworkIdentity();
+  for (const runtime of clusters.values()) {
+    const expectedGenesis = GENESIS_HASHES[runtime.cluster];
+    if (expectedGenesis === undefined) continue;
+
+    const actual = await runtime.adapter.getNetworkIdentity();
     if (actual !== expectedGenesis) {
       throw new Error(
-        `SOLANA_RPC_URL does not serve ${config.chain.network}: the endpoint reports genesis ` +
-          `${actual}, expected ${expectedGenesis}. Deposit addresses would be advertised for a ` +
-          'network nothing is watching.',
+        `the RPC endpoint for ${runtime.cluster} does not serve it: the endpoint reports ` +
+          `genesis ${actual}, expected ${expectedGenesis}. Deposit addresses would be ` +
+          'advertised for a network nothing is watching.',
       );
     }
     logger.info('chain network verified', {
       event: 'indexer.network_verified',
       outcome: 'success',
       targetType: 'chain',
-      targetId: config.chain.network,
+      targetId: runtime.cluster,
     });
   }
 
-  const custodyService = createCustodyService({
-    db,
-    // Phase 2 derives addresses only; no private key is stored (ADR-0005).
-    deriver: createSolanaAddressDeriver(Buffer.from(config.chain.depositSeed, 'base64')),
-    validator: createSolanaAddressValidator(),
-    chain: SOLANA_CHAIN_ID,
-    assets: config.chain.assets.keys,
-    logger,
-  });
-
-  const depositPipeline = createDepositPipeline({
-    db,
-    logger,
-    assets: config.chain.assets,
-    metrics,
-  });
-  const reconciliation = createReconciliationService({
-    db,
-    reader: chainAdapter,
-    chain: SOLANA_CHAIN_ID,
-    logger,
-    /**
-     * The treasury is platform-owned and was outside the Phase 3 comparison,
-     * which made every residual wrong by exactly its balance (rule 142).
-     * Custody tiers join this list as they acquire addresses (ADR-0018).
-     */
-    platformAddresses:
-      config.withdrawal.treasuryAddress !== undefined &&
-      config.withdrawal.treasuryAddress.trim() !== ''
-        ? [config.withdrawal.treasuryAddress]
-        : [],
-  });
-
   const reconciliationWorker = createReconciliationWorker({
-    run: () => reconciliation.run(),
+    // Every served cluster, one after another. A drift streak is counted
+    // across the whole run, because an operator wants one alert saying
+    // "reconciliation is drifting", not one per cluster per cycle.
+    run: async () => {
+      const reports = await Promise.all(
+        [...clusters.values()].map(async (runtime) => runtime.reconcile()),
+      );
+      return {
+        ...reports[0]!,
+        assets: reports.flatMap((report) => report.assets),
+        healthy: reports.every((report) => report.healthy),
+      };
+    },
     logger,
     consecutiveCyclesBeforeAlert: config.reconciliation.alertAfterCycles,
     intervalMs: config.reconciliation.intervalMs,
   });
 
-  // --- Withdrawals (Phase 3) ------------------------------------------------
-  const solanaRpc = createSolanaRpc({
-    endpoint: config.chain.rpcUrl,
-    commitment: config.chain.commitment,
-    requestTimeoutMs: config.chain.rpcTimeoutMs,
-    maxRetries: config.chain.rpcMaxRetries,
-  });
-
-  /**
-   * The mock refuses to construct when NODE_ENV=production, and config refuses
-   * SIGNER_KIND=mock there. Two independent guards, because a mock signature
-   * verifies against nothing and the failure would be silent.
-   */
-  const withdrawalService = createWithdrawalService({
-    db,
-    validator: createSolanaAddressValidator(),
-    chain: SOLANA_CHAIN_ID,
-    logger,
-    policy: {
-      // Every asset the platform will credit is an asset it must be able to
-      // reason about withdrawing (ADR-0016).
-      supportedAssets: config.chain.assets.keys,
-      assetLimits: Object.fromEntries(
-        Object.entries(config.risk.assetLimits).map(([asset, limits]) => [
-          asset,
-          {
-            perTransactionLimit: BigInt(limits.perTransactionLimit),
-            dailyLimit: BigInt(limits.dailyLimit),
-            manualReviewAbove: BigInt(limits.manualReviewAbove),
-          },
-        ]),
-      ),
-      perTransactionLimit: BigInt(config.risk.perTransactionLimit),
-      dailyLimit: BigInt(config.risk.dailyLimit),
-      velocityWindowMinutes: config.risk.velocityWindowMinutes,
-      velocityMaxCount: config.risk.velocityMaxCount,
-      manualReviewAbove: BigInt(config.risk.manualReviewAbove),
-      reviewNewDestinations: config.risk.reviewNewDestinations,
-      knownDestinationWindowDays: config.risk.knownDestinationWindowDays,
-    },
-  });
-
-  const withdrawalWorkers = createWithdrawalWorkers({
-    db,
-    signer,
-    nonces: options.nonceManager ?? createNonceManager(solanaRpc),
-    broadcaster: options.broadcaster ?? createWithdrawalBroadcaster(solanaRpc),
-    logger,
-    chain: SOLANA_CHAIN_ID,
-    treasuryAddress: config.withdrawal.treasuryAddress ?? '',
-    keyRefId: config.withdrawal.signerKeyRef,
-    budgets: config.withdrawal.budgets,
-    batchSize: config.withdrawal.workerBatchSize,
-    ...(config.withdrawal.mpc.approvalPrivateKey.trim() !== ''
-      ? {
-          approvalKey: createPrivateKey(
-            Buffer.from(config.withdrawal.mpc.approvalPrivateKey, 'base64').toString('utf8'),
-          ),
-        }
-      : {}),
-    deadLetters,
-    metrics,
-    assets: config.chain.assets,
-    chainReader: chainAdapter,
-  });
-
-  /**
-   * Display decimals for every allowlisted asset (ADR-0016).
-   *
-   * Built from the registry, not hardcoded to SOL. A `{ SOL: 9 }` map means a
-   * token falls through to `?? 0` and its amount renders as raw base units —
-   * `1000000` where the user expects `1.00 USDC`. Off by six orders of
-   * magnitude, in an interface whose whole job is telling someone how much
-   * money they have.
-   *
-   * These are DISPLAY metadata and reach no arithmetic (master-prompt rule
-   * 115); the ledger is integer base units throughout.
-   */
-  const assetDecimals = Object.fromEntries(
-    config.chain.assets.keys.map((asset) => [asset, config.chain.assets.decimalsOf(asset)]),
-  );
-
   const withdrawalControllers = createWithdrawalControllers({
     db,
-    withdrawals: withdrawalService,
-    decimals: assetDecimals,
+    runtimeFor,
     bootstrapOperatorUserIds: config.withdrawal.operatorUserIds,
   });
 
-  const custodyControllers = createCustodyControllers({
-    db,
-    custody: custodyService,
-    chain: SOLANA_CHAIN_ID,
-    network: config.chain.network,
-    nativeAsset: NATIVE_ASSET,
-    decimals: assetDecimals,
-  });
+  const custodyControllers = createCustodyControllers({ db, runtimeFor });
+
+  const portfolioControllers = createPortfolioControllers({ runtimeFor });
 
   const controllers = createAuthControllers({
     app: appDeps,
@@ -467,6 +500,13 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   // Order matters: context first so everything downstream is correlated
   // (rule 148), then the error handler so even plugin failures are formatted.
   await app.register(requestContextPlugin, { logger });
+  // Before the error handler is irrelevant; before any route matters — the
+  // cluster is part of a request's meaning, and a handler that ran without one
+  // would answer for the default and look correct.
+  await app.register(clusterContextPlugin, {
+    served: config.chain.clusters,
+    defaultCluster: config.chain.defaultCluster,
+  });
   registerErrorHandler(app, logger);
   await app.register(securityPlugin, {
     webOrigin: config.http.webOrigin,
@@ -493,18 +533,44 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   await app.register(
     createHealthRoutes(health, {
       signing: {
-        // What it IS, read from configuration rather than asserted in copy.
-        mode: config.withdrawal.signerKind === 'real' ? 'single-key-mpc' : 'mock',
-        // False for both. `single-key-mpc` gives a process boundary and
-        // authorization verification, and none of the key-compromise
-        // resistance threshold signing exists for (ADR-0015). Saying
-        // otherwise would be the exact overstatement this endpoint prevents.
-        thresholdProtected: false,
+        /*
+         * What it IS, PROBED from the service rather than read from a flag.
+         *
+         * This said `single-key-mpc` while the deployment was running 3-of-5
+         * — under-claiming, which is the safe direction, but still a false
+         * statement about custody in the one place users are told about it.
+         * Configuration cannot answer it: `SIGNER_KIND=real` is true of both
+         * a single-key service and a coordinator.
+         *
+         * An unreachable service leaves `signerRole` undefined and the
+         * WEAKER claim stands. A platform that cannot say what its signing is
+         * must not make the stronger statement.
+         */
+        mode:
+          config.withdrawal.signerKind !== 'real'
+            ? 'mock'
+            : signerRole === 'coordinator'
+              ? 'threshold-mpc'
+              : 'single-key-mpc',
+        thresholdProtected: signerRole === 'coordinator',
       },
+      clusters: {
+        served: [...config.chain.clusters],
+        default: config.chain.defaultCluster,
+      },
+      /**
+       * Every asset on every served cluster, cluster-qualified.
+       *
+       * The union rather than the default cluster's list: this endpoint
+       * describes the DEPLOYMENT, and a client choosing a cluster in the
+       * switcher needs to know what it will find there before switching.
+       */
       assets: {
-        supported: [...config.chain.assets.keys],
+        supported: [...clusters.values()].flatMap((runtime) => [...runtime.assets.keys]),
         labels: Object.fromEntries(
-          config.chain.assets.keys.map((key) => [key, config.chain.assets.symbolOf(key)]),
+          [...clusters.values()].flatMap((runtime) =>
+            runtime.assets.keys.map((key) => [key, runtime.assets.symbolOf(key)]),
+          ),
         ),
       },
       auditedForProduction: false,
@@ -534,6 +600,13 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
       controllers: custodyControllers,
       sessionGuard: sessionGuard as never,
       csrfGuard: csrfGuard as never,
+    }),
+  );
+
+  await app.register(
+    createPortfolioRoutes({
+      controllers: portfolioControllers,
+      sessionGuard: sessionGuard as never,
     }),
   );
 
@@ -570,51 +643,67 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
        * be a parallel set of bugs (ADR-0017's argument, applied to jobs).
        */
       retryHandler: async (_queue, reference) => {
-        await withdrawalWorkers.retry(reference);
+        // A dead-lettered job names a withdrawal, not a cluster, so the retry
+        // is offered to every cluster's workers. Each one claims by state and
+        // by `chain`, so exactly the cluster that owns the withdrawal acts and
+        // the rest find nothing.
+        for (const runtime of clusters.values()) {
+          await runtime.withdrawalWorkers.retry(reference);
+        }
       },
     }),
   );
 
   // --- Workers --------------------------------------------------------------
-  const indexer = createIndexer({
+  //
+  // One indexer and one set of withdrawal workers PER CLUSTER. They are not
+  // parameterised by cluster: each holds its own adapter, its own nonce pool
+  // and its own cursors, and the `chain` value they claim rows by is what
+  // keeps two clusters' work from colliding in one database.
+
+  /*
+   * The DEFAULT cluster's workers, exposed for the test suite and for the
+   * operator surfaces that predate clusters.
+   *
+   * Named `withdrawalWorkers` rather than `defaultWithdrawalWorkers` because
+   * that is what it has always been from outside; what changed is that it is
+   * now one of several.
+   */
+  /*
+   * ONE pricer for the whole process, not one per cluster.
+   *
+   * A price is a fact about a market, not about a chain: devnet USDC and
+   * mainnet USDC are the same market, and two workers polling separately would
+   * write ticks that differ by whatever moved between two HTTP calls. Two
+   * charts of the same asset disagreeing looks like a bug in the ledger.
+   */
+  const pricer = createPricer({
     db,
-    adapter: chainAdapter,
-    pipeline: depositPipeline,
     logger,
-    /**
-     * Where to look for each allowlisted mint (ADR-0016).
-     *
-     * A token transfer never touches the owner's address, so polling the
-     * deposit address alone finds nothing — verified against a real validator.
-     * Each derived token account is polled separately, with its own cursor.
-     *
-     * Derivation lives HERE, in the composition root, because it is
-     * chain-specific and the indexer must not know what a mint is (rule 25).
-     * Each scanned account gets its own cursor row, keyed on the account
-     * itself — sharing one with the deposit address would let a SOL transfer
-     * advance past unseen token transfers, silently.
-     */
-    tokenAccounts: async (address) =>
-      config.chain.assets.tokens.map((token) => ({
-        address: deriveAssociatedTokenAddress(address.address, token.mint),
-      })),
-    options: {
-      chain: SOLANA_CHAIN_ID,
-      pollIntervalMs: config.indexer.pollIntervalMs,
-      pageSize: config.indexer.pageSize,
-      maxAddressesPerCycle: config.indexer.maxAddressesPerCycle,
-    },
+    source: buildPriceSource(config),
+    clusters: new Map([...clusters].map(([cluster, runtime]) => [cluster, runtime.assets])),
+    intervalMs: config.prices.pollIntervalMs,
   });
 
-  app.decorate('indexer', indexer);
-  app.decorate('withdrawalWorkers', withdrawalWorkers);
+  app.decorate('pricer', pricer);
+  app.decorate('indexer', defaultRuntime.indexer);
+  app.decorate('withdrawalWorkers', defaultRuntime.withdrawalWorkers);
+  app.decorate('clusters', clusters);
   app.decorate('signer', signer);
-  app.decorate('reconcile', () => reconciliation.run());
+  app.decorate('reconcile', () => defaultRuntime.reconcile());
   app.decorate('reconciliationWorker', reconciliationWorker);
+
+  // Tests call `runOnce()` by hand so a valuation is a fixed number rather
+  // than whatever the market did during the assertion.
+  if ((options.startPricer ?? config.prices.source !== 'none') && config.prices.source !== 'none') {
+    pricer.start();
+  }
 
   // Tests drive `runOnce()` by hand; production runs it on a timer.
   const shouldStart = options.startIndexer ?? config.indexer.enabled;
-  if (shouldStart) indexer.start();
+  if (shouldStart) {
+    for (const runtime of clusters.values()) runtime.indexer.start();
+  }
 
   // The withdrawal workers run on their own timer in production. Tests call
   // `runAllCycles()` so "what happened after N cycles" is answerable.
@@ -623,7 +712,9 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   if (runWorkers) {
     const tick = async (): Promise<void> => {
       try {
-        await withdrawalWorkers.runAllCycles();
+        for (const runtime of clusters.values()) {
+          await runtime.withdrawalWorkers.runAllCycles();
+        }
       } catch (error) {
         logger.error('withdrawal worker cycle failed', {
           errorName: error instanceof Error ? error.name : 'unknown',
@@ -644,8 +735,9 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     // Workers stop first so no cycle is mid-transaction when the connection
     // closes.
     if (withdrawalTimer) clearTimeout(withdrawalTimer);
+    pricer.stop();
     reconciliationWorker.stop();
-    await indexer.stop();
+    await Promise.all([...clusters.values()].map(async (runtime) => runtime.indexer.stop()));
     await db.$disconnect();
     redis.disconnect();
   });

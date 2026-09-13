@@ -1,4 +1,11 @@
-import { chainAssets, houseFees, houseRent, userAvailable, userLocked } from './accounts.js';
+import {
+  chainAssets,
+  houseChainAssets,
+  houseFees,
+  houseRent,
+  userAvailable,
+  userLocked,
+} from './accounts.js';
 import { isNegative, isZero, type Amount } from './amount.js';
 import { credit, debit, type LedgerTransaction } from './entries.js';
 import { InvalidEntryError } from './errors.js';
@@ -61,7 +68,10 @@ export function postDeposit(input: DepositPosting): LedgerTransaction {
     throw new InvalidEntryError('deposit_amount_not_positive', { depositId: input.depositId });
   }
 
-  const entries = [debit(chainAssets(input.asset), input.asset, input.amount)];
+  // The user's OWN address received this (ADR-0020). Both sides of a deposit
+  // now name the same user, which is what makes the per-user reconciliation
+  // invariant expressible at all.
+  const entries = [debit(chainAssets(input.userId, input.asset), input.asset, input.amount)];
 
   if (!isZero(creditable)) {
     entries.push(credit(userAvailable(input.userId, input.asset), input.asset, creditable));
@@ -178,7 +188,8 @@ export function postWithdrawalSettlement(input: WithdrawalSettlePosting): Ledger
 
   const entries = [
     debit(userLocked(input.userId, input.asset), input.asset, input.amount),
-    credit(chainAssets(input.asset), input.asset, input.amount),
+    // Out of the user's OWN segregated address, not a pooled vault.
+    credit(chainAssets(input.userId, input.asset), input.asset, input.amount),
   ];
 
   if (!isZero(fee)) {
@@ -186,8 +197,16 @@ export function postWithdrawalSettlement(input: WithdrawalSettlePosting): Ledger
     // entries rather than adjusting the amounts above, so the user-facing
     // movement and the cost of making it stay separately visible.
     entries.push(
+      /*
+       * The fee is the HOUSE's, and leaves the HOUSE's wallet.
+       *
+       * Under segregation the fee payer is deliberately not the user: a
+       * token-only balance would otherwise be unspendable, because the user
+       * has no SOL at their address to pay with. Charging it to the user's
+       * `chain_assets` would also mean debiting an address the fee never left.
+       */
       debit(houseFees(input.asset), input.asset, fee),
-      credit(chainAssets(input.asset), input.asset, fee),
+      credit(houseChainAssets(input.asset), input.asset, fee),
     );
   }
 
@@ -235,7 +254,7 @@ export function postHouseFunding(input: {
     referenceType: 'house_funding',
     referenceId: input.reference,
     entries: [
-      debit(chainAssets(input.asset), input.asset, input.amount),
+      debit(houseChainAssets(input.asset), input.asset, input.amount),
       credit(houseFees(input.asset), input.asset, input.amount),
     ],
   });
@@ -260,7 +279,8 @@ export function postNonceAccountRent(input: {
     referenceType: 'nonce_account',
     referenceId: input.nonceAccountId,
     entries: [
-      debit(chainAssets(input.asset), input.asset, input.amount),
+      // Nonce accounts are house infrastructure, not a user's address.
+      debit(houseChainAssets(input.asset), input.asset, input.amount),
       credit(houseRent(input.asset), input.asset, input.amount),
     ],
   });
@@ -314,7 +334,7 @@ export function postSweepFee(input: {
       // The mirror of postHouseFunding: the prepaid balance is consumed, and
       // the on-chain total falls by what the validator took.
       debit(houseFees(input.asset), input.asset, input.amount),
-      credit(chainAssets(input.asset), input.asset, input.amount),
+      credit(houseChainAssets(input.asset), input.asset, input.amount),
     ],
   });
 }
@@ -333,6 +353,20 @@ export function postSweepFee(input: {
  */
 export function postTokenAccountRent(input: {
   readonly reference: string;
+  /**
+   * Whose account this rent created (ADR-0020).
+   *
+   * The lamports END UP in the user's token account — they are on-chain assets
+   * sitting at an address attributed to that user, so per-user reconciliation
+   * must expect them there. But the user never deposited them and can never
+   * withdraw them, which is what the `house_rent` credit records.
+   *
+   * Getting this wrong in either direction is a real error: attributing the
+   * rent to the house makes every user's on-chain balance read high against
+   * their ledger, and crediting it to the user creates a liability the platform
+   * cannot discharge.
+   */
+  readonly ownerId: string;
   /** The NATIVE asset. Never the mint. */
   readonly nativeAsset: string;
   readonly amount: Amount;
@@ -344,7 +378,7 @@ export function postTokenAccountRent(input: {
     referenceType: 'token_account',
     referenceId: input.reference,
     entries: [
-      debit(chainAssets(input.nativeAsset), input.nativeAsset, input.amount),
+      debit(chainAssets(input.ownerId, input.nativeAsset), input.nativeAsset, input.amount),
       credit(houseRent(input.nativeAsset), input.nativeAsset, input.amount),
     ],
   });

@@ -13,7 +13,8 @@
 import { loadApiConfigOrExit } from '@wallet/config';
 import { createLogger } from '@wallet/logger';
 import { createPrismaClient } from '@wallet/db';
-import { createSolanaAdapter, NATIVE_DECIMALS, SOLANA_CHAIN_ID } from '@wallet/solana';
+import { createSolanaAdapter, NATIVE_DECIMALS, solanaChainId } from '@wallet/solana';
+import type { Cluster } from '@wallet/types';
 import { createReconciliationService } from '../services/reconciliation.service.js';
 
 const config = loadApiConfigOrExit();
@@ -30,8 +31,28 @@ function format(baseUnits: string, decimals: number): string {
 
 async function main(): Promise<void> {
   const db = createPrismaClient({ url: config.database.url });
+
+  /*
+   * The cluster comes from `--cluster`, defaulting to the configured default
+   * (ADR-0021). An operator reconciling "the wallet" on a multi-cluster
+   * deployment must be told which books they are looking at, because a devnet
+   * residual and a mainnet residual demand very different responses.
+   */
+  const requested = process.argv.find((argument) => argument.startsWith('--cluster='));
+  const cluster = (requested?.split('=')[1] ?? config.chain.defaultCluster) as Cluster;
+
+  const chain = config.chain.byCluster[cluster];
+  if (!chain) {
+    process.stderr.write(
+      `\n  ✗ this deployment does not serve ${cluster}; it serves ` +
+        `${config.chain.clusters.join(', ')}\n\n`,
+    );
+    process.exit(1);
+  }
+
   const adapter = createSolanaAdapter({
-    endpoint: config.chain.rpcUrl,
+    cluster,
+    endpoint: chain.rpcUrl,
     commitment: config.chain.commitment,
     requestTimeoutMs: config.chain.rpcTimeoutMs,
     maxRetries: config.chain.rpcMaxRetries,
@@ -41,7 +62,8 @@ async function main(): Promise<void> {
   const reconciliation = createReconciliationService({
     db,
     reader: adapter,
-    chain: SOLANA_CHAIN_ID,
+    chain: solanaChainId(cluster),
+    cluster,
     logger,
   });
 

@@ -2,7 +2,34 @@
  * Solana-specific constants, confined to this package (prompt_phase2.md rule 101).
  */
 
+import { chainId, ledgerAssetKey, type Cluster, type LedgerAssetKey } from '@wallet/types';
+
+/**
+ * The chain FAMILY.
+ *
+ * Not what goes in a `chain` column any more: rows are keyed by cluster
+ * (`solana:devnet`), because devnet and mainnet are different chains for every
+ * purpose this system has — different addresses, different nonces, different
+ * indexer cursors (ADR-0021). Use `solanaChainId(cluster)` for storage; this
+ * constant remains for the places that genuinely mean "Solana, any cluster".
+ */
 export const SOLANA_CHAIN_ID = 'solana';
+
+/** The `chain` value stored on addresses, deposits, withdrawals and nonces. */
+export function solanaChainId(cluster: Cluster): string {
+  return chainId(cluster);
+}
+
+/**
+ * The ledger asset key for native SOL on a cluster — `devnet:SOL`.
+ *
+ * This package is where the cluster enters the asset key, because it is the
+ * only package that knows what a Solana cluster is. Everything above it treats
+ * the key as opaque, which is what keeps the ledger chain-independent.
+ */
+export function nativeAssetKey(cluster: Cluster): LedgerAssetKey {
+  return ledgerAssetKey(cluster, NATIVE_ASSET);
+}
 
 /** The native asset symbol used as the ledger's asset key. */
 export const NATIVE_ASSET = 'SOL';

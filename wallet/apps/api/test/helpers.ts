@@ -2,12 +2,34 @@ import { Redis } from 'ioredis';
 import type { FastifyInstance } from 'fastify';
 import { loadApiConfigOrExit, parseEnv, toApiConfig } from '@wallet/config';
 import type { ChainAdapter, Signer } from '@wallet/blockchain';
-import type { NonceManager, WithdrawalBroadcaster } from '@wallet/solana';
+import {
+  NATIVE_ASSET,
+  NATIVE_DECIMALS,
+  solanaChainId,
+  type NonceManager,
+  type WithdrawalBroadcaster,
+} from '@wallet/solana';
+import { createAssetRegistry } from '@wallet/types';
+import { ledgerAssetKey, type Cluster } from '@wallet/types';
 import { createPrismaClient, newId } from '@wallet/db';
 import { createCapturingLogger, type CapturedLogger } from '@wallet/logger';
-import { buildServer } from '../src/server.js';
+import { buildServer, type BuildServerOptions } from '../src/server.js';
 
 export const WEB_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:3000';
+
+/**
+ * The cluster the suite runs against (ADR-0021).
+ *
+ * Read from the same variable the server reads, so a fixture written directly
+ * to the database lands in the cluster the API will look in. Hardcoding
+ * `localnet` here would make the suite pass while the server looked elsewhere.
+ */
+export const TEST_CLUSTER = (process.env.SOLANA_NETWORK ?? 'localnet') as Cluster;
+export const TEST_CHAIN = solanaChainId(TEST_CLUSTER);
+
+/** A ledger asset key on the test cluster: `localnet:SOL`. */
+export const assetKey = (asset: string): string => ledgerAssetKey(TEST_CLUSTER, asset);
+export const SOL_KEY = assetKey(NATIVE_ASSET);
 
 export interface Harness {
   app: FastifyInstance;
@@ -27,6 +49,32 @@ export interface HarnessOptions {
   nonceManager?: NonceManager;
   broadcaster?: WithdrawalBroadcaster;
   operatorUserIds?: string[];
+  /**
+   * Segregated custody (ADR-0020): per-user addresses and per-user keys.
+   *
+   * An override rather than an environment variable so one suite can exercise
+   * the segregated path while the rest of the suite keeps exercising the
+   * omnibus one. Both models exist in the code and both need testing.
+   */
+  segregatedCustody?: boolean;
+  /**
+   * Serve a SECOND cluster alongside the default one (ADR-0021).
+   *
+   * Built here rather than from environment variables so one suite can be
+   * multi-cluster while the rest stay single-cluster. Its adapter must be
+   * supplied through `clusterOverrides`: the real one would be pointed at a
+   * localnet validator whose genesis hash does not match the cluster it claims
+   * to be, and the boot-time check would refuse to start — correctly.
+   */
+  extraCluster?: Cluster;
+  clusterOverrides?: BuildServerOptions['clusterOverrides'];
+  /**
+   * Leave the price worker stopped.
+   *
+   * A suite that asserts on a valuation needs the prices it wrote, not
+   * whatever the live market did during the assertion.
+   */
+  startPricer?: boolean;
 }
 
 export async function startHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -35,13 +83,43 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
   const db = createPrismaClient({ url: config.database.url });
   const redis = new Redis(config.redis.url, { maxRetriesPerRequest: 3 });
 
-  const effectiveConfig =
-    options.operatorUserIds === undefined
-      ? config
-      : {
-          ...config,
-          withdrawal: { ...config.withdrawal, operatorUserIds: options.operatorUserIds },
-        };
+  const extra = options.extraCluster;
+  const chainConfig = extra
+    ? {
+        ...config.chain,
+        clusters: [...config.chain.clusters, extra],
+        byCluster: {
+          ...config.chain.byCluster,
+          [extra]: {
+            cluster: extra,
+            // The same endpoint. What makes the two clusters distinct in this
+            // suite is the adapter injected for each, not the URL — and the
+            // isolation under test is in the ledger and the routing, not in
+            // the transport.
+            rpcUrl: config.chain.rpcUrl,
+            assets: createAssetRegistry({
+              cluster: extra,
+              nativeDecimals: NATIVE_DECIMALS,
+              tokens: [],
+            }),
+          },
+        },
+      }
+    : config.chain;
+
+  const effectiveConfig = {
+    ...config,
+    chain: chainConfig,
+    withdrawal: {
+      ...config.withdrawal,
+      ...(options.operatorUserIds === undefined
+        ? {}
+        : { operatorUserIds: options.operatorUserIds }),
+      ...(options.segregatedCustody === undefined
+        ? {}
+        : { segregatedCustody: options.segregatedCustody }),
+    },
+  };
 
   const app = await buildServer({
     config: effectiveConfig,
@@ -63,9 +141,13 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     ...(options.signer !== undefined && !usesConfiguredSigner() ? { signer: options.signer } : {}),
     ...(options.nonceManager !== undefined ? { nonceManager: options.nonceManager } : {}),
     ...(options.broadcaster !== undefined ? { broadcaster: options.broadcaster } : {}),
+    ...(options.clusterOverrides !== undefined
+      ? { clusterOverrides: options.clusterOverrides }
+      : {}),
     // Tests drive the withdrawal workers by hand, so "what happened after N
     // cycles" is answerable rather than a race with a timer.
     startWithdrawalWorkers: false,
+    startPricer: options.startPricer ?? false,
     // Tests drive `runOnce()` by hand. A timer-driven indexer would poll in the
     // background and make "what happened after N cycles" unanswerable.
     startIndexer: false,
@@ -222,8 +304,11 @@ export async function creditUser(
   const { createLedgerRepository, withTransaction, newId } = await import('@wallet/db');
   const ledger = createLedgerRepository(harness.app.appDeps.db);
 
+  // Segregated: the funds sit at THIS user's own address (ADR-0020), so the
+  // test fixture must post them there. Crediting the pooled account would make
+  // every per-user reconciliation test read zero and pass for the wrong reason.
   await ledger.ensureAccounts([
-    { ownerId: null, asset, type: 'chain_assets' },
+    { ownerId: userId, asset, type: 'chain_assets' },
     { ownerId: userId, asset, type: 'user_available' },
   ]);
 
@@ -235,7 +320,7 @@ export async function creditUser(
         referenceId: newId(),
         entries: [
           {
-            account: { ownerId: null, asset, type: 'chain_assets' },
+            account: { ownerId: userId, asset, type: 'chain_assets' },
             asset,
             amount,
             direction: 'debit',
@@ -251,6 +336,68 @@ export async function creditUser(
       tx,
     ),
   );
+}
+
+/**
+ * Credit a user AT A CHOSEN INSTANT.
+ *
+ * `creditUser` stamps `now()`, which is correct for every test about a
+ * balance and useless for one about history: a chart of the last 24 hours
+ * needs entries that are actually 24 hours old. Written through raw SQL
+ * because the repository deliberately offers no way to backdate an entry —
+ * that is a fixture's privilege, not the application's.
+ *
+ * Still a BALANCED transaction: the deferred trigger checks it at commit like
+ * any other, so a fixture cannot write books that do not balance.
+ */
+export async function creditUserAt(
+  harness: Harness,
+  userId: string,
+  asset: string,
+  amount: string,
+  at: Date,
+): Promise<void> {
+  const { createLedgerRepository, newId } = await import('@wallet/db');
+  const ledger = createLedgerRepository(harness.app.appDeps.db);
+
+  await ledger.ensureAccounts([
+    { ownerId: userId, asset, type: 'chain_assets' },
+    { ownerId: userId, asset, type: 'user_available' },
+  ]);
+
+  const db = harness.app.appDeps.db;
+  const transactionId = newId();
+
+  await db.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(
+      `INSERT INTO ledger_transactions (id, kind, reference_type, reference_id, created_at)
+       VALUES ($1::uuid, 'deposit'::"LedgerTransactionKind", 'test-backdated', $2, $3)`,
+      transactionId,
+      newId(),
+      at,
+    );
+
+    for (const [type, direction] of [
+      ['chain_assets', 'debit'],
+      ['user_available', 'credit'],
+    ] as const) {
+      await tx.$executeRawUnsafe(
+        `INSERT INTO ledger_entries
+           (id, transaction_id, account_id, asset, amount, direction, created_at)
+         SELECT $1::uuid, $2::uuid, a.id, $3, $4::numeric, $5::"EntryDirection", $6
+           FROM ledger_accounts a
+          WHERE a.owner_id = $7::uuid AND a.asset = $3 AND a.type = $8::"LedgerAccountType"`,
+        newId(),
+        transactionId,
+        asset,
+        amount,
+        direction,
+        at,
+        userId,
+        type,
+      );
+    }
+  });
 }
 
 /** Fund the house so network fees are not paid from customer money. */
@@ -340,7 +487,7 @@ export async function seedNonceAccounts(
   for (let i = 0; i < count; i += 1) {
     const address = Keypair.generate().publicKey.toBase58();
     const nonce = Keypair.generate().publicKey.toBase58();
-    await repo.create({ chain: 'solana', address, currentNonce: nonce });
+    await repo.create({ chain: TEST_CHAIN, address, currentNonce: nonce });
     nonces.provision(address, nonce);
     addresses.push(address);
   }
@@ -366,12 +513,13 @@ export async function markDestinationKnown(
   await harness.app.appDeps.db.$executeRawUnsafe(
     `INSERT INTO withdrawals
        (id, user_id, chain, asset, amount, destination, status, idempotency_key, created_at, updated_at, settled_at)
-     VALUES (gen_random_uuid(), $1::uuid, 'solana', $2, 1, $3,
+     VALUES (gen_random_uuid(), $1::uuid, $5, $2, 1, $3,
              'SETTLED'::"WithdrawalStatus", $4, now() - interval '1 day',
              now() - interval '1 day', now() - interval '1 day')`,
     userId,
     asset,
     destination,
     `history-${newId()}`,
+    TEST_CHAIN,
   );
 }

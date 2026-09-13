@@ -5,15 +5,19 @@ export {
   derivationPathForIndex,
   NATIVE_ASSET,
   NATIVE_DECIMALS,
+  nativeAssetKey,
   SOLANA_CHAIN_ID,
+  solanaChainId,
 } from './constants.js';
 export { createSolanaAddressDeriver, createSolanaAddressValidator } from './address.js';
 export {
   createSolanaRpc,
+  createSolanaRpcPool,
   toConfirmation,
   toFinality,
   type RpcOptions,
   type SolanaRpc,
+  type SolanaRpcPool,
 } from './rpc.js';
 export { parseTransfers, type ParseOptions } from './transfers.js';
 export { createSolanaAdapter, type SolanaAdapterOptions } from './adapter.js';
@@ -29,8 +33,10 @@ export {
 } from './nonce.js';
 export {
   attachSignature,
+  attachSignatures,
   buildWithdrawalTransaction,
   createWithdrawalBroadcaster,
+  type AttachedSignature,
   type BroadcastOutcome,
   type BuildWithdrawalInput,
   type UnsignedWithdrawal,

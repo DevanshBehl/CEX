@@ -10,8 +10,9 @@ import type {
   TransferPage,
   TxReference,
 } from '@wallet/blockchain';
+import { parseLedgerAssetKey, type Cluster } from '@wallet/types';
 import { createSolanaAddressValidator } from './address.js';
-import { NATIVE_ASSET, SOLANA_CHAIN_ID } from './constants.js';
+import { NATIVE_ASSET, solanaChainId } from './constants.js';
 import {
   createSolanaRpc,
   toConfirmation,
@@ -25,6 +26,15 @@ import { parseTokenTransfers } from './token.js';
 export interface SolanaAdapterOptions extends RpcOptions {
   /** Signatures fetched per page. Bounded by the RPC at 1000. */
   readonly pageSize: number;
+  /**
+   * Which cluster this adapter reads.
+   *
+   * One adapter per cluster, never one adapter asked which cluster to use:
+   * the endpoint, the genesis hash, the asset keys it emits and the `chain`
+   * value it stamps all belong to the same cluster, and a parameter would let
+   * three of them agree while the fourth did not.
+   */
+  readonly cluster: Cluster;
 }
 
 /**
@@ -35,8 +45,30 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
   const rpc = createSolanaRpc(options);
   const validator = createSolanaAddressValidator();
 
+  const chain = solanaChainId(options.cluster);
+
+  /**
+   * Reject a key from another cluster rather than answering for this one.
+   *
+   * The failure this prevents: reconciliation reading a mainnet position for a
+   * devnet account key and reporting a shortfall — or worse, a match.
+   */
+  function nativeAmountKey(assetKey: string): void {
+    const parsed = parseLedgerAssetKey(assetKey);
+    if (parsed.cluster !== options.cluster) {
+      throw new ChainError(
+        `asset ${assetKey} belongs to ${parsed.cluster}; this adapter serves ${options.cluster}`,
+      );
+    }
+    if (parsed.asset !== NATIVE_ASSET) {
+      // ADR-0008: SOL only for balance reads. Failing loudly beats returning
+      // zero, which reconciliation would read as a shortfall.
+      throw new ChainError(`Unsupported asset for Solana in this phase: ${assetKey}`);
+    }
+  }
+
   return {
-    chain: SOLANA_CHAIN_ID,
+    chain,
     validator,
 
     /**
@@ -111,7 +143,11 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
         );
         if (!parsed) continue;
         transfers.push(
-          ...parseTransfers(parsed, { watchedAddresses, txReference: entry.signature }),
+          ...parseTransfers(parsed, {
+            watchedAddresses,
+            txReference: entry.signature,
+            cluster: options.cluster,
+          }),
         );
         /**
          * Token movements come from the same transaction and the same watched
@@ -132,6 +168,7 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
           ...parseTokenTransfers(parsed, {
             watchedOwners,
             txReference: entry.signature,
+            cluster: options.cluster,
           }),
         );
       }
@@ -151,11 +188,7 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
     },
 
     async getBalance(address: Address, asset: string): Promise<string> {
-      if (asset !== NATIVE_ASSET) {
-        // ADR-0008: SOL only in Phase 2. Failing loudly beats returning zero,
-        // which reconciliation would read as a shortfall.
-        throw new ChainError(`Unsupported asset for Solana in this phase: ${asset}`);
-      }
+      nativeAmountKey(asset);
       const lamports = await rpc.call('getBalance', (connection) =>
         connection.getBalance(toPublicKey(address), options.commitment),
       );
@@ -188,9 +221,7 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
      * the one number this phase must not get wrong.
      */
     async getMinimumAccountBalance(asset: string): Promise<string> {
-      if (asset !== NATIVE_ASSET) {
-        throw new ChainError(`Unsupported asset for Solana in this phase: ${asset}`);
-      }
+      nativeAmountKey(asset);
       const lamports = await rpc.call('getMinimumBalanceForRentExemption', (connection) =>
         // 0 bytes of data: a plain keypair account, which is what a deposit
         // address is.

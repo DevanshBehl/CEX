@@ -14,7 +14,17 @@ import { toPublicKey } from './rpc.js';
  */
 
 export interface BuildWithdrawalInput {
+  /** The account the funds LEAVE. Under segregation, the user's own address. */
   readonly from: string;
+  /**
+   * Who pays the network fee. Defaults to `from`.
+   *
+   * The house pays it for a user withdrawal (ADR-0020 §3), so a user needs no
+   * SOL to move a token — which is also the only way a token-only balance is
+   * spendable at all. When this differs from `from` the transaction has TWO
+   * signers and needs two signatures before it can be broadcast.
+   */
+  readonly feePayer?: string | undefined;
   readonly to: string;
   /** Base units, as a decimal string. Never a number. */
   readonly lamports: string;
@@ -30,6 +40,15 @@ export interface UnsignedWithdrawal {
   /** Serialized for reconstruction once a signature exists. */
   readonly transaction: Transaction;
   readonly nonce: string;
+  /**
+   * Every address that must sign, in no particular order.
+   *
+   * Returned rather than inferred by the caller: the set depends on the fee
+   * payer, on whether an ATA is being created, and on the instruction layout —
+   * all of which live here. A caller that guessed would produce a transaction
+   * the network rejects only after a nonce had been consumed.
+   */
+  readonly signers: readonly string[];
 }
 
 /**
@@ -51,8 +70,12 @@ export function buildWithdrawalTransaction(input: BuildWithdrawalInput): Unsigne
     throw new ChainError('Withdrawal amount exceeds the SDK precision ceiling');
   }
 
+  const feePayer = input.feePayer ?? input.from;
+
   const transaction = new Transaction({
-    feePayer: toPublicKey(input.from),
+    // The fee payer is the first signer of the message, and is charged the fee
+    // regardless of which account the transfer debits.
+    feePayer: toPublicKey(feePayer),
     nonceInfo: {
       nonce: input.nonce,
       nonceInstruction: SystemProgram.nonceAdvance({
@@ -74,6 +97,9 @@ export function buildWithdrawalTransaction(input: BuildWithdrawalInput): Unsigne
     message: new Uint8Array(transaction.serializeMessage()),
     transaction,
     nonce: input.nonce,
+    // The nonce authority signs too. It is the house in every current
+    // deployment, and deduplication keeps that from being stated twice.
+    signers: [...new Set([feePayer, input.from, input.nonceAuthority])],
   };
 }
 
@@ -88,14 +114,49 @@ export function attachSignature(
   signer: string,
   signature: Uint8Array,
 ): Uint8Array {
-  if (signature.length !== 64) {
-    throw new ChainError(`Signature must be 64 bytes, received ${signature.length}`);
-  }
+  return attachSignatures(unsigned, [{ signer, signature }]);
+}
 
+export interface AttachedSignature {
+  /** The address the signature belongs to, base58. */
+  readonly signer: string;
+  readonly signature: Uint8Array;
+}
+
+/**
+ * Attach every signature a transaction needs, in one step.
+ *
+ * A segregated withdrawal has two signers — the house fee payer and the user's
+ * own key (ADR-0020 §3) — produced by two separate signing rounds. They are
+ * attached together because `Transaction.from` reparses the wire format, and
+ * attaching one signature at a time would mean serializing a half-signed
+ * transaction and hoping the round trip preserved the other signature.
+ *
+ * It does NOT check that every required signature is present: a partially
+ * signed transaction is a legitimate intermediate state, and the check that
+ * matters is the network's. What it does check is that no signature is offered
+ * for an address the message does not list as a signer — that mistake produces
+ * bytes that are refused at broadcast, long after a nonce has been spent.
+ */
+export function attachSignatures(
+  unsigned: UnsignedWithdrawal,
+  signatures: readonly AttachedSignature[],
+): Uint8Array {
   const transaction = Transaction.from(
     unsigned.transaction.serialize({ requireAllSignatures: false, verifySignatures: false }),
   );
-  transaction.addSignature(new PublicKey(signer), Buffer.from(signature));
+
+  const expected = new Set(transaction.signatures.map((entry) => entry.publicKey.toBase58()));
+
+  for (const { signer, signature } of signatures) {
+    if (signature.length !== 64) {
+      throw new ChainError(`Signature must be 64 bytes, received ${signature.length}`);
+    }
+    if (!expected.has(signer)) {
+      throw new ChainError(`${signer} is not a signer of this transaction`);
+    }
+    transaction.addSignature(new PublicKey(signer), Buffer.from(signature));
+  }
 
   return new Uint8Array(
     transaction.serialize({ requireAllSignatures: false, verifySignatures: false }),

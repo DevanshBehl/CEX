@@ -23,6 +23,9 @@ every movement is double-entry accounted.
 - [Withdrawal lifecycle](#withdrawal-lifecycle)
 - [Threshold signing](#threshold-signing-3-of-5-frost)
 - [Custody tiers and authorization](#custody-tiers-and-authorization)
+- [Custody models: omnibus and segregated](#custody-models-omnibus-and-segregated)
+- [Clusters](#clusters-devnet-and-mainnet-are-different-money)
+- [Valuation](#valuation-what-a-balance-is-worth)
 - [SPL tokens](#spl-tokens)
 - [Identity and sessions](#identity-and-sessions)
 - [Operations](#operations)
@@ -44,8 +47,8 @@ every movement is double-entry accounted.
 | **Identity**   | WebAuthn passkeys, opaque server-side sessions, TOTP       |
 | **Stack**      | TypeScript / Fastify / Next.js / PostgreSQL / Redis / Rust |
 | **Source**     | ~10.1k packages · ~7.0k API · ~4.1k web · ~4.8k Rust       |
-| **Tests**      | 391 unit · 178 integration · 94 Rust · 24 E2E              |
-| **Docs**       | 19 ADRs · 10 runbooks · threat model · dependency policy   |
+| **Tests**      | 491 unit · 224 integration · 104 Rust · 34 E2E             |
+| **Docs**       | 22 ADRs · 12 runbooks · threat model · dependency policy   |
 
 ---
 
@@ -418,6 +421,136 @@ a lone operator satisfies both halves and warm silently becomes one approval.
 
 ---
 
+## Custody models: omnibus and segregated
+
+Two models ship, selected by `SEGREGATED_CUSTODY`. They differ in one decision
+— _whose key controls the address a user's money sits at_ — and everything else
+downstream follows from it.
+
+|                             | Omnibus (`false`)                   | Segregated (`true`, ADR-0020)                       |
+| --------------------------- | ----------------------------------- | --------------------------------------------------- |
+| Address comes from          | `DEPOSIT_SEED`, derived at an index | a **provisioned 3-of-5 FROST group**                |
+| The address **is**          | a derived public key                | the group's verifying key — there is no seed        |
+| Deposits are swept          | yes, into the treasury              | **never** — a sweep would be commingling            |
+| A withdrawal is paid from   | the treasury                        | the **user's own address**                          |
+| Signers per withdrawal      | one (the house)                     | **two**: the user's key, and the house as fee payer |
+| One host compromised yields | between-sweep balances              | nothing — no host holds a whole key                 |
+
+**Why the house still pays the fee.** A segregated address holds only what was
+deposited to it, and a token account holds no SOL at all. If the user paid,
+a token-only balance would be unspendable. So the house is the fee payer and
+the nonce authority, which makes the withdrawal a two-signer transaction — two
+signing rounds, two request ids, one set of bytes.
+
+**What segregation costs**, stated plainly: a threshold ceremony per user at
+signup, five shares stored per user, address creation that can now fail, and
+recovery that is per user rather than once. ADR-0020 records why that price is
+accepted here and would not be at consumer volumes.
+
+> **Interim:** per-user groups are currently created by a **trusted dealer**,
+> not by DKG — the coordinator briefly holds the whole key while distributing
+> shares. Every provisioning logs a warning saying so. The interactive DKG
+> ceremony replaces `provision_user_key` and nothing above it.
+
+**Verified on devnet.** A 0.10 SOL withdrawal from a per-user FROST address
+settled on live devnet in transaction
+[`4bxyTJRR…eCR2PaHB`](https://explorer.solana.com/tx/4bxyTJRRaHfWKfqJ58Fy3baDDQHcay8z9q2zTyGhbPyRs4o8eKEr3qD1Mdnfgmpvy8ui7v4GJY8L6QAqeCR2PaHB?cluster=devnet):
+two signatures — the house as fee payer and nonce authority, the user's own
+group as the source — each produced by a 3-of-5 round. See the
+[threshold deployment](./docs/runbooks/threshold-deployment.md) runbook for how
+to reproduce it.
+
+---
+
+## Clusters: devnet and mainnet are different money
+
+Devnet SOL and mainnet SOL are both called `SOL`. With no cluster dimension
+they are the **same ledger account** — worthless test balances add to real ones
+while every double-entry invariant still passes. Nothing is inconsistent; the
+number is simply wrong, and nothing reports an error.
+
+So the cluster lives **inside the asset key**, not in a column
+([ADR-0021](./docs/adr/0021-cluster-dimension.md)):
+
+```
+devnet:SOL          mainnet-beta:SOL
+devnet:4zMMC9sr…    mainnet-beta:EPjFWdd5…
+```
+
+A `cluster` column would work only for as long as every query remembered
+`WHERE cluster = ?`, and forgetting silently sums clusters. In the key, there is
+no query that merges them by omission — the same reasoning that makes
+`user_locked` an account rather than a column.
+
+**What is per cluster**
+
+|                                                                |                                                                              |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Ledger accounts and entries                                    | `devnet:SOL` ≠ `mainnet-beta:SOL`                                            |
+| Addresses, deposits, withdrawals, nonce pools, indexer cursors | `chain = 'solana:devnet'`                                                    |
+| RPC connections                                                | one per cluster, genesis-checked at boot                                     |
+| Token allowlists and risk limits                               | never inherited — a mint address is a different token on a different cluster |
+| Indexers and withdrawal workers                                | one set each, claiming rows by `chain`                                       |
+
+**Two database guarantees.** The per-asset balance check already makes a
+cross-cluster _transfer_ impossible. What it cannot see is a transaction that
+balances in two clusters at once — nothing crosses, nothing is unbalanced, and
+yet one event claims to have happened on two chains. A deferred constraint
+trigger refuses that, and a `CHECK` refuses an asset key with no cluster at all.
+
+**The header is data, not authority.** A client picks a cluster with
+`X-Solana-Cluster`. An absent header means "no opinion" and gets the server's
+default; a malformed one (`mainnet` rather than `mainnet-beta`) is **refused**,
+because defaulting there would answer a client that believed it was asking
+about mainnet with devnet balances. It scopes what a user may read; it never
+decides what may be spent — a withdrawal's cluster comes from its stored record.
+
+See the [adding a cluster](./docs/runbooks/adding-a-cluster.md) runbook.
+
+---
+
+## Valuation: what a balance is worth
+
+The dashboard shows a dollar figure, a 24-hour delta and a chart. Every one of
+them is derivable from two stored inputs — `ledger_entries` and
+`asset_price_ticks` — and nothing is computed in the browser
+([ADR-0022](./docs/adr/0022-valuation-and-prices.md)).
+
+**Prices are stored, not fetched on read.** A worker appends a tick per
+`(cluster, asset)` on a timer. The table is append-only with the same triggers
+as the ledger: a correction is a new tick. Valuing on read would make the same
+page show different history on two loads and put a third party's rate limit on
+every request.
+
+**A historical point uses the price as it was THEN** — the most recent tick at
+or _before_ that instant, never the closest in either direction. A tick from
+after the point is lookahead, and it moves the line where nothing happened.
+The last price also carries forward until a newer one exists; an implementation
+that reported only newly-seen ticks dropped to zero at the right-hand edge of
+every chart, which is the part people look at.
+
+**Nothing is interpolated.** A failed cycle writes nothing, a gap is drawn as a
+break, and an unpriced holding reads `No price` rather than `$0.00`. Showing it
+as zero displays a fall in someone's net worth that did not happen.
+
+**Devnet is priced at mainnet rates, and that is a stated fiction.** A devnet
+mint is a mock with no market, so the _symbol_ is what carries across clusters.
+Ticks are still per cluster, so a mainnet valuation can never read a devnet row,
+and the interface says `DEVNET — test funds only` beside the number.
+
+**Integers to the last step.** `NUMERIC(18,6)` → micro-dollars as strings →
+`bigint` products. `Number('1.005') * 1e6` is `1004999.9999999999`, and this is
+the figure a user reads most often.
+
+| Source      | Credentials |                                                                                               |
+| ----------- | ----------- | --------------------------------------------------------------------------------------------- |
+| `coingecko` | none        | Default. SOL, USDC and USDT in one request.                                                   |
+| `pyth`      | required    | The public Hermes price-update endpoint answers **401**; needs a key or a self-hosted Hermes. |
+| `static`    | none        | Fixed prices for offline development. Never a fallback for a failing feed.                    |
+| `none`      | —           | Balances render, dollars do not.                                                              |
+
+---
+
 ## SPL tokens
 
 Assets are keyed on **mint address, never symbol** — anyone can mint a token
@@ -592,10 +725,10 @@ two can regenerate everything else.
 
 | Suite       | Count | What it proves                                                                         |
 | ----------- | ----- | -------------------------------------------------------------------------------------- |
-| Unit (TS)   | 391   | Domain logic, ledger invariants, risk rules, parsing                                   |
-| Integration | 178   | Real PostgreSQL: transactions, constraints, idempotency                                |
-| Rust        | 94    | Key handling, the trust boundary, threshold properties                                 |
-| E2E         | 24    | Browser journeys with a CDP virtual authenticator                                      |
+| Unit (TS)   | 491   | Domain logic, ledger invariants, risk rules, parsing                                   |
+| Integration | 224   | Real PostgreSQL: transactions, constraints, idempotency                                |
+| Rust        | 104   | Key handling, the trust boundary, threshold properties                                 |
+| E2E         | 34    | Browser journeys with a CDP virtual authenticator                                      |
 | Localnet    | —     | Against a real validator: the only place SPL encoding and token discovery are verified |
 
 Plus `scripts/verify-boundaries.mjs`, which writes ten deliberate architectural
@@ -611,6 +744,19 @@ and each time the gap was in a layer no unit test touched:
 - Prisma reported **success** for a transaction the database had rolled back.
 - 111 tests passed while the MPC service received **zero** requests.
 - Token parsing was correct for weeks while nothing was ever fetched to parse.
+- A price walk reported only newly-seen ticks, so every chart fell to zero at
+  its right-hand edge — the only part anyone looks at. 28 unit tests passed;
+  the integration test that valued a real series caught it.
+- The coordinator sent every participant request **unsigned**; the threshold
+  tests never noticed because they played the coordinator themselves.
+- The cluster header was missing from the API's CORS allowlist, so the browser
+  blocked every request — while 445 unit and 207 integration tests stayed green,
+  because none of them crosses an origin. The E2E suite caught it.
+- Per-user key provisioning was not concurrency-safe: two simultaneous requests
+  for one user both minted a key set. Only a live run made the browser issue two.
+- Withdrawal workers claimed by status alone, so one cluster's worker would
+  claim another cluster's withdrawal. Every suite passed because each ran one
+  cluster.
 
 The CI guards that exist today — the boundary verifier, the signer-swap job that
 fails if the real service signed nothing — exist because of those.
@@ -622,26 +768,26 @@ fails if the real service signed nothing — exist because of those.
 Stated plainly, because a list of what works is not an honest description on its
 own.
 
-| Gap                      | Consequence                                                                                                                                                   |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **No independent audit** | The most important one. Custody systems fail at composition and operation, not primitives.                                                                    |
-| **Real DKG**             | Key generation uses a trusted dealer, which briefly holds the whole key. Fine for tests, not for a ceremony.                                                  |
-| **Five real hosts**      | The threshold is tested with five participants in one process, each with its own store and KEK. ADR-0015 is explicit that the independence _is_ the security. |
-| **Sweep execution**      | Planning and accounting are done; the signing-and-broadcast loop is not.                                                                                      |
-| **Deposit seed is hot**  | Lives in the API process environment and can regenerate every deposit key.                                                                                    |
-| **Managed secret store** | `env:` and `file:` references exist; a Vault/KMS integration does not.                                                                                        |
-| **Per-service DB roles** | Still one `wallet_app`.                                                                                                                                       |
-| **Separation of duties** | One approver can approve alone; nothing requires two.                                                                                                         |
-| **Cold is not cold**     | A signing policy requiring proofs this system cannot produce — not air-gapped key material.                                                                   |
-| **Availability**         | No DDoS protection, no circuit breakers beyond retry budgets.                                                                                                 |
-| **Price feed**           | No portfolio valuation. Deliberate: a fabricated number in a wallet is worse than no number.                                                                  |
-| **Second chain**         | Design only. [ADR-0019](./docs/adr/0019-second-chain-seams.md) records exactly what one would touch.                                                          |
+| Gap                      | Consequence                                                                                                                                                           |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **No independent audit** | The most important one. Custody systems fail at composition and operation, not primitives.                                                                            |
+| **Real DKG**             | Key generation — the house key AND every per-user key — uses a trusted dealer, which briefly holds the whole key. Every provisioning warns about it.                  |
+| **Five real hosts**      | The 3-of-5 deployment runs as five PROCESSES on one machine — one disk, one operator, one blast radius. ADR-0015 is explicit that the independence _is_ the security. |
+| **Sweep execution**      | Planning and accounting are done; the loop is unwired, and under segregated custody it is refused outright ([ADR-0020](./docs/adr/0020-segregated-custody.md)).       |
+| **Deposit seed is hot**  | In the OMNIBUS model it lives in the API process environment and can regenerate every deposit key. Segregated custody removes the seed rather than protecting it.     |
+| **Managed secret store** | `env:` and `file:` references exist; a Vault/KMS integration does not.                                                                                                |
+| **Per-service DB roles** | Still one `wallet_app`.                                                                                                                                               |
+| **Separation of duties** | One approver can approve alone; nothing requires two.                                                                                                                 |
+| **Cold is not cold**     | A signing policy requiring proofs this system cannot produce — not air-gapped key material.                                                                           |
+| **Availability**         | No DDoS protection, no circuit breakers beyond retry budgets.                                                                                                         |
+| **Second chain**         | Design only. [ADR-0019](./docs/adr/0019-second-chain-seams.md) records exactly what one would touch.                                                                  |
+| **One price source**     | Valuation trusts whatever `PRICE_SOURCE` names, with no second feed to disagree with it. A wrong price is a wrong portfolio, and nothing here would notice.           |
 
 ---
 
 ## Decision record
 
-19 ADRs. Each records the alternatives considered and why they lost.
+22 ADRs. Each records the alternatives considered and why they lost.
 
 |                                                      | Decision                                           |
 | ---------------------------------------------------- | -------------------------------------------------- |
@@ -664,10 +810,14 @@ own.
 | [0017](./docs/adr/0017-sweep-policy.md)              | A sweep is a withdrawal; fee-only posting          |
 | [0018](./docs/adr/0018-custody-tiers.md)             | Tiers defined by signing policy                    |
 | [0019](./docs/adr/0019-second-chain-seams.md)        | What a second chain would touch                    |
+| [0020](./docs/adr/0020-segregated-custody.md)        | Segregated custody · per-user threshold keys       |
+| [0021](./docs/adr/0021-cluster-dimension.md)         | The cluster belongs in the asset key               |
+| [0022](./docs/adr/0022-valuation-and-prices.md)      | Stored price ticks · never interpolated            |
 
 **Runbooks:** local development · signing outage · participant loss · stuck
 sweep · key ceremony · stuck withdrawal · ambiguous broadcast · missing deposit
-· reconciliation drift · session secret rotation.
+· reconciliation drift · session secret rotation · adding a cluster ·
+threshold deployment.
 
 **Security:** [threat model](./docs/security/threat-model.md) ·
 [dependency policy](./docs/security/dependency-exceptions.md).

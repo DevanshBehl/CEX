@@ -50,6 +50,12 @@ struct Config {
     participant_identifier: Option<String>,
     /// `role = Coordinator`: `identifier@url` for each participant.
     roster: Vec<String>,
+    /// `role = Coordinator`: the key it authenticates to participants with.
+    ///
+    /// A participant's only legitimate caller is the coordinator, so each
+    /// participant's `MPC_CALLER_PUBLIC_KEY` must be this key's public half —
+    /// which the coordinator prints at boot so it need not be derived by hand.
+    coordinator_key: Option<String>,
     bind: SocketAddr,
     database_path: PathBuf,
     kek: String,
@@ -125,6 +131,20 @@ fn load_config() -> std::result::Result<Config, Vec<String>> {
         missing.push("MPC_PARTICIPANT_IDENTIFIER: required when MPC_ROLE is participant".into());
     }
 
+    let coordinator_key = std::env::var("MPC_COORDINATOR_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    // Without it the coordinator's requests to participants are unsigned, and
+    // every participant rejects them — a deployment that starts cleanly and
+    // then fails on the first withdrawal. Refuse at boot instead.
+    if role == Role::Coordinator && coordinator_key.is_none() {
+        missing.push(
+            "MPC_COORDINATOR_KEY: required when MPC_ROLE is coordinator (base64 32-byte Ed25519 \
+             seed); participants must trust its public half"
+                .into(),
+        );
+    }
+
     let kek = required("MPC_KEK", &mut missing);
     let caller_public_key = required("MPC_CALLER_PUBLIC_KEY", &mut missing);
 
@@ -180,6 +200,7 @@ fn load_config() -> std::result::Result<Config, Vec<String>> {
         role,
         participant_identifier,
         roster,
+        coordinator_key,
         bootstrap_key_ref: std::env::var("MPC_BOOTSTRAP_KEY_REF").ok(),
         approval_public_key: std::env::var("MPC_APPROVAL_PUBLIC_KEY")
             .ok()
@@ -241,8 +262,10 @@ async fn run(config: Config) -> std::result::Result<(), MpcError> {
     // -----------------------------------------------------------------------
     // Role wiring (ADR-0015)
     // -----------------------------------------------------------------------
-    let mut participant = None;
     let mut coordinator = None;
+    // Kept so shares provisioned AFTER boot can be sealed (ADR-0020). A
+    // participant no longer receives its share only at startup.
+    let mut participant_kek: Option<Kek> = None;
 
     match config.role {
         Role::SingleKey => {
@@ -277,14 +300,28 @@ async fn run(config: Config) -> std::result::Result<(), MpcError> {
                         ),
                         "participant ready"
                     );
-                    participant = Some(Arc::new(loaded));
+                    participant_kek = Some(Kek::from_base64(&config.kek)?);
+                    drop(loaded);
                 }
                 None => {
-                    // Deliberately fatal. A participant with no share that
-                    // started anyway would answer health checks, be counted as
-                    // available, and fail every round — which reads as a
-                    // network problem rather than a missing ceremony.
-                    return Err(MpcError::Internal("participant_has_no_share"));
+                    /*
+                     * No longer fatal (ADR-0020).
+                     *
+                     * Under per-user keys a participant legitimately starts
+                     * with no share for the house key_ref and receives shares
+                     * as users are provisioned. Refusing to boot would make
+                     * signup impossible on a fresh deployment.
+                     *
+                     * The old reasoning still applies to a participant that
+                     * has no share for a key it is ASKED to sign with — and
+                     * that is refused per request, which is where it belongs.
+                     */
+                    tracing::warn!(
+                        key_ref = %key_ref,
+                        "participant has no share for this key_ref yet; it will receive shares \
+                         as users are provisioned"
+                    );
+                    participant_kek = Some(Kek::from_base64(&config.kek)?);
                 }
             }
         }
@@ -296,24 +333,78 @@ async fn run(config: Config) -> std::result::Result<(), MpcError> {
                 threshold = frost::MIN_SIGNERS,
                 "coordinator ready"
             );
-            // The group public key comes from the ceremony record, stored
-            // under the coordinator's own key_ref. The coordinator holds no
-            // share — only the public package it needs to aggregate.
             let key_ref = config
                 .bootstrap_key_ref
                 .clone()
                 .unwrap_or_else(|| "treasury".to_string());
-            let Some((_, group_bytes, _, _)) = store.load_share(&key_ref)? else {
-                return Err(MpcError::Internal("coordinator_has_no_group_key"));
-            };
-            let public_package = postcard::from_bytes(&group_bytes)
-                .map_err(|_| MpcError::Internal("public_package_corrupt"))?;
+            /*
+             * The HOUSE group: what pays every user's fee and authorises every
+             * nonce (ADR-0020).
+             *
+             * Read from `frost_group_keys`, which holds PUBLIC material only.
+             * It used to be read from `frost_shares` — which meant the
+             * coordinator could not start until someone had handed it a
+             * SHARE, contradicting the one property a coordinator is supposed
+             * to have. If it is absent the coordinator starts without a house
+             * key and provisions one below, exactly as it does for a user.
+             */
+            let public_package: Option<frost_ed25519::keys::PublicKeyPackage> =
+                match store.load_group_key(&key_ref)? {
+                    Some(bytes) => Some(
+                        postcard::from_bytes(&bytes)
+                            .map_err(|_| MpcError::Internal("public_package_corrupt"))?,
+                    ),
+                    None => None,
+                };
 
-            coordinator = Some(Arc::new(threshold::Coordinator::new(
+            let caller_signer = auth::CallerSigner::from_base64(
+                config
+                    .coordinator_key
+                    .as_deref()
+                    .ok_or(MpcError::Internal("coordinator_key_missing"))?,
+            )?;
+            // Printed so a roster misconfiguration is visible here rather than
+            // as an opaque 401 during the first signing round.
+            tracing::info!(
+                caller_public_key = %caller_signer.public_key_base64(),
+                "participants must be configured with MPC_CALLER_PUBLIC_KEY set to this value"
+            );
+
+            let mut built = threshold::Coordinator::new(
                 participants,
-                public_package,
+                public_package.clone(),
+                caller_signer,
+                Arc::clone(&store),
                 std::time::Duration::from_secs(20),
-            )?));
+            )?;
+
+            /*
+             * FIRST BOOT: provision the house key.
+             *
+             * The same trusted-dealer path every user key takes, and warned
+             * about just as loudly (ADR-0020). The single-key service has
+             * always generated its key on first boot; this is the threshold
+             * equivalent, and doing it here rather than by hand means the
+             * house key cannot be created by a procedure nobody wrote down.
+             *
+             * Idempotent: a coordinator that already has one does nothing.
+             */
+            if public_package.is_none() {
+                let provisioned = built.provision_user_key(&key_ref).await?;
+                tracing::warn!(
+                    key_ref = %key_ref,
+                    address = %provisioned.group_public_key,
+                    "provisioned the HOUSE key with a trusted dealer. Fund TREASURY_ADDRESS \
+                     with exactly this address (ADR-0020)."
+                );
+
+                let adopted = built
+                    .stored_house_package(&key_ref)?
+                    .ok_or(MpcError::Internal("house_key_not_stored"))?;
+                built.adopt_house_key(adopted);
+            }
+
+            coordinator = Some(Arc::new(built));
         }
     }
 
@@ -321,7 +412,7 @@ async fn run(config: Config) -> std::result::Result<(), MpcError> {
         signer,
         store,
         caller,
-        participant,
+        participant_kek,
         coordinator,
     });
 

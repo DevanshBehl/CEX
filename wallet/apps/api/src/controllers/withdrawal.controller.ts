@@ -10,14 +10,31 @@ import {
   type WithdrawalResponse,
   type WithdrawalStatus,
 } from '@wallet/types';
+import {
+  ledgerAssetKey,
+  parseLedgerAssetKey,
+  type AssetRegistry,
+  type Cluster,
+} from '@wallet/types';
 import { requireSessionRecord } from '../middleware/guards.js';
 import type { WithdrawalService } from '../services/withdrawal.service.js';
 import { createOperatorRepository, type OperatorRoleName } from '@wallet/db';
 
 export interface WithdrawalControllerDeps {
   readonly db: PrismaClient;
-  readonly withdrawals: WithdrawalService;
-  readonly decimals: Readonly<Record<string, number>>;
+  /**
+   * The per-cluster object graph for a request (ADR-0021).
+   *
+   * The asset arriving on a withdrawal request is a BARE symbol or mint — the
+   * client says `SOL`, not `devnet:SOL` — and the cluster comes from the
+   * request's context. Qualifying it here, at the boundary, is what keeps the
+   * wire free of a storage detail while making it impossible for an
+   * unqualified key to reach the ledger.
+   */
+  readonly runtimeFor: (cluster: Cluster) => {
+    readonly withdrawals: WithdrawalService;
+    readonly assets: AssetRegistry;
+  };
   /**
    * Bootstrap operators, from configuration.
    *
@@ -40,7 +57,15 @@ export interface WithdrawalControllers {
 
 export function createWithdrawalControllers(deps: WithdrawalControllerDeps): WithdrawalControllers {
   const decisions = createRiskDecisionRepository(deps.db);
-  const decimalsFor = (asset: string): number => deps.decimals[asset] ?? 0;
+
+  /** Storage speaks cluster-qualified keys; the wire speaks bare assets. */
+  const wireAsset = (assetKey: string): string => {
+    try {
+      return parseLedgerAssetKey(assetKey).asset;
+    } catch {
+      return assetKey;
+    }
+  };
 
   const operators = createOperatorRepository(deps.db);
 
@@ -94,29 +119,35 @@ export function createWithdrawalControllers(deps: WithdrawalControllerDeps): Wit
         idempotencyKey: string;
       };
 
-      const withdrawal = await deps.withdrawals.request({
+      const runtime = deps.runtimeFor(request.cluster);
+      const withdrawal = await runtime.withdrawals.request({
         userId,
-        asset: body.asset,
+        // The cluster comes from the request's context, never from the body: a
+        // client that could name the cluster in the payload could ask for a
+        // mainnet withdrawal while the interface showed devnet.
+        asset: ledgerAssetKey(request.cluster, body.asset),
         amount: body.amount,
         destination: body.destination,
         idempotencyKey: body.idempotencyKey,
         correlationId: request.correlationId,
       });
 
-      return { withdrawal: toWithdrawal(withdrawal, decimalsFor(withdrawal.asset)) };
+      return { withdrawal: render(runtime, withdrawal) };
     },
 
     async get(request) {
       const { userId } = requireSessionRecord(request);
       const { id } = request.params as { id: string };
-      const withdrawal = await deps.withdrawals.get(userId, id);
-      return { withdrawal: toWithdrawal(withdrawal, decimalsFor(withdrawal.asset)) };
+      const runtime = deps.runtimeFor(request.cluster);
+      const withdrawal = await runtime.withdrawals.get(userId, id);
+      return { withdrawal: render(runtime, withdrawal) };
     },
 
     async list(request) {
       const { userId } = requireSessionRecord(request);
-      const rows = await deps.withdrawals.list(userId, 100);
-      return { withdrawals: rows.map((row) => toWithdrawal(row, decimalsFor(row.asset))) };
+      const runtime = deps.runtimeFor(request.cluster);
+      const rows = await runtime.withdrawals.list(userId, 100);
+      return { withdrawals: rows.map((row) => render(runtime, row)) };
     },
 
     async reviewQueue(request) {
@@ -125,12 +156,13 @@ export function createWithdrawalControllers(deps: WithdrawalControllerDeps): Wit
       // so it is privileged, but it moves nothing.
       await requireOperator(userId);
 
-      const rows = await deps.withdrawals.listForReview(100);
+      const runtime = deps.runtimeFor(request.cluster);
+      const rows = await runtime.withdrawals.listForReview(100);
       const items = await Promise.all(
         rows.map(async (row) => {
           const decision = await decisions.findByWithdrawal(row.id);
           return {
-            withdrawal: toWithdrawal(row, decimalsFor(row.asset)),
+            withdrawal: render(runtime, row),
             // The FULL codes, because an operator resolving a review needs to
             // see what the engine saw rather than re-derive it (rule 79).
             riskCodes: decision?.codes ?? [],
@@ -149,13 +181,14 @@ export function createWithdrawalControllers(deps: WithdrawalControllerDeps): Wit
       const { id } = request.params as { id: string };
       const { note } = request.body as { note: string };
 
-      const withdrawal = await deps.withdrawals.approve({
+      const runtime = deps.runtimeFor(request.cluster);
+      const withdrawal = await runtime.withdrawals.approve({
         withdrawalId: id,
         operatorUserId: userId,
         note,
         correlationId: request.correlationId,
       });
-      return { withdrawal: toWithdrawal(withdrawal, decimalsFor(withdrawal.asset)) };
+      return { withdrawal: render(runtime, withdrawal) };
     },
 
     async reject(request) {
@@ -165,15 +198,20 @@ export function createWithdrawalControllers(deps: WithdrawalControllerDeps): Wit
       const { id } = request.params as { id: string };
       const { note } = request.body as { note: string };
 
-      const withdrawal = await deps.withdrawals.reject({
+      const runtime = deps.runtimeFor(request.cluster);
+      const withdrawal = await runtime.withdrawals.reject({
         withdrawalId: id,
         operatorUserId: userId,
         note,
         correlationId: request.correlationId,
       });
-      return { withdrawal: toWithdrawal(withdrawal, decimalsFor(withdrawal.asset)) };
+      return { withdrawal: render(runtime, withdrawal) };
     },
   };
+
+  function render(runtime: { readonly assets: AssetRegistry }, row: WithdrawalRecord): Withdrawal {
+    return toWithdrawal(row, runtime.assets.decimalsOf(row.asset), wireAsset(row.asset));
+  }
 }
 
 /**
@@ -200,10 +238,10 @@ const STATUS_DETAIL: Readonly<Record<WithdrawalStatus, string>> = {
   FAILED: 'This withdrawal could not be completed. Your funds have been returned.',
 };
 
-function toWithdrawal(row: WithdrawalRecord, decimals: number): Withdrawal {
+function toWithdrawal(row: WithdrawalRecord, decimals: number, asset: string): Withdrawal {
   return {
     id: row.id,
-    asset: row.asset,
+    asset,
     decimals,
     amount: row.amount,
     networkFee: row.networkFee,

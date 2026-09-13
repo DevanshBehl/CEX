@@ -25,11 +25,15 @@ import {
   listAddressesResponseSchema,
   listBalancesResponseSchema,
   listDepositsResponseSchema,
+  portfolioHistoryResponseSchema,
+  portfolioSummaryResponseSchema,
   type DepositAddressResponse,
   type DepositResponse,
   type ListAddressesResponse,
   type ListBalancesResponse,
   type ListDepositsResponse,
+  type PortfolioHistoryResponse,
+  type PortfolioSummaryResponse,
   listWithdrawalsResponseSchema,
   withdrawalResponseSchema,
   listReviewQueueResponseSchema,
@@ -38,6 +42,9 @@ import {
   type ListReviewQueueResponse,
 } from '@wallet/types';
 import { request } from './client';
+
+/** The ranges the chart offers. Mirrors the server's `PortfolioRange`. */
+export type PortfolioRangeName = '24h' | '7d' | '30d' | 'all';
 
 /**
  * The typed surface every component uses (rules 161-162).
@@ -171,6 +178,21 @@ export const api = {
 
   listBalances: (): Promise<ListBalancesResponse> =>
     request({ method: 'GET', path: '/balances', schema: listBalancesResponseSchema }),
+
+  // --- portfolio valuation (Task 3) ---
+  getPortfolioSummary: (): Promise<PortfolioSummaryResponse> =>
+    request({
+      method: 'GET',
+      path: '/portfolio/summary',
+      schema: portfolioSummaryResponseSchema,
+    }),
+
+  getPortfolioHistory: (range: PortfolioRangeName): Promise<PortfolioHistoryResponse> =>
+    request({
+      method: 'GET',
+      path: `/portfolio/history?range=${range}`,
+      schema: portfolioHistoryResponseSchema,
+    }),
 
   listDeposits: (): Promise<ListDepositsResponse> =>
     request({ method: 'GET', path: '/deposits', schema: listDepositsResponseSchema }),

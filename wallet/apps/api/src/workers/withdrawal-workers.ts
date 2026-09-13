@@ -16,7 +16,7 @@ import type { DeadLetterQueue, JobQueue } from '../observability/dead-letter.js'
 import type { WalletMetrics } from '../observability/metrics.js';
 import type { NonceManager, WithdrawalBroadcaster } from '@wallet/solana';
 import {
-  attachSignature,
+  attachSignatures,
   buildTokenTransferTransaction,
   buildWithdrawalTransaction,
   deriveAssociatedTokenAddress,
@@ -38,9 +38,24 @@ export interface WithdrawalWorkerDeps {
   readonly broadcaster: WithdrawalBroadcaster;
   readonly logger: Logger;
   readonly chain: string;
-  /** The address withdrawals are paid from, and the nonce authority. */
+  /**
+   * The house address: the nonce authority, and the fee payer for every
+   * withdrawal.
+   *
+   * Under the omnibus model it is also the SOURCE of the funds. Under
+   * segregated custody (ADR-0020) it is not — see `segregated` below.
+   */
   readonly treasuryAddress: string;
+  /** The house key, which signs as fee payer and nonce authority. */
   readonly keyRefId: string;
+  /**
+   * Segregated custody (ADR-0020). Absent means the omnibus model.
+   *
+   * When present, a withdrawal is paid from the USER's own address and signed
+   * by the user's own threshold key, while the house still pays the fee — so
+   * the transaction has two signers and needs two signing rounds.
+   */
+  readonly segregated?: SegregatedSource | undefined;
   readonly budgets: RetryBudgets;
   readonly batchSize: number;
   /**
@@ -69,6 +84,24 @@ export interface WithdrawalWorkerDeps {
    * object is how a rename goes wrong quietly.
    */
   readonly chainReader: { accountExists(address: string): Promise<boolean> };
+}
+
+/**
+ * Where a user's funds actually live, under segregation.
+ *
+ * An interface rather than a repository call so the worker keeps its single
+ * dependency on persistence (`deps.db`) and so a test can answer it without a
+ * database.
+ */
+export interface SegregatedSource {
+  /**
+   * The user's own address and the key that controls it.
+   *
+   * Both, together, because they must agree: signing with a key that does not
+   * control the source address produces a transaction the network rejects
+   * after a nonce has already been consumed.
+   */
+  resolve(userId: string): Promise<{ readonly address: string; readonly keyRef: string }>;
 }
 
 export interface WithdrawalWorkers {
@@ -183,13 +216,11 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
    */
   async function buildTokenWithdrawal(
     withdrawal: WithdrawalRecord,
+    source: string,
     nonceAccount: string,
     nonce: string,
   ): Promise<UnsignedWithdrawal> {
-    const treasuryTokenAccount = deriveAssociatedTokenAddress(
-      deps.treasuryAddress,
-      withdrawal.asset,
-    );
+    const sourceTokenAccount = deriveAssociatedTokenAddress(source, withdrawal.asset);
     const destinationTokenAccount = deriveAssociatedTokenAddress(
       withdrawal.destination,
       withdrawal.asset,
@@ -198,8 +229,12 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
     const exists = await deps.chainReader.accountExists(destinationTokenAccount);
 
     const built = buildTokenTransferTransaction({
-      owner: deps.treasuryAddress,
-      ownerTokenAccount: treasuryTokenAccount,
+      owner: source,
+      ownerTokenAccount: sourceTokenAccount,
+      // The house pays the fee and any ATA rent even when the tokens are the
+      // user's. A segregated address holds no SOL of its own, so without this
+      // a token-only balance could never be withdrawn (ADR-0020 §3).
+      feePayer: deps.treasuryAddress,
       destinationOwner: withdrawal.destination,
       mint: withdrawal.asset,
       amount: withdrawal.amount,
@@ -209,7 +244,12 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
       createDestinationAccount: !exists,
     });
 
-    return { message: built.message, transaction: built.transaction, nonce: built.nonce };
+    return {
+      message: built.message,
+      transaction: built.transaction,
+      nonce: built.nonce,
+      signers: built.signers,
+    };
   }
 
   /** Which queue a give-up belongs to, for the operator's view. */
@@ -226,7 +266,13 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
     // Only APPROVED work reaches the signer, and FUNDS_LOCKED is the only door
     // (master-prompt rule 138, rule 103).
     const claimed = await withTransaction(deps.db, async (tx) =>
-      createWithdrawalRepository(tx).claimNext('FUNDS_LOCKED', 'SIGNING', correlationId, tx),
+      createWithdrawalRepository(tx).claimNext(
+        'FUNDS_LOCKED',
+        'SIGNING',
+        correlationId,
+        deps.chain,
+        tx,
+      ),
     );
     if (!claimed) return false;
 
@@ -269,10 +315,27 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
        * was chain-specific, and that would be the defect. This is the one
        * place the two paths diverge.
        */
+      /*
+       * WHERE THE MONEY LEAVES FROM (ADR-0020 §3).
+       *
+       * Under segregation it is the user's own address, controlled by the
+       * user's own threshold key — so a compromise of three participants for
+       * one user yields one user's funds, not the platform's. The house
+       * remains the fee payer and the nonce authority, which is what keeps the
+       * experience gasless and what makes a token-only balance spendable.
+       *
+       * Without segregation both roles are the treasury and this resolves to
+       * exactly the previous behaviour.
+       */
+      const source = deps.segregated
+        ? await deps.segregated.resolve(claimed.userId)
+        : { address: deps.treasuryAddress, keyRef: deps.keyRefId };
+
       const unsigned = deps.assets.isToken(claimed.asset)
-        ? await buildTokenWithdrawal(claimed, lease.address, state.nonce)
+        ? await buildTokenWithdrawal(claimed, source.address, lease.address, state.nonce)
         : buildWithdrawalTransaction({
-            from: deps.treasuryAddress,
+            from: source.address,
+            feePayer: deps.treasuryAddress,
             to: claimed.destination,
             lamports: claimed.amount,
             nonceAccount: lease.address,
@@ -328,30 +391,58 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
           ? unsignedAuthorization
           : signAuthorization(unsignedAuthorization, unsigned.message, deps.approvalKey);
 
-      const alreadyOpen = await signingRequests.findByRequestId(requestId);
-      if (!alreadyOpen) {
-        await signingRequests.open({
-          withdrawalId: claimed.id,
-          requestId,
-          keyRef: deps.keyRefId,
-          signerKind: deps.signer.kind ?? 'unknown',
-          authorization: { ...authorization },
+      /*
+       * ONE ROUND PER SIGNER.
+       *
+       * A segregated withdrawal is signed twice: by the house, which pays the
+       * fee and authorises the nonce, and by the user, whose funds move. The
+       * key that signs for an address is the key that controls it — mixing
+       * them up produces a transaction the network rejects only after the
+       * nonce has been spent, which costs a retry with a fresh nonce.
+       *
+       * The request ids must DIFFER between the two: the signing service is
+       * idempotent on the request id, so reusing one would hand back the first
+       * signature for the second key. The house round keeps the bare id so an
+       * omnibus deployment's in-flight requests are unaffected.
+       */
+      const rounds = unsigned.signers.map((address) =>
+        address === source.address && source.address !== deps.treasuryAddress
+          ? { address, keyRef: source.keyRef, requestId: `${requestId}:source` }
+          : { address, keyRef: deps.keyRefId, requestId },
+      );
+
+      const signatures: Array<{ signer: string; signature: Uint8Array }> = [];
+
+      for (const round of rounds) {
+        const alreadyOpen = await signingRequests.findByRequestId(round.requestId);
+        if (!alreadyOpen) {
+          await signingRequests.open({
+            withdrawalId: claimed.id,
+            requestId: round.requestId,
+            keyRef: round.keyRef,
+            signerKind: deps.signer.kind ?? 'unknown',
+            authorization: { ...authorization },
+          });
+        }
+
+        const result = await deps.signer.sign({
+          requestId: round.requestId,
+          keyRef: { id: round.keyRef },
+          payload: unsigned.message,
+          authorization,
         });
+
+        if (result.signature.length !== 64) {
+          throw new Error(`signer returned ${result.signature.length} bytes, expected 64`);
+        }
+
+        signatures.push({ signer: round.address, signature: result.signature });
       }
 
-      const result = await deps.signer.sign({
-        requestId,
-        keyRef: { id: deps.keyRefId },
-        payload: unsigned.message,
-        authorization,
-      });
-
-      if (result.signature.length !== 64) {
-        throw new Error(`signer returned ${result.signature.length} bytes, expected 64`);
+      const signed = attachSignatures(unsigned, signatures);
+      for (const round of rounds) {
+        await signingRequests.succeed(round.requestId);
       }
-
-      const signed = attachSignature(unsigned, deps.treasuryAddress, result.signature);
-      await signingRequests.succeed(requestId);
 
       /**
        * The signed bytes are persisted with the transition.
@@ -417,7 +508,13 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
   // -------------------------------------------------------------------------
   async function broadcastOne(correlationId: string): Promise<boolean> {
     const claimed = await withTransaction(deps.db, async (tx) =>
-      createWithdrawalRepository(tx).claimNext('SIGNED', 'BROADCAST', correlationId, tx),
+      createWithdrawalRepository(tx).claimNext(
+        'SIGNED',
+        'BROADCAST',
+        correlationId,
+        deps.chain,
+        tx,
+      ),
     );
     if (!claimed) return false;
 
@@ -604,6 +701,10 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
 
     await createLedgerRepository(deps.db).ensureAccounts([
       { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_locked' },
+      // The funds leave the USER's segregated address (ADR-0020)...
+      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'chain_assets' },
+      // ...and the fee leaves the HOUSE's wallet. Two different addresses,
+      // which is why both accounts are needed for one settlement.
       { ownerId: null, asset: withdrawal.asset, type: 'chain_assets' },
       { ownerId: null, asset: withdrawal.asset, type: 'house_fees' },
     ]);
@@ -677,7 +778,7 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
     ] as const;
 
     for (const edge of edges) {
-      const stuck = await withdrawals.listByStatus(edge.status, deps.batchSize);
+      const stuck = await withdrawals.listByStatus(edge.status, deps.batchSize, deps.chain);
       for (const withdrawal of stuck) {
         const used = withdrawal[edge.attempts];
 
@@ -743,7 +844,7 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
     async runConfirmationCycle() {
       const correlationId = randomUUID();
       return runWithContext({ correlationId, route: 'worker:confirm' }, async () => {
-        const pending = await withdrawals.listByStatus('BROADCAST', deps.batchSize);
+        const pending = await withdrawals.listByStatus('BROADCAST', deps.batchSize, deps.chain);
         for (const withdrawal of pending) await confirmOne(withdrawal, correlationId);
         return pending.length;
       });

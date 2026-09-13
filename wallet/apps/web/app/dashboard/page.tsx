@@ -19,6 +19,11 @@ import {
   SystemNote,
 } from '@/components/ui';
 import { useCapabilities } from '@/features/platform/use-capabilities';
+import { usePortfolioSummary } from '@/features/portfolio/use-portfolio';
+import { PortfolioChart } from '@/features/portfolio/portfolio-chart';
+import { AssetBreakdown } from '@/features/portfolio/asset-breakdown';
+import { useAssetLabel } from '@/features/portfolio/use-asset-label';
+import { formatBps, formatDelta, formatUsd } from '@/features/portfolio/format';
 
 const DEPOSIT_ICON = (
   <svg
@@ -57,6 +62,17 @@ export default function DashboardPage() {
   const balances = useBalances(10_000);
   const withdrawals = useWithdrawals(15_000);
   const capabilities = useCapabilities();
+  // Polled on the same cadence as balances: a valuation that lagged the
+  // balance beside it reads as one of the two being wrong.
+  const summary = usePortfolioSummary(10_000);
+  const labelOf = useAssetLabel();
+
+  const changeTone =
+    summary.data?.changeBps === null || summary.data === null
+      ? 'default'
+      : summary.data.changeBps < 0
+        ? 'warning'
+        : 'accent';
 
   if (state.status !== 'authenticated') return null;
   const { user, factors } = state.data;
@@ -73,12 +89,36 @@ export default function DashboardPage() {
       />
 
       {/*
-        §8: a 12-column grid of statistics. Only facts the ledger actually
-        holds — no portfolio valuation, no 24h change, no chart. This product
-        has no price feed, and a fabricated number in a wallet is worse than no
-        number at all (prompt_phase1.md rules 156-157).
+        §8: a grid of statistics.
+        
+        The portfolio value is REAL now — projected from the ledger and
+        multiplied by a recorded spot price (Task 3). It was absent before
+        because there was no price feed, and a fabricated number in a wallet is
+        worse than no number at all. That rule has not changed: where a price
+        is genuinely unknown this still says so rather than showing $0.00.
       */}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Portfolio value"
+          value={
+            summary.data === null
+              ? '—'
+              : summary.data.complete || summary.data.totalUsd !== '0.000000'
+                ? formatUsd(summary.data.totalUsd)
+                : 'No price'
+          }
+          loading={summary.loading}
+          tone={changeTone}
+          hint={
+            summary.data === null
+              ? 'Valuation unavailable'
+              : summary.data.changeUsd === null
+                ? 'No comparison yet'
+                : `${formatDelta(summary.data.changeUsd)}${
+                    summary.data.changeBps === null ? '' : ` · ${formatBps(summary.data.changeBps)}`
+                  } in 24h`
+          }
+        />
         <StatCard
           label="Assets held"
           value={String(assets.length)}
@@ -102,17 +142,20 @@ export default function DashboardPage() {
           loading={withdrawals.loading}
           hint="Withdrawals not yet settled"
         />
-        <StatCard
-          label="Signing"
-          value={capabilities?.signing.mode === 'single-key-mpc' ? 'MPC' : 'Mock'}
-          tone={capabilities?.signing.mode === 'single-key-mpc' ? 'accent' : 'warning'}
-          hint={
-            capabilities?.signing.thresholdProtected === true
-              ? 'Threshold protected'
-              : 'Single key, not threshold'
-          }
-        />
       </div>
+
+      <PortfolioChart />
+
+      {/*
+        No `address` here, deliberately.
+        
+        Obtaining it means POSTing to /wallets/addresses, which under
+        segregated custody PROVISIONS A THRESHOLD KEY (ADR-0020). Doing that
+        for everyone who opens a dashboard would run a ceremony per user who
+        never asked to deposit. The address — and its explorer link — lives on
+        the deposit page, where asking for one is the point.
+      */}
+      <AssetBreakdown allocations={summary.data?.allocations ?? []} loading={summary.loading} />
 
       <div className="grid gap-10 xl:grid-cols-3 xl:gap-8">
         <div className="space-y-10 xl:col-span-2">
@@ -142,9 +185,16 @@ export default function DashboardPage() {
                     key={balance.asset}
                     className="atlas-raised atlas-raised-hover flex items-center gap-4 rounded-lg px-4 py-3.5"
                   >
-                    <AssetMark symbol={balance.asset} />
+                    <AssetMark symbol={labelOf(balance.asset, balance.symbol)} />
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-ink">{balance.asset}</p>
+                      {/*
+                        The SYMBOL, not the mint. This rendered a 44-character
+                        base58 address until the response carried a name for
+                        it (Task 4).
+                      */}
+                      <p className="text-sm font-medium text-ink">
+                        {labelOf(balance.asset, balance.symbol)}
+                      </p>
                       {!isZeroAmount(balance.locked) && (
                         <p className="mt-0.5 flex items-center gap-1.5 text-xs text-warning">
                           <span aria-hidden="true" className="h-1 w-1 rounded-full bg-warning" />
@@ -236,7 +286,15 @@ export default function DashboardPage() {
             platform cannot say what its signing is, the weaker claim is the
             honest one. Neither branch ever says "production-safe".
           */}
-          {capabilities?.signing.mode === 'single-key-mpc' ? (
+          {capabilities?.signing.mode === 'threshold-mpc' ? (
+            <SystemNote label="Custody" title="Signing is 3-of-5 threshold">
+              Withdrawals are signed by five separate participants, any three of which suffice. No
+              single machine holds a whole key, each participant verifies the approval proof itself,
+              and none of them returns key material. The participants run as five processes rather
+              than on five hosts, so the independence is not yet real. This system has not been
+              audited.
+            </SystemNote>
+          ) : capabilities?.signing.mode === 'single-key-mpc' ? (
             <SystemNote label="Custody" title="Signing is real, and it is a single key">
               Withdrawals are signed by a separate service that holds the key, verifies an approval
               proof bound to the exact transaction, and never returns key material. It is not yet

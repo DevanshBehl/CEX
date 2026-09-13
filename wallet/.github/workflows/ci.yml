@@ -167,12 +167,13 @@ jobs:
       - run: pnpm --filter @wallet/db exec prisma migrate deploy
 
       # rule 95: the checked-in migrations must fully describe the schema.
+      #
+      # Through the script, which creates and drops its OWN shadow database.
+      # `--shadow-database-url` is destructive to whatever it points at —
+      # pointing it at the application database leaves the schema current and
+      # the migration history gone.
       - name: Migrations match the schema
-        run: pnpm --filter @wallet/db exec prisma migrate diff
-          --from-migrations ./prisma/migrations
-          --to-schema-datamodel ./prisma/schema.prisma
-          --shadow-database-url "$MIGRATION_DATABASE_URL"
-          --exit-code
+        run: pnpm --filter @wallet/db run migrate:check
 
       # Serial: the suites share one database, and running them concurrently
       # makes one suite's fixtures another's mystery failure.

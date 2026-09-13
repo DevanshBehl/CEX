@@ -6,7 +6,12 @@ import {
   type LedgerTransaction,
   type TransactionKind,
 } from './entries.js';
-import { InvalidEntryError, UnbalancedTransactionError } from './errors.js';
+import { parseLedgerAssetKey, type Cluster } from '@wallet/types';
+import {
+  CrossClusterTransactionError,
+  InvalidEntryError,
+  UnbalancedTransactionError,
+} from './errors.js';
 
 export interface BuildTransactionInput {
   readonly kind: TransactionKind;
@@ -49,6 +54,42 @@ export function buildTransaction(input: BuildTransactionInput): LedgerTransactio
       throw new InvalidEntryError('entry_asset_mismatch', {
         account: accountKey(entry.account),
       });
+    }
+  }
+
+  /*
+   * EVERY ENTRY BELONGS TO ONE CLUSTER (ADR-0021).
+   *
+   * The per-asset balance check below already makes a cross-cluster TRANSFER
+   * impossible — debit `devnet:SOL`, credit `mainnet-beta:SOL` leaves two
+   * groups, each with a residual. What it does not catch is a transaction that
+   * happens to be balanced in two clusters at once, which is still one
+   * financial event claiming to have happened on two chains.
+   *
+   * It also rejects an UNQUALIFIED asset outright. That is the load-bearing
+   * part: a bare `SOL` reaching the ledger is the bug the whole cluster
+   * dimension exists to prevent, and it must fail at the first entry rather
+   * than balance perfectly against another bare `SOL`.
+   */
+  let cluster: Cluster | undefined;
+  for (const entry of entries) {
+    let parsed;
+    try {
+      parsed = parseLedgerAssetKey(entry.asset);
+    } catch {
+      // Rethrown as a ledger error rather than a TypeError: the caller built
+      // an asset key wrong, and the account it was heading for is the useful
+      // part of the message.
+      throw new InvalidEntryError('entry_asset_not_cluster_qualified', {
+        account: accountKey(entry.account),
+        asset: entry.asset,
+      });
+    }
+
+    if (cluster === undefined) {
+      cluster = parsed.cluster;
+    } else if (parsed.cluster !== cluster) {
+      throw new CrossClusterTransactionError(cluster, parsed.cluster);
     }
   }
 

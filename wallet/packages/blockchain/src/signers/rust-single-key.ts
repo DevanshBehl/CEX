@@ -1,5 +1,12 @@
 import { createHash, sign as edSign, type KeyObject } from 'node:crypto';
-import type { KeyRef, SignRequest, SignResult, Signer } from '../signer.js';
+import type {
+  KeyProvisioner,
+  KeyRef,
+  ProvisionedKey,
+  SignRequest,
+  SignResult,
+  Signer,
+} from '../signer.js';
 
 /**
  * A client for `services/mpc` (ADR-0013).
@@ -27,9 +34,23 @@ export interface RustSignerOptions {
   readonly requestTimeoutMs: number;
 }
 
-export interface RustSigner extends Signer {
-  readonly kind: 'rust-single-key';
+/** What the service on the other end actually is. */
+export type MpcRole = 'single-key' | 'participant' | 'coordinator';
+
+export interface RustSigner extends Signer, KeyProvisioner {
+  /**
+   * `rust-mpc`, not `rust-single-key`.
+   *
+   * This value is recorded on every signing request as the audit trail's
+   * answer to "what signed this". It said `rust-single-key` while the client
+   * was talking to a 3-of-5 coordinator, which is a false statement in the one
+   * record kept specifically to be read later. The client is the same either
+   * way; `describe()` is how the deployment's actual shape is learned.
+   */
+  readonly kind: 'rust-mpc';
   isHealthy(): Promise<boolean>;
+  /** The service's role, or undefined when it cannot be reached. */
+  describe(): Promise<MpcRole | undefined>;
 }
 
 interface SignResponseBody {
@@ -91,11 +112,20 @@ export function createRustSigner(options: RustSignerOptions): RustSigner {
     };
   }
 
+  /**
+   * `body` is already serialized.
+   *
+   * The service authenticates some endpoints over the exact request BYTES, so
+   * the string that is signed and the string that is sent must be the same
+   * one. Serializing here from an object would mean signing a different
+   * serialization than the one transmitted the moment anything about the shape
+   * changed — and the only symptom would be `signature_rejected`.
+   */
   async function call<T>(
     method: string,
     path: string,
     headers: Record<string, string>,
-    body?: unknown,
+    body?: string,
   ): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), options.requestTimeoutMs);
@@ -107,7 +137,7 @@ export function createRustSigner(options: RustSignerOptions): RustSigner {
           ...headers,
           ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
         },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        ...(body !== undefined ? { body } : {}),
         signal: controller.signal,
       });
 
@@ -132,7 +162,7 @@ export function createRustSigner(options: RustSignerOptions): RustSigner {
   }
 
   return {
-    kind: 'rust-single-key',
+    kind: 'rust-mpc',
 
     async getPublicKey(keyRef: KeyRef): Promise<Uint8Array> {
       // The request id slot carries the key reference for this endpoint, so the
@@ -157,12 +187,17 @@ export function createRustSigner(options: RustSignerOptions): RustSigner {
     async sign(request: SignRequest): Promise<SignResult> {
       const headers = authHeaders('POST', '/v1/sign', request.requestId, request.payload);
 
-      const body = await call<SignResponseBody>('POST', '/v1/sign', headers, {
-        requestId: request.requestId,
-        keyRef: request.keyRef.id,
-        payload: Buffer.from(request.payload).toString('base64'),
-        authorization: request.authorization,
-      });
+      const body = await call<SignResponseBody>(
+        'POST',
+        '/v1/sign',
+        headers,
+        JSON.stringify({
+          requestId: request.requestId,
+          keyRef: request.keyRef.id,
+          payload: Buffer.from(request.payload).toString('base64'),
+          authorization: request.authorization,
+        }),
+      );
 
       const signature = new Uint8Array(Buffer.from(body.signature, 'base64'));
       if (signature.length !== 64) {
@@ -176,12 +211,72 @@ export function createRustSigner(options: RustSignerOptions): RustSigner {
       };
     },
 
+    /**
+     * Create this user's threshold key, or return the one that exists.
+     *
+     * Answered by the COORDINATOR. A single-key service rejects it with
+     * `not_a_coordinator`, which is the correct answer rather than a failure
+     * to handle: a deployment without a coordinator has no per-user keys to
+     * hand out, and silently falling back to a derived address would be the
+     * thing ADR-0020 exists to prevent.
+     *
+     * Unlike `/v1/sign`, this endpoint authenticates over the request BYTES,
+     * so the body is serialized once and both signed and sent.
+     */
+    async provisionKey(keyRef: KeyRef): Promise<ProvisionedKey> {
+      const body = JSON.stringify({ keyRef: keyRef.id });
+      const headers = authHeaders(
+        'POST',
+        '/v1/frost/provision',
+        keyRef.id,
+        Buffer.from(body, 'utf8'),
+      );
+
+      const response = await call<{
+        keyRef: string;
+        groupPublicKey: string;
+        threshold: number;
+        participants: number;
+        existing: boolean;
+      }>('POST', '/v1/frost/provision', headers, body);
+
+      return {
+        keyRef: response.keyRef,
+        address: response.groupPublicKey,
+        threshold: response.threshold,
+        participants: response.participants,
+        existing: response.existing,
+      };
+    },
+
     async isHealthy(): Promise<boolean> {
       try {
         const body = await call<{ status: string }>('GET', '/v1/health', {});
         return body.status === 'ok';
       } catch {
         return false;
+      }
+    },
+
+    /**
+     * What the service is, from its own health endpoint.
+     *
+     * Probed rather than configured: a deployment that pointed
+     * `MPC_ENDPOINT` at a coordinator and forgot to update a flag would tell
+     * users their custody is weaker than it is — or, worse, the reverse.
+     *
+     * Undefined on failure, and every caller treats that as "assume the weaker
+     * claim". A platform that cannot say what its signing is should not be
+     * making the stronger statement.
+     */
+    async describe(): Promise<MpcRole | undefined> {
+      try {
+        const body = await call<{ role?: string }>('GET', '/v1/health', {});
+        return body.role === 'coordinator' || body.role === 'participant'
+          ? body.role
+          : 'single-key';
+      } catch {
+        return undefined;
       }
     },
   };

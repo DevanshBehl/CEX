@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { clusterSchema } from '../clusters.js';
 
 /**
  * What this deployment can actually do (prompt_phase4.md rules 236-237).
@@ -39,8 +40,21 @@ export const capabilitiesResponseSchema = z.object({
      */
     thresholdProtected: z.boolean(),
   }),
+  /**
+   * Which Solana clusters this deployment serves (ADR-0021).
+   *
+   * Unauthenticated, like the rest of this endpoint: the network switcher has
+   * to be populated before anyone signs in, and a person deciding whether to
+   * trust a custodian should be able to see that it is a devnet-only
+   * deployment without depositing first.
+   */
+  clusters: z.object({
+    served: z.array(clusterSchema),
+    /** What a request naming no cluster is answered for. */
+    default: clusterSchema,
+  }),
   assets: z.object({
-    /** Ledger asset keys the platform will credit. */
+    /** Ledger asset keys the platform will credit, cluster-qualified. */
     supported: z.array(z.string()),
     /** Symbol per key, for display. Decimals are deliberately absent. */
     labels: z.record(z.string()),

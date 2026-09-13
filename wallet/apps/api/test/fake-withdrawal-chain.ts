@@ -84,6 +84,15 @@ export interface FakeBroadcaster extends WithdrawalBroadcaster {
   submissions(): readonly string[];
   /** Distinct byte-strings seen. A re-broadcast must NOT increase this. */
   distinctPayloads(): number;
+  /**
+   * The raw bytes of the last submission.
+   *
+   * Kept so a test can parse the transaction and assert what it actually says
+   * — which account is debited, who pays the fee, how many signatures it
+   * carries. Asserting on the ledger alone would pass for a transaction that
+   * moves the wrong account's money.
+   */
+  lastRaw(): Uint8Array | null;
 }
 
 export function createFakeBroadcaster(): FakeBroadcaster {
@@ -93,6 +102,7 @@ export function createFakeBroadcaster(): FakeBroadcaster {
   const finalized = new Set<string>();
   const failed = new Set<string>();
   const fees = new Map<string, string>();
+  let lastBytes: Uint8Array | null = null;
   let counter = 0;
 
   /**
@@ -132,8 +142,13 @@ export function createFakeBroadcaster(): FakeBroadcaster {
       return payloads.size;
     },
 
+    lastRaw() {
+      return lastBytes;
+    },
+
     async broadcast(signedTransaction): Promise<BroadcastOutcome> {
       counter += 1;
+      lastBytes = signedTransaction;
       const signature = signatureFor(signedTransaction);
 
       if (behaviour === 'reject') return { kind: 'rejected', reason: 'rpc_rejected' };

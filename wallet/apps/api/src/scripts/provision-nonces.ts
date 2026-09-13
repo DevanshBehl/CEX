@@ -26,13 +26,14 @@ import { createNonceAccountRepository, createPrismaClient } from '@wallet/db';
 import { createPrivateKey } from 'node:crypto';
 import { signAuthorization } from '@wallet/blockchain';
 import type { Signer } from '@wallet/blockchain';
+import type { Cluster } from '@wallet/types';
 import { createRustSigner } from '@wallet/blockchain';
 import {
   createNonceManager,
   createSolanaRpc,
   createWithdrawalBroadcaster,
   provisionNonceAccount,
-  SOLANA_CHAIN_ID,
+  solanaChainId,
 } from '@wallet/solana';
 
 const config = loadApiConfigOrExit();
@@ -60,8 +61,28 @@ async function main(): Promise<void> {
   const nonceAccounts = createNonceAccountRepository(db);
   const signer = buildSigner();
 
+  /*
+   * Nonce pools are PER CLUSTER (ADR-0021): a devnet transaction must never
+   * consume a mainnet durable nonce, and the `chain` column on every row is
+   * what keeps the two pools apart. The cluster comes from `--cluster`,
+   * defaulting to the configured default.
+   */
+  const requested = process.argv.find((argument) => argument.startsWith('--cluster='));
+  const cluster = (requested?.split('=')[1] ?? config.chain.defaultCluster) as Cluster;
+
+  const chainConfig = config.chain.byCluster[cluster];
+  if (!chainConfig) {
+    process.stderr.write(
+      `\n  ✗ this deployment does not serve ${cluster}; it serves ` +
+        `${config.chain.clusters.join(', ')}\n\n`,
+    );
+    process.exit(1);
+  }
+
+  const chain = solanaChainId(cluster);
+
   const rpc = createSolanaRpc({
-    endpoint: config.chain.rpcUrl,
+    endpoint: chainConfig.rpcUrl,
     commitment: config.chain.commitment,
     requestTimeoutMs: config.chain.rpcTimeoutMs,
     maxRetries: config.chain.rpcMaxRetries,
@@ -70,10 +91,10 @@ async function main(): Promise<void> {
   const broadcaster = createWithdrawalBroadcaster(rpc);
 
   const target = config.withdrawal.noncePoolSize;
-  const existing = await nonceAccounts.listAll(SOLANA_CHAIN_ID);
+  const existing = await nonceAccounts.listAll(chain);
 
   const out = process.stdout;
-  out.write(`\nNonce pool — ${SOLANA_CHAIN_ID}\n`);
+  out.write(`\nNonce pool — ${chain}\n`);
 
   /**
    * USABLE accounts, not rows.
@@ -87,21 +108,39 @@ async function main(): Promise<void> {
    *     on-chain state".
    *   - A row stuck `leased` by a withdrawal that crashed. The lease is never
    *     returned, so the account is permanently unavailable.
+   *   - A row whose on-chain AUTHORITY is not the configured treasury. A
+   *     durable nonce can only be advanced by its authority, so one created
+   *     under a previous treasury key is inert: every withdrawal that leases
+   *     it is signed, broadcast, and rejected by the runtime. Found the hard
+   *     way after a key ceremony produced a new house key while three
+   *     perfectly healthy-looking nonce accounts stayed in the pool.
    *
-   * Both are the normal state of a development database, and both produce the
-   * same symptom — `nonce.pool_exhausted` on every signing cycle while this
+   * All three are the normal state of a development database, and all three
+   * produce the same symptom — failures at signing or broadcast while this
    * script insists the pool is full.
    */
+  const authority = config.withdrawal.treasuryAddress ?? '';
+
   const onChain = await Promise.all(
-    existing.map(async (account) => ({
-      account,
-      exists: (await nonces.readNonce(account.address).catch(() => null)) !== null,
-    })),
+    existing.map(async (account) => {
+      const state = await nonces.readNonce(account.address).catch(() => null);
+      return {
+        account,
+        exists: state !== null,
+        // An account whose authority we cannot sign for is not ours to use.
+        ours: state !== null && (authority === '' || state.authority === authority),
+      };
+    }),
   );
 
-  const usable = onChain.filter((entry) => entry.exists && entry.account.status === 'available');
+  const usable = onChain.filter(
+    (entry) => entry.exists && entry.ours && entry.account.status === 'available',
+  );
   const phantom = onChain.filter((entry) => !entry.exists);
-  const stuck = onChain.filter((entry) => entry.exists && entry.account.status === 'leased');
+  const foreign = onChain.filter((entry) => entry.exists && !entry.ours);
+  const stuck = onChain.filter(
+    (entry) => entry.exists && entry.ours && entry.account.status === 'leased',
+  );
 
   out.write(`  target ${String(target)}\n`);
   out.write(`  rows ${String(existing.length)}, usable ${String(usable.length)}\n`);
@@ -110,6 +149,27 @@ async function main(): Promise<void> {
   }
   if (stuck.length > 0) {
     out.write(`  ${String(stuck.length)} leased — in flight, or stranded by a crash\n`);
+  }
+  if (foreign.length > 0) {
+    /*
+     * Retired, not merely reported.
+     *
+     * An account the treasury cannot advance will never become usable, and
+     * leaving it `available` means a withdrawal leases it, gets signed, and is
+     * rejected by the runtime — after a nonce round has already been spent.
+     * Retiring is the only correct disposition, and it costs nothing: the rent
+     * stays where it is and the row remains for the audit trail.
+     */
+    out.write(
+      `  ${String(foreign.length)} authorised by a DIFFERENT key than TREASURY_ADDRESS — retiring\n`,
+    );
+    for (const entry of foreign) {
+      await db.nonceAccount.update({
+        where: { id: entry.account.id },
+        data: { status: 'retired' },
+      });
+      out.write(`    retired ${entry.account.address}\n`);
+    }
   }
 
   const missing = target - usable.length;
@@ -169,7 +229,7 @@ async function main(): Promise<void> {
     });
 
     await nonceAccounts.create({
-      chain: SOLANA_CHAIN_ID,
+      chain: chain,
       address: result.address,
       currentNonce: result.nonce,
     });

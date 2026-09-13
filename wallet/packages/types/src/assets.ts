@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ledgerAssetKey, type Cluster } from './clusters.js';
 
 /**
  * The asset allowlist (ADR-0016).
@@ -100,6 +101,10 @@ export const tokenAssetSchema = z
  * ledger stores and what arrives on a withdrawal request.
  */
 export interface AssetRegistry {
+  /** Which cluster these keys belong to. */
+  readonly cluster: Cluster;
+  /** The native asset's key on this cluster — `devnet:SOL`. */
+  readonly nativeKey: string;
   /** Every asset key the platform will credit, including the native asset. */
   readonly keys: readonly string[];
   readonly tokens: readonly TokenAsset[];
@@ -113,23 +118,41 @@ export interface AssetRegistry {
   decimalsOf(assetKey: string): number;
 }
 
+/**
+ * One registry per cluster (ADR-0021).
+ *
+ * Every key it produces and every key it answers about is cluster-qualified,
+ * because that is what the ledger stores. A registry that spoke in bare mints
+ * would have to be translated at each call site, and the translation is
+ * exactly where "which cluster was this?" gets lost.
+ *
+ * The same mint address can legitimately appear on two clusters — a devnet
+ * USDC faucet mint and the real one — and they are different assets with
+ * different values. Two registries, two keys, no shared state.
+ */
 export function createAssetRegistry(input: {
+  readonly cluster: Cluster;
   readonly nativeDecimals: number;
   readonly tokens: readonly TokenAsset[];
 }): AssetRegistry {
-  const byKey = new Map(input.tokens.map((token) => [token.mint, token]));
-  const keys = Object.freeze([NATIVE_ASSET_KEY, ...input.tokens.map((t) => t.mint)]);
+  const qualify = (asset: string): string => ledgerAssetKey(input.cluster, asset);
+
+  const nativeKey = qualify(NATIVE_ASSET_KEY);
+  const byKey = new Map(input.tokens.map((token) => [qualify(token.mint), token]));
+  const keys = Object.freeze([nativeKey, ...input.tokens.map((token) => qualify(token.mint))]);
 
   return {
+    cluster: input.cluster,
+    nativeKey,
     keys,
     tokens: Object.freeze([...input.tokens]),
-    isAllowed: (assetKey) => assetKey === NATIVE_ASSET_KEY || byKey.has(assetKey),
+    isAllowed: (assetKey) => assetKey === nativeKey || byKey.has(assetKey),
     isToken: (assetKey) => byKey.has(assetKey),
     token: (assetKey) => byKey.get(assetKey),
     symbolOf: (assetKey) =>
-      assetKey === NATIVE_ASSET_KEY ? NATIVE_ASSET_KEY : (byKey.get(assetKey)?.symbol ?? assetKey),
+      assetKey === nativeKey ? NATIVE_ASSET_KEY : (byKey.get(assetKey)?.symbol ?? assetKey),
     decimalsOf: (assetKey) =>
-      assetKey === NATIVE_ASSET_KEY
+      assetKey === nativeKey
         ? input.nativeDecimals
         : (byKey.get(assetKey)?.decimals ?? input.nativeDecimals),
   };

@@ -58,8 +58,10 @@ test.describe('deposit journey', () => {
     await expect(main).toContainText(/balances/i);
 
     const visible = await main.innerText();
-    // Nothing that could be mistaken for money the user does not have.
-    expect(visible).not.toMatch(/\$\s?\d/);
+    // Nothing that could be mistaken for money the user does not have. `$0.00`
+    // is allowed: an empty portfolio IS worth nothing, and the valuation card
+    // says so rather than inventing a figure (Task 3).
+    expect(visible).not.toMatch(/\$\s?(?!0\.00\b)[\d,]*[1-9][\d,]*(\.\d+)?/);
     expect(visible).not.toMatch(/[1-9][\d,]*\.\d+\s*SOL/);
   });
 

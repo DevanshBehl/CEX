@@ -60,7 +60,18 @@ export interface DepositRepository {
     instructionIndex: number,
     tx?: Executor,
   ): Promise<DepositRecord | null>;
-  listForUser(userId: string, limit: number, tx?: Executor): Promise<DepositRecord[]>;
+  /**
+   * One cluster's deposits (ADR-0021).
+   *
+   * `chain` is required: a list merging devnet and mainnet deposits would be
+   * unreadable, and any total taken from it would be wrong.
+   */
+  listForUser(
+    userId: string,
+    limit: number,
+    chain: string,
+    tx?: Executor,
+  ): Promise<DepositRecord[]>;
 }
 
 export function createDepositRepository(db: Executor): DepositRepository {
@@ -147,9 +158,9 @@ export function createDepositRepository(db: Executor): DepositRepository {
       return row ? toRecord(row) : null;
     },
 
-    async listForUser(userId, limit, tx) {
+    async listForUser(userId, limit, chain, tx) {
       const rows = await exec(tx).deposit.findMany({
-        where: { userId },
+        where: { userId, chain },
         orderBy: { createdAt: 'desc' },
         take: limit,
       });

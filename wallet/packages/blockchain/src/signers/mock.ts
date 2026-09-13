@@ -1,5 +1,12 @@
 import { createHash, createHmac } from 'node:crypto';
-import type { KeyRef, SignRequest, SignResult, Signer } from '../signer.js';
+import type {
+  KeyProvisioner,
+  KeyRef,
+  ProvisionedKey,
+  SignRequest,
+  SignResult,
+  Signer,
+} from '../signer.js';
 
 /**
  * A signer for development and tests. NOT CRYPTOGRAPHY.
@@ -54,7 +61,7 @@ export interface MockSignerOptions {
   readonly onBanner?: (message: string) => void;
 }
 
-export interface MockSigner extends Signer {
+export interface MockSigner extends Signer, KeyProvisioner {
   readonly kind: 'mock';
   /**
    * Queue a fault for a request.
@@ -122,6 +129,30 @@ export function createMockSigner(options: MockSignerOptions = {}): MockSigner {
     };
   }
 
+  /**
+   * base58, so a mock address is shaped like a Solana one.
+   *
+   * Hand-rolled because `@wallet/blockchain` is chain-independent by
+   * construction and must not depend on `@wallet/solana` — the direction of
+   * that dependency is the whole reason the package exists.
+   */
+  function base58(bytes: Uint8Array): string {
+    const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    let value = 0n;
+    for (const byte of bytes) value = (value << 8n) | BigInt(byte);
+
+    let out = '';
+    while (value > 0n) {
+      out = ALPHABET[Number(value % 58n)] + out;
+      value /= 58n;
+    }
+    for (const byte of bytes) {
+      if (byte !== 0) break;
+      out = '1' + out;
+    }
+    return out;
+  }
+
   function publicKeyFor(keyRef: KeyRef): Uint8Array {
     return new Uint8Array(
       createHash('sha256')
@@ -136,6 +167,34 @@ export function createMockSigner(options: MockSignerOptions = {}): MockSigner {
 
     async getPublicKey(keyRef) {
       return publicKeyFor(keyRef);
+    },
+
+    /**
+     * A per-user "threshold group" that is nothing of the kind.
+     *
+     * One deterministic key, derived from the seed, presented as a 3-of-5
+     * group. It exists so the segregated withdrawal path — pay from the user's
+     * own address, sign with the user's own key, house pays the fee — can be
+     * exercised end to end without five participant processes. The property it
+     * genuinely provides is the one those tests depend on: DIFFERENT users get
+     * DIFFERENT addresses, and the address is the public key of whatever signs
+     * for it.
+     *
+     * Idempotent for free, because it is a pure function of the seed and the
+     * key reference.
+     */
+    async provisionKey(keyRef: KeyRef): Promise<ProvisionedKey> {
+      announce(`provision:${keyRef.id}`);
+      return {
+        keyRef: keyRef.id,
+        address: base58(publicKeyFor(keyRef)),
+        threshold: 3,
+        participants: 5,
+        // Always false: nothing is stored, so this mock cannot distinguish a
+        // first provisioning from a repeat. A test that needs that distinction
+        // needs the real coordinator.
+        existing: false,
+      };
     },
 
     async sign(request: SignRequest): Promise<SignResult> {

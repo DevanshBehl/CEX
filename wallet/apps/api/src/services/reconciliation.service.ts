@@ -1,7 +1,7 @@
 import type { ChainReader } from '@wallet/blockchain';
 import { createLedgerRepository, type PrismaClient } from '@wallet/db';
 import { logSecurityEvent, type Logger } from '@wallet/logger';
-import { IN_FLIGHT_WITHDRAWAL_STATUSES } from '@wallet/types';
+import { IN_FLIGHT_WITHDRAWAL_STATUSES, type Cluster } from '@wallet/types';
 
 export interface AssetReconciliation {
   readonly asset: string;
@@ -32,12 +32,41 @@ export interface AssetReconciliation {
   readonly unexplainedShortfall: boolean;
 }
 
+/**
+ * One user's segregated position, compared against their own address
+ * (ADR-0020, prompt Task 1.3).
+ */
+export interface UserReconciliation {
+  readonly userId: string;
+  readonly asset: string;
+  /** What this user's own addresses hold, read from the chain. */
+  readonly observed: string;
+  /** What the ledger says they hold there. */
+  readonly ledger: string;
+  /** What the platform owes them. */
+  readonly liability: string;
+  readonly residual: string;
+  /**
+   * True when this user's own position does not reconcile.
+   *
+   * CRITICAL, not informational: under segregation a user's funds are supposed
+   * to be identifiable and exclusively theirs. A divergence means either their
+   * money is not where the books say, or someone else's is.
+   */
+  readonly diverged: boolean;
+  readonly addressesChecked: number;
+}
+
 export interface ReconciliationReport {
   readonly runAt: string;
   readonly assets: readonly AssetReconciliation[];
   readonly healthy: boolean;
   /** Deposit addresses + nonce accounts + custody tiers (rule 141). */
   readonly addressesConsidered: number;
+  /** Per-user results. Empty when segregated reconciliation is disabled. */
+  readonly users: readonly UserReconciliation[];
+  /** Users whose own position does not reconcile. Always a critical alert. */
+  readonly divergedUsers: number;
   /** Withdrawals that have left the ledger but not yet settled. */
   readonly withdrawalsInFlight: number;
 }
@@ -46,6 +75,16 @@ export interface ReconciliationDeps {
   readonly db: PrismaClient;
   readonly reader: ChainReader;
   readonly chain: string;
+  /**
+   * Which cluster's books to compare (ADR-0021).
+   *
+   * Separate from `chain` because they answer different questions: `chain`
+   * filters the ADDRESS rows, `cluster` filters the LEDGER rows. Reconciling
+   * every cluster's totals against one cluster's addresses would report a
+   * shortfall the size of every other cluster — which is what this did before
+   * the cluster dimension existed.
+   */
+  readonly cluster: Cluster;
   readonly logger: Logger;
   /**
    * Platform addresses that are not user deposit addresses: the treasury and
@@ -76,7 +115,7 @@ export function createReconciliationService(deps: ReconciliationDeps) {
 
   return {
     async run(): Promise<ReconciliationReport> {
-      const totals = await ledger.getAssetTotals();
+      const totals = await ledger.getAssetTotals(deps.cluster);
 
       /**
        * EVERY platform-owned address (rule 141).
@@ -169,12 +208,117 @@ export function createReconciliationService(deps: ReconciliationDeps) {
         });
       }
 
+      /*
+       * PER-USER RECONCILIATION (ADR-0020).
+       *
+       * The aggregate check above is necessary and no longer sufficient. Under
+       * segregation each user's funds sit at their own address, and a total
+       * that reconciles while one user is short and another long is precisely
+       * the failure this custody model exists to prevent. Only a per-user
+       * comparison sees it.
+       *
+       * Addresses are grouped by owner first, so one RPC read per address
+       * serves whichever users own it — the naive shape is one read per
+       * (user, address) pair and repeats work.
+       */
+      const positions = await ledger.getSegregatedPositions(deps.cluster);
+
+      /*
+       * Addresses fetched ONCE for everyone, not once per position.
+       *
+       * The obvious shape — for each (user, asset) position, query that user's
+       * addresses and read each balance — is an N+1 query plus a redundant RPC
+       * read for every asset the user holds. At a few hundred users it is slow
+       * enough to widen the window in which the aggregate and per-user
+       * readings disagree, which shows up as phantom drift rather than as a
+       * performance problem.
+       */
+      const owners = [...new Set(positions.map((position) => position.ownerId))];
+      const ownedAddresses = await deps.db.address.findMany({
+        where: { chain: deps.chain, status: 'active', wallet: { userId: { in: owners } } },
+        select: { address: true, wallet: { select: { userId: true } } },
+      });
+
+      const addressesByOwner = new Map<string, string[]>();
+      for (const row of ownedAddresses) {
+        const list = addressesByOwner.get(row.wallet.userId) ?? [];
+        list.push(row.address);
+        addressesByOwner.set(row.wallet.userId, list);
+      }
+
+      // One balance read per (address, asset), shared across that user's
+      // positions. A user holding three assets previously read every address
+      // three times.
+      const balances = new Map<string, bigint | null>();
+      const readBalance = async (address: string, asset: string): Promise<bigint | null> => {
+        const key = `${address}:${asset}`;
+        const cached = balances.get(key);
+        if (cached !== undefined) return cached;
+
+        let value: bigint | null;
+        try {
+          value = BigInt(await deps.reader.getBalance(address, asset));
+        } catch {
+          value = null;
+        }
+        balances.set(key, value);
+        return value;
+      };
+
+      const users: UserReconciliation[] = [];
+
+      for (const position of positions) {
+        const owned = addressesByOwner.get(position.ownerId) ?? [];
+
+        let observed = 0n;
+        let checked = 0;
+        for (const address of owned) {
+          const balance = await readBalance(address, position.asset);
+          if (balance === null) continue;
+          observed += balance;
+          checked += 1;
+        }
+
+        const residual = observed - BigInt(position.chainAssets);
+
+        users.push({
+          userId: position.ownerId,
+          asset: position.asset,
+          observed: observed.toString(),
+          ledger: position.chainAssets,
+          liability: position.liability,
+          residual: residual.toString(),
+          /*
+           * Only when every address was readable, and only when the user
+           * actually has one.
+           *
+           * An RPC failure is an incomplete reading, not evidence that funds
+           * are missing — and paging someone at 3am for a timeout destroys the
+           * alert's meaning.
+           */
+          diverged: residual !== 0n && owned.length > 0 && checked === owned.length,
+          addressesChecked: checked,
+        });
+      }
+
+      const divergedUsers = users.filter((user) => user.diverged).length;
+
+      if (divergedUsers > 0) {
+        // CRITICAL. A user's own funds are not where the books say they are.
+        logSecurityEvent(deps.logger, 'reconciliation.user_diverged', {
+          outcome: 'failure',
+          count: divergedUsers,
+        });
+      }
+
       return {
         runAt: new Date().toISOString(),
         assets,
-        healthy,
+        healthy: healthy && divergedUsers === 0,
         addressesConsidered: addresses.length,
         withdrawalsInFlight,
+        users,
+        divergedUsers,
       };
     },
   };

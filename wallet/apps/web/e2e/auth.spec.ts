@@ -131,7 +131,19 @@ test.describe('security properties visible from the browser', () => {
     // contents of <script> tags, and Next.js inlines its RSC payload there —
     // which is full of numbers the user never sees.
     const visible = await page.locator('main').innerText();
-    expect(visible, 'a currency amount is being displayed').not.toMatch(/\$\s?\d/);
+
+    /*
+     * A NON-ZERO currency amount. `$0.00` is permitted, and is what the
+     * portfolio card shows once valuation exists (Task 3) — a new account
+     * genuinely is worth nothing, and that is not a fabricated number.
+     *
+     * The guard still bites on the thing it was written for: any figure the
+     * user does not own would have a non-zero digit before the decimal or
+     * after it.
+     */
+    expect(visible, 'a non-zero currency amount is being displayed').not.toMatch(
+      /\$\s?(?!0\.00\b)[\d,]*[1-9][\d,]*(\.\d+)?/,
+    );
     expect(visible, 'a token amount is being displayed').not.toMatch(/\d+\.\d{2,}\s*(SOL|USDC)/i);
   });
 });

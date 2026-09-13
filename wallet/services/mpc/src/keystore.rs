@@ -74,6 +74,21 @@ impl Kek {
         Ok(out)
     }
 
+    /// A second handle to the same KEK, explicitly.
+    ///
+    /// `Kek` is deliberately not `Clone`: key material should never be
+    /// duplicated by an implicit copy, and a stray `.clone()` in a collection
+    /// or a closure is exactly how that happens unnoticed.
+    ///
+    /// Two components in ONE process do legitimately need the same KEK — a
+    /// participant sealing nonces and a signing service sealing keys share it —
+    /// and the alternative is keeping the base64 secret in memory to re-parse,
+    /// which is strictly worse. So duplication is available and must be
+    /// written out, which is the point.
+    pub fn duplicate(&self) -> Self {
+        Self(self.0.clone())
+    }
+
     pub fn open(&self, sealed: &[u8]) -> Result<Vec<u8>> {
         if sealed.len() <= NONCE_BYTES {
             return Err(MpcError::Crypto("ciphertext_truncated"));

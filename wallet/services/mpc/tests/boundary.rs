@@ -42,7 +42,7 @@ fn harness() -> Harness {
             signer,
             store,
             caller,
-            participant: None,
+            participant_kek: None,
             coordinator: None,
         })),
         client,

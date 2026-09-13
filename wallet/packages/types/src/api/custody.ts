@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { clusterSchema } from '../clusters.js';
 import { baseUnitsSchema } from '../money.js';
 
 /**
@@ -27,6 +28,16 @@ export const chainSchema = z.string().min(1).max(32);
 
 export const balanceSchema = z.object({
   asset: assetSchema,
+  /**
+   * What to CALL this asset — `SOL`, `USDC`.
+   *
+   * Carried in the response rather than left to the client to look up. The
+   * server holds the allowlist and therefore the only authoritative mapping
+   * from a mint address to a name; a client joining a raw mint against a
+   * separate endpoint is a join that can be forgotten, and when it was, the
+   * dashboard rendered a 44-character base58 string where a ticker belongs.
+   */
+  symbol: z.string(),
   /** Display metadata. Never used in arithmetic (rule 64). */
   decimals: z.number().int().min(0).max(32),
   available: baseUnitsSchema,
@@ -36,6 +47,14 @@ export const balanceSchema = z.object({
 export type Balance = z.infer<typeof balanceSchema>;
 
 export const listBalancesResponseSchema = z.object({
+  /**
+   * Which cluster these balances are (ADR-0021).
+   *
+   * Echoed back rather than assumed: a client that sent no header, or whose
+   * stored preference was stale, otherwise has no way to know whether the
+   * numbers it is rendering are the ones it asked for.
+   */
+  cluster: clusterSchema,
   balances: z.array(balanceSchema),
 });
 export type ListBalancesResponse = z.infer<typeof listBalancesResponseSchema>;

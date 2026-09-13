@@ -171,7 +171,13 @@ function fakeTransaction(input: {
 }
 
 describe('transfer parsing', () => {
-  const options = { watchedAddresses: new Set([WATCHED]), txReference: 'sig1' };
+  // Every parse is cluster-scoped now: an event with a bare asset would credit
+  // an account that spans clusters (ADR-0021).
+  const options = {
+    watchedAddresses: new Set([WATCHED]),
+    txReference: 'sig1',
+    cluster: 'devnet' as const,
+  };
 
   it('emits an event when a watched address gains lamports', () => {
     const events = parseTransfers(
@@ -180,7 +186,10 @@ describe('transfer parsing', () => {
     );
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
-      asset: 'SOL',
+      // Cluster-qualified: `SOL` alone would be one ledger account shared by
+      // devnet and mainnet (ADR-0021).
+      asset: 'devnet:SOL',
+      chain: 'solana:devnet',
       amount: '1000',
       to: WATCHED,
       from: OTHER,
@@ -241,7 +250,7 @@ describe('transfer parsing', () => {
         pre: [10_000, 0, 0],
         post: [8_000, 1_000, 1_000],
       }),
-      { watchedAddresses: new Set([WATCHED, second]), txReference: 'sig1' },
+      { watchedAddresses: new Set([WATCHED, second]), txReference: 'sig1', cluster: 'devnet' },
     );
     expect(events).toHaveLength(2);
     // The uniqueness key is (chain, signature, instructionIndex), so two

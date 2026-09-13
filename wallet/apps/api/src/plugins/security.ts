@@ -30,7 +30,17 @@ const plugin: FastifyPluginAsync<SecurityOptions> = async (app, options) => {
     origin: [options.webOrigin],
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['content-type', 'x-correlation-id'],
+    /*
+     * An ALLOWLIST, so every header the browser sends must be named here.
+     *
+     * `x-solana-cluster` (ADR-0021) is a custom header, which makes every
+     * request a preflighted one — and a header missing from this list fails
+     * the preflight, so the browser blocks the request entirely. Nothing
+     * server-side notices: every integration test injects into Fastify
+     * directly and never crosses an origin, so the suite stays green while the
+     * application cannot make a single call. The E2E suite is what catches it.
+     */
+    allowedHeaders: ['content-type', 'x-correlation-id', 'x-solana-cluster'],
     exposedHeaders: ['x-correlation-id'],
     maxAge: 600,
   });

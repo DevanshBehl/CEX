@@ -97,7 +97,11 @@ function tx(input: {
   } as unknown as ParsedTransactionWithMeta;
 }
 
-const watched = { watchedOwners: new Set([OWNER]), txReference: 'sig-1' };
+const watched = {
+  watchedOwners: new Set([OWNER]),
+  txReference: 'sig-1',
+  cluster: 'devnet' as const,
+};
 
 describe('token transfer parsing (rules 122-123)', () => {
   it('credits an increase to a watched owner, keyed on the mint', () => {
@@ -110,7 +114,14 @@ describe('token transfer parsing (rules 122-123)', () => {
     );
 
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ asset: USDC, amount: '250', to: OWNER });
+    // The mint is the asset, qualified by cluster: the same mint address on
+    // two clusters is two assets with two different values (ADR-0021).
+    expect(events[0]).toMatchObject({
+      asset: `devnet:${USDC}`,
+      chain: 'solana:devnet',
+      amount: '250',
+      to: OWNER,
+    });
   });
 
   it('treats an account absent from preTokenBalances as starting at zero', () => {

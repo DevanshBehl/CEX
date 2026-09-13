@@ -1,6 +1,7 @@
 import type { ParsedTransactionWithMeta } from '@solana/web3.js';
 import type { Address, TransferEvent } from '@wallet/blockchain';
-import { NATIVE_ASSET, SOLANA_CHAIN_ID } from './constants.js';
+import type { Cluster } from '@wallet/types';
+import { nativeAssetKey, solanaChainId } from './constants.js';
 import { toConfirmation } from './rpc.js';
 
 /**
@@ -43,6 +44,14 @@ export interface ParseOptions {
   /** Only these addresses produce events. */
   readonly watchedAddresses: ReadonlySet<Address>;
   readonly txReference: string;
+  /**
+   * Which cluster these bytes came from.
+   *
+   * Required, not defaulted. An event carrying a bare `SOL` would credit a
+   * ledger account that spans clusters, and devnet play money would add to a
+   * mainnet balance with every invariant still passing (ADR-0021).
+   */
+  readonly cluster: Cluster;
 }
 
 /**
@@ -100,8 +109,8 @@ export function parseTransfers(
     if (delta <= 0n) continue;
 
     events.push({
-      chain: SOLANA_CHAIN_ID,
-      asset: NATIVE_ASSET,
+      chain: solanaChainId(options.cluster),
+      asset: nativeAssetKey(options.cluster),
       amount: delta.toString(),
       to: address,
       from: inferSender(accountKeys, preBalances, postBalances, index),

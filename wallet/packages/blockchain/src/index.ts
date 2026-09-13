@@ -6,6 +6,7 @@ export * from './adapter.js';
 export {
   createRustSigner,
   mpcCanonicalString,
+  type MpcRole,
   type RustSigner,
   type RustSignerOptions,
 } from './signers/rust-single-key.js';

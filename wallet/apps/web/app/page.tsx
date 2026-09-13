@@ -118,6 +118,8 @@ export default function HomePage() {
           been independently audited and is not production custody.
           {capabilities?.signing.thresholdProtected === false &&
             ' Signing currently uses a single key held in a separate service, not threshold signing.'}
+          {capabilities?.signing.thresholdProtected === true &&
+            ' Signing is 3-of-5 threshold, but the participants are five processes rather than five hosts.'}
         </p>
       </div>
     </div>

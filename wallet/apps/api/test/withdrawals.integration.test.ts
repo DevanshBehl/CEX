@@ -22,6 +22,7 @@ import {
   seedNonceAccounts,
   seedSession,
   seedSteppedUpSession,
+  SOL_KEY,
   startHarness,
   type Harness,
 } from './helpers.js';
@@ -55,7 +56,7 @@ beforeAll(async () => {
     create: { id: OPERATOR, status: 'active' },
     update: {},
   });
-  await fundHouse(h, NATIVE_ASSET, SOL(10n));
+  await fundHouse(h, SOL_KEY, SOL(10n));
   await seedNonceAccounts(h, nonces, 5);
 });
 
@@ -85,9 +86,9 @@ async function fundedUser(
   options: { knownDestination?: boolean } = {},
 ): Promise<{ userId: string; cookie: string }> {
   const session = await seedSession(h, { steppedUp: true });
-  await creditUser(h, session.userId, NATIVE_ASSET, amount);
+  await creditUser(h, session.userId, SOL_KEY, amount);
   if (options.knownDestination !== false) {
-    await markDestinationKnown(h, session.userId, NATIVE_ASSET, DEST);
+    await markDestinationKnown(h, session.userId, SOL_KEY, DEST);
   }
   return { userId: session.userId, cookie: session.cookie };
 }
@@ -113,7 +114,7 @@ const statusOf = async (id: string): Promise<WithdrawalStatus> =>
   (await createWithdrawalRepository(h.app.appDeps.db).findById(id))!.status;
 
 const balanceOf = async (userId: string) =>
-  createLedgerRepository(h.app.appDeps.db).getUserBalance(userId, NATIVE_ASSET);
+  createLedgerRepository(h.app.appDeps.db).getUserBalance(userId, SOL_KEY);
 
 // ---------------------------------------------------------------------------
 // Submission, risk, and locking
@@ -227,7 +228,7 @@ describe('submission (master-prompt rules 131-137)', () => {
 
   it('requires a fresh step-up (ADR-0011)', async () => {
     const stale = await seedSession(h, { steppedUp: false });
-    await creditUser(h, stale.userId, NATIVE_ASSET, SOL(100n));
+    await creditUser(h, stale.userId, SOL_KEY, SOL(100n));
 
     const response = await submit(stale.cookie);
     expect(response.statusCode).toBe(403);

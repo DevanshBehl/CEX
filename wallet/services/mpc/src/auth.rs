@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -86,6 +86,59 @@ impl CallerVerifier {
     }
 }
 
+/// The other half of `CallerVerifier`: proves who is calling.
+///
+/// # Why the coordinator needs one
+///
+/// Every participant endpoint authenticates its caller, and a participant's
+/// only legitimate caller is the coordinator. Until this existed the
+/// coordinator sent unsigned requests — which every participant would have
+/// rejected with 401 the first time a real deployment ran a round. The tests
+/// did not catch it because they played the coordinator themselves, in test
+/// code that did sign. The fix is that the coordinator holds a key of its own.
+///
+/// This is the ONLY place in the service that holds a private key which is not
+/// FROST share material, and it deliberately cannot sign transactions: it signs
+/// canonical request strings, which are not valid anything else.
+pub struct CallerSigner {
+    key: SigningKey,
+}
+
+impl CallerSigner {
+    /// From a base64 32-byte Ed25519 seed.
+    pub fn from_base64(seed_base64: &str) -> Result<Self> {
+        let bytes = B64
+            .decode(seed_base64.trim())
+            .map_err(|_| MpcError::Internal("coordinator_key_not_base64"))?;
+
+        let bytes: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| MpcError::Internal("coordinator_key_wrong_length"))?;
+
+        Ok(Self {
+            key: SigningKey::from_bytes(&bytes),
+        })
+    }
+
+    /// The public key participants must be configured to trust.
+    ///
+    /// Printed at boot precisely so the operator does not have to derive it,
+    /// and so a roster misconfiguration is visible in the log rather than as a
+    /// 401 during the first withdrawal.
+    pub fn public_key_base64(&self) -> String {
+        B64.encode(self.key.verifying_key().to_bytes())
+    }
+
+    pub fn sign(&self, request: &SignedRequest<'_>) -> String {
+        B64.encode(
+            self.key
+                .sign(canonical_string(request).as_bytes())
+                .to_bytes(),
+        )
+    }
+}
+
 /// The exact bytes a caller signs.
 ///
 /// Field-separated with a character that cannot appear in any field, so
@@ -114,7 +167,6 @@ pub fn secure_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
 
     fn caller() -> (SigningKey, CallerVerifier) {
         let signing = SigningKey::from_bytes(&[3u8; 32]);
@@ -222,6 +274,27 @@ mod tests {
         let a = canonical_string(&request("ab", &hash, 1));
         let b = canonical_string(&request("a", &hash, 1));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_signer_produces_signatures_its_matching_verifier_accepts() {
+        let signer = CallerSigner::from_base64(&B64.encode([5u8; 32])).unwrap();
+        let verifier = CallerVerifier::new(&signer.public_key_base64(), 60).unwrap();
+
+        let hash = hash_payload(b"payload");
+        let req = request("r1", &hash, 1000);
+        assert!(verifier.verify(&req, &signer.sign(&req), 1000).is_ok());
+
+        // And a verifier configured for anyone else does not.
+        let other = CallerSigner::from_base64(&B64.encode([6u8; 32])).unwrap();
+        let stranger = CallerVerifier::new(&other.public_key_base64(), 60).unwrap();
+        assert!(stranger.verify(&req, &signer.sign(&req), 1000).is_err());
+    }
+
+    #[test]
+    fn a_malformed_signer_seed_is_refused_at_construction() {
+        assert!(CallerSigner::from_base64("not-base64!!").is_err());
+        assert!(CallerSigner::from_base64(&B64.encode([0u8; 16])).is_err());
     }
 
     #[test]

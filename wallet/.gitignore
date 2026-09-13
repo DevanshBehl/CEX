@@ -20,3 +20,4 @@ test-results/
 services/mpc/target/
 services/mpc/*.sqlite
 services/mpc/*.sqlite-*
+scripts/.mpc-cluster.env

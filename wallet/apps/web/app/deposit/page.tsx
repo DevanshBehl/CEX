@@ -12,15 +12,30 @@ import {
   SystemNote,
 } from '@/components/ui';
 import { AddressDisplay } from '@/components/crypto';
+import { CLUSTER_DISPLAY, type Cluster } from '@wallet/types';
+import { FaucetPanel } from '@/features/network/faucet-panel';
+import { AssetBreakdown } from '@/features/portfolio/asset-breakdown';
+import { usePortfolioSummary } from '@/features/portfolio/use-portfolio';
+import { useNetwork } from '@/features/network/network-context';
 
 export default function DepositPage() {
   const [address, setAddress] = useState<DepositAddress | null>(null);
+  /*
+   * A deposit address is PER CLUSTER (ADR-0021): the same user has a different
+   * one on each, and showing a devnet address while the pill says Mainnet is
+   * how someone sends real SOL somewhere it cannot be recovered from.
+   */
+  const { version, ready, cluster } = useNetwork();
+  const summary = usePortfolioSummary();
   const [error, setError] = useState<{ message: string; correlationId: string | null } | null>(
     null,
   );
 
   useEffect(() => {
+    if (!ready) return;
     let cancelled = false;
+    setAddress(null);
+    setError(null);
     void (async () => {
       try {
         const result = await api.getDepositAddress();
@@ -37,7 +52,7 @@ export default function DepositPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [version, ready, cluster]);
 
   return (
     <div className="animate-fade-up">
@@ -94,7 +109,28 @@ export default function DepositPage() {
               </div>
 
               <div className="mt-4">
-                <QrCode value={address.address} />
+                <ExplorerLink value={address.address} cluster={cluster} />
+              </div>
+
+              {/* Test clusters only; nothing is rendered on mainnet. */}
+              <div className="mt-6 max-w-xl">
+                <FaucetPanel address={address.address} />
+              </div>
+
+              {/*
+                What is actually held AT this address (ADR-0020, Task 4).
+                
+                Beside the address rather than only on the dashboard: the claim
+                segregated custody makes is that these funds are at an address
+                that is the user's, and the two facts are worth seeing
+                together.
+              */}
+              <div className="mt-6">
+                <AssetBreakdown
+                  allocations={summary.data?.allocations ?? []}
+                  address={address.address}
+                  loading={summary.loading}
+                />
               </div>
             </Section>
           </div>
@@ -149,10 +185,28 @@ export default function DepositPage() {
  * encoder is wired in. Rather than ship a fake that appears to work and does
  * not, it links out until then.
  */
-function QrCode({ value }: { value: string }) {
+/**
+ * A link to this address on a block explorer, ON THE RIGHT CLUSTER.
+ *
+ * Without the cluster the link always resolves to mainnet, where a devnet
+ * address either does not exist or — worse — is a DIFFERENT account that
+ * happens to occupy that address. Either way the page contradicts the one the
+ * user is looking at (ADR-0021).
+ *
+ * `localnet` gets no link at all: a local validator is not on any explorer,
+ * and a link that always 404s is worse than none.
+ */
+function ExplorerLink({ value, cluster }: { value: string; cluster: Cluster | undefined }) {
+  if (cluster === undefined || cluster === 'localnet') return null;
+
+  const query = CLUSTER_DISPLAY[cluster].explorerQuery;
+  const href = `https://explorer.solana.com/address/${value}${
+    query === '' ? '' : `?cluster=${query}`
+  }`;
+
   return (
     <a
-      href={`https://solscan.io/account/${value}`}
+      href={href}
       target="_blank"
       rel="noopener noreferrer"
       className="text-sm text-accent transition-colors duration-micro ease-atlas hover:text-accent-strong"

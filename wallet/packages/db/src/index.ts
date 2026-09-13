@@ -39,6 +39,8 @@ export {
   type LedgerRepository,
   type LedgerTransactionKind,
   type PostTransactionInput,
+  type SegregatedPositionRow,
+  type TimedEntryRow,
   type UserBalanceRow,
 } from './repositories/ledger.repository.js';
 export {
@@ -56,6 +58,12 @@ export {
   type RecordDepositResult,
 } from './repositories/deposit.repository.js';
 export { createCursorRepository, type CursorRepository } from './repositories/cursor.repository.js';
+export {
+  createPriceRepository,
+  type PriceRepository,
+  type PriceTickInput,
+  type PriceTickRow,
+} from './repositories/price.repository.js';
 
 // --- Phase 3 ---------------------------------------------------------------
 export {

@@ -23,7 +23,9 @@ let db: PrismaClient;
 let owner: PrismaClient;
 let ledger: ReturnType<typeof createLedgerRepository>;
 
-const ASSET = 'TESTSOL';
+// Cluster-qualified (ADR-0021). The database now REFUSES a bare asset key, so
+// a test using one would fail for the wrong reason.
+const ASSET = 'localnet:TESTSOL';
 const userA = newId();
 const userB = newId();
 
@@ -195,8 +197,8 @@ describe('the database rejects an unbalanced transaction (rule 200)', () => {
                 direction: 'debit',
               },
               {
-                account: { ownerId: null, asset: 'OTHER', type: 'chain_assets' },
-                asset: 'OTHER',
+                account: { ownerId: null, asset: 'localnet:OTHER', type: 'chain_assets' },
+                asset: 'localnet:OTHER',
                 amount: '100',
                 direction: 'credit',
               },
@@ -390,6 +392,119 @@ describe('entry-level constraints', () => {
         SELECT gen_random_uuid(), t.id, a.id, 'MISMATCH', 1, 'debit', now()
         FROM ledger_transactions t, ledger_accounts a
         WHERE a.asset = '${ASSET}' LIMIT 1
+      `),
+    ).rejects.toThrow();
+  });
+});
+
+describe('cluster isolation, enforced by the database (ADR-0021)', () => {
+  const MAINNET = 'mainnet-beta:TESTSOL';
+
+  it('refuses a transaction that debits one cluster and credits another', async () => {
+    // The per-asset balance check catches this as two unbalanced groups. That
+    // it is caught at all is the point; the message is the database's.
+    await expect(
+      withTransaction(db, async (tx) =>
+        createLedgerRepository(tx).postTransaction(
+          {
+            kind: 'adjustment',
+            referenceType: 'test',
+            referenceId: newId(),
+            entries: [
+              {
+                account: { ownerId: null, asset: ASSET, type: 'chain_assets' },
+                asset: ASSET,
+                amount: '100',
+                direction: 'debit',
+              },
+              {
+                account: { ownerId: userA, asset: MAINNET, type: 'user_available' },
+                asset: MAINNET,
+                amount: '100',
+                direction: 'credit',
+              },
+            ],
+          },
+          tx,
+        ),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('REFUSES A TRANSACTION THAT BALANCES IN BOTH CLUSTERS', async () => {
+    /*
+     * The case the balance check alone lets through: two balanced pairs, one
+     * per cluster. Nothing is unbalanced and nothing crosses — and yet one
+     * financial event claims to have happened on two chains, which means
+     * settling it is undoable on one of them.
+     *
+     * This is what `ledger_entries_single_cluster` exists for, and this test
+     * is the only thing that proves the trigger is installed and firing.
+     */
+    await expect(
+      withTransaction(db, async (tx) =>
+        createLedgerRepository(tx).postTransaction(
+          {
+            kind: 'adjustment',
+            referenceType: 'test',
+            referenceId: newId(),
+            entries: [
+              {
+                account: { ownerId: null, asset: ASSET, type: 'chain_assets' },
+                asset: ASSET,
+                amount: '100',
+                direction: 'debit',
+              },
+              {
+                account: { ownerId: userA, asset: ASSET, type: 'user_available' },
+                asset: ASSET,
+                amount: '100',
+                direction: 'credit',
+              },
+              {
+                account: { ownerId: null, asset: MAINNET, type: 'chain_assets' },
+                asset: MAINNET,
+                amount: '100',
+                direction: 'debit',
+              },
+              {
+                account: { ownerId: userA, asset: MAINNET, type: 'user_available' },
+                asset: MAINNET,
+                amount: '100',
+                direction: 'credit',
+              },
+            ],
+          },
+          tx,
+        ),
+      ),
+    ).rejects.toThrow(/spans clusters/);
+  });
+
+  it('refuses an account whose asset carries no cluster', async () => {
+    // Straight to SQL: the repository's own helpers would be the thing under
+    // test otherwise, and the guarantee being checked is the database's.
+    await expect(
+      db.$executeRawUnsafe(`
+        INSERT INTO ledger_accounts (id, owner_id, asset, type, created_at)
+        VALUES (gen_random_uuid(), NULL, 'SOL', 'chain_assets', now())
+      `),
+    ).rejects.toThrow();
+  });
+
+  it('refuses an asset key whose prefix is not a real cluster', async () => {
+    await expect(
+      db.$executeRawUnsafe(`
+        INSERT INTO ledger_accounts (id, owner_id, asset, type, created_at)
+        VALUES (gen_random_uuid(), NULL, 'staging:SOL', 'chain_assets', now())
+      `),
+    ).rejects.toThrow();
+  });
+
+  it('refuses an address on an unqualified chain', async () => {
+    await expect(
+      db.$executeRawUnsafe(`
+        UPDATE addresses SET chain = 'solana' WHERE id = (SELECT id FROM addresses LIMIT 1)
       `),
     ).rejects.toThrow();
   });

@@ -17,6 +17,7 @@ import {
   markDestinationKnown,
   seedNonceAccounts,
   seedSession,
+  SOL_KEY,
   startHarness,
   usesConfiguredSigner,
   type Harness,
@@ -46,7 +47,7 @@ beforeAll(async () => {
   signer = createMockSigner({ onBanner: () => undefined });
 
   h = await startHarness({ nonceManager: nonces, broadcaster, signer });
-  await fundHouse(h, NATIVE_ASSET, SOL(50n));
+  await fundHouse(h, SOL_KEY, SOL(50n));
   nonceAddresses = await seedNonceAccounts(h, nonces, 60);
 });
 
@@ -64,8 +65,8 @@ let counter = 0;
 /** A locked withdrawal, ready for the signer. */
 async function lockedWithdrawal(amount = AMOUNT): Promise<{ id: string; userId: string }> {
   const session = await seedSession(h, { steppedUp: true });
-  await creditUser(h, session.userId, NATIVE_ASSET, SOL(100n));
-  await markDestinationKnown(h, session.userId, NATIVE_ASSET, DEST);
+  await creditUser(h, session.userId, SOL_KEY, SOL(100n));
+  await markDestinationKnown(h, session.userId, SOL_KEY, DEST);
 
   const response = await h.app.inject({
     method: 'POST',
@@ -90,7 +91,7 @@ const withdrawals = () => createWithdrawalRepository(h.app.appDeps.db);
 const statusOf = async (id: string): Promise<WithdrawalStatus> =>
   (await withdrawals().findById(id))!.status;
 const balanceOf = (userId: string) =>
-  createLedgerRepository(h.app.appDeps.db).getUserBalance(userId, NATIVE_ASSET);
+  createLedgerRepository(h.app.appDeps.db).getUserBalance(userId, SOL_KEY);
 
 /** Every entry in the ledger, for the books-balance assertion. */
 async function allEntries() {
@@ -185,7 +186,7 @@ describe('the full lifecycle', () => {
     expect(request?.outcome).toBe('succeeded');
     // Whichever signer is configured — the assertion is that the record names
     // it, not that it is any particular one.
-    expect(request?.signerKind).toBe(usesConfiguredSigner() ? 'rust-single-key' : 'mock');
+    expect(request?.signerKind).toBe(usesConfiguredSigner() ? 'rust-mpc' : 'mock');
 
     const serialized = JSON.stringify(request);
 

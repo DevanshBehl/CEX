@@ -28,6 +28,20 @@ export class UnbalancedTransactionError extends LedgerIntegrityError {
   }
 }
 
+/**
+ * One transaction, two clusters (ADR-0021).
+ *
+ * Devnet money and mainnet money are different money. A transaction touching
+ * both is either a bug in how an asset key was built or an attempt to move
+ * value between chains through the ledger, and neither is something to record
+ * and investigate later.
+ */
+export class CrossClusterTransactionError extends LedgerIntegrityError {
+  constructor(expected: string, found: string) {
+    super('transaction_spans_clusters', { expected, found });
+  }
+}
+
 export class InvalidEntryError extends LedgerIntegrityError {
   constructor(reason: string, detail?: Record<string, unknown>) {
     super(reason, detail);

@@ -7,9 +7,12 @@ import { createFakeChain, type FakeChain } from './fake-chain.js';
 import {
   browserHeaders,
   cookieFor,
+  assetKey,
   seedDepositAddress,
   seedSession,
   startHarness,
+  SOL_KEY,
+  TEST_CLUSTER,
   type Harness,
 } from './helpers.js';
 
@@ -441,7 +444,7 @@ describe('reconciliation', () => {
     const report = (await h.app.reconcile()) as {
       assets: Array<{ asset: string; residual: string; explanation: string }>;
     };
-    const sol = report.assets.find((a) => a.asset === NATIVE_ASSET);
+    const sol = report.assets.find((a) => a.asset === SOL_KEY);
     expect(sol).toBeDefined();
   });
 
@@ -458,26 +461,68 @@ describe('reconciliation', () => {
       healthy: boolean;
       assets: Array<{ asset: string; residual: string; explanation: string }>;
     };
-    const sol = report.assets.find((a) => a.asset === NATIVE_ASSET)!;
+    const sol = report.assets.find((a) => a.asset === SOL_KEY)!;
     expect(BigInt(sol.residual)).not.toBe(0n);
     expect(sol.explanation).toBeTruthy();
     expect(report.healthy).toBe(false);
   });
 
   it('reads from ledger entries, not from a cached balance (rule 165)', async () => {
-    const report = (await h.app.reconcile()) as {
-      assets: Array<{ asset: string; userLiabilities: string; ledgerChainAssets: string }>;
-    };
-    const sol = report.assets.find((a) => a.asset === NATIVE_ASSET);
-    if (sol) {
+    /*
+     * Both readings are taken, then compared, then RE-taken if they disagree.
+     *
+     * The reconcile call and the verifying SQL are two separate reads of a
+     * database other suites are concurrently writing to, so a credit landing
+     * between them makes the totals differ by exactly that credit — a race in
+     * the test, not drift in the ledger. Retrying settles it without weakening
+     * what is being asserted: that the reported figure comes from summing
+     * entries and not from anything cached.
+     */
+    const read = async (): Promise<[string | undefined, string | undefined]> => {
+      const report = (await h.app.reconcile()) as {
+        assets: Array<{ asset: string; ledgerChainAssets: string }>;
+      };
       const fromEntries = await h.app.appDeps.db.$queryRawUnsafe<Array<{ total: string }>>(
         `SELECT COALESCE(SUM(CASE WHEN e.direction='debit' THEN e.amount ELSE -e.amount END),0)::text AS total
          FROM ledger_entries e
          JOIN ledger_accounts a ON a.id = e.account_id
          WHERE a.type = 'chain_assets' AND a.asset = $1`,
-        NATIVE_ASSET,
+        SOL_KEY,
       );
-      expect(sol.ledgerChainAssets).toBe(fromEntries[0]?.total);
+      return [
+        report.assets.find((a) => a.asset === SOL_KEY)?.ledgerChainAssets,
+        fromEntries[0]?.total,
+      ];
+    };
+
+    let [reported, summed] = await read();
+    for (let attempt = 0; attempt < 3 && reported !== summed; attempt += 1) {
+      [reported, summed] = await read();
+    }
+
+    if (reported !== undefined) {
+      expect(reported).toBe(summed);
+    }
+  });
+
+  it('projects per-user positions from the same entries', async () => {
+    // Segregation's own version of the rule: a user's reported on-chain
+    // position must come from summing THEIR entries, not from a pool split.
+    const user = await newUserWithAddress();
+    const report = (await h.app.reconcile()) as {
+      users: Array<{ userId: string; asset: string; ledger: string }>;
+    };
+    const mine = report.users.filter((u) => u.userId === user.userId);
+    for (const position of mine) {
+      const [row] = await h.app.appDeps.db.$queryRawUnsafe<Array<{ total: string }>>(
+        `SELECT COALESCE(SUM(CASE WHEN e.direction='debit' THEN e.amount ELSE -e.amount END),0)::text AS total
+         FROM ledger_entries e
+         JOIN ledger_accounts a ON a.id = e.account_id
+         WHERE a.type = 'chain_assets' AND a.owner_id = $1::uuid AND a.asset = $2`,
+        user.userId,
+        position.asset,
+      );
+      expect(position.ledger).toBe(row?.total);
     }
   });
 });
@@ -511,7 +556,7 @@ async function creditDirect(transfer: TransferEvent): Promise<string> {
     db: h.app.appDeps.db,
     logger: h.logs.logger,
     // SOL only — the allowlist these deposit tests were written against.
-    assets: createAssetRegistry({ nativeDecimals: 9, tokens: [] }),
+    assets: createAssetRegistry({ cluster: TEST_CLUSTER, nativeDecimals: 9, tokens: [] }),
   });
   const result = await pipeline.creditTransfer(transfer, RENT);
   return result.outcome;
@@ -525,7 +570,11 @@ void cookieFor;
 // ---------------------------------------------------------------------------
 
 describe('non-allowlisted assets', () => {
-  const UNKNOWN_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  const UNKNOWN_MINT_ADDRESS = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  // What the REAL adapter would emit: cluster-qualified (ADR-0021). The
+  // database refuses an unqualified asset even on an ignored deposit, so a
+  // fixture using the bare mint would fail for the wrong reason.
+  const UNKNOWN_MINT = assetKey(UNKNOWN_MINT_ADDRESS);
 
   /** The pipeline as configured for these tests: SOL, no mints. */
   async function creditWithAllowlist(transfer: TransferEvent): Promise<CreditOutcome> {
@@ -533,7 +582,7 @@ describe('non-allowlisted assets', () => {
     return createDepositPipeline({
       db: h.app.appDeps.db,
       logger: h.logs.logger,
-      assets: createAssetRegistry({ nativeDecimals: 9, tokens: [] }),
+      assets: createAssetRegistry({ cluster: TEST_CLUSTER, nativeDecimals: 9, tokens: [] }),
     }).creditTransfer(transfer, RENT);
   }
 
@@ -579,7 +628,7 @@ describe('non-allowlisted assets', () => {
 
   it('labels an unknown NATIVE asset differently from an unknown mint', async () => {
     const user = await newUserWithAddress();
-    const transfer = chain.push({ to: user.address, amount: '10', asset: 'DOGE' });
+    const transfer = chain.push({ to: user.address, amount: '10', asset: assetKey('DOGE') });
     expect(await creditWithAllowlist(transfer)).toMatchObject({
       reason: 'asset_not_allowlisted',
     });
@@ -613,6 +662,6 @@ describe('non-allowlisted assets', () => {
 
     const output = h.logs.text();
     expect(output).toContain('deposit.ignored');
-    expect(output).not.toContain(UNKNOWN_MINT);
+    expect(output).not.toContain(UNKNOWN_MINT_ADDRESS);
   });
 });

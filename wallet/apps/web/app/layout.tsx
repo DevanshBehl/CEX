@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Inter, JetBrains_Mono } from 'next/font/google';
 import { SessionProvider } from '@/hooks/use-session';
+import { NetworkProvider } from '@/features/network/network-context';
 import { AppShell } from '@/components/app-shell';
 import './globals.css';
 
@@ -47,9 +48,17 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         */}
         <div className="atlas-grid" aria-hidden="true" />
 
-        <SessionProvider>
-          <AppShell>{children}</AppShell>
-        </SessionProvider>
+        {/*
+          The network wraps the session, not the other way round: which chain
+          the interface is about is decided before anyone signs in — the
+          switcher is populated from the unauthenticated /capabilities — and
+          every authenticated request carries it (ADR-0021).
+        */}
+        <NetworkProvider>
+          <SessionProvider>
+            <AppShell>{children}</AppShell>
+          </SessionProvider>
+        </NetworkProvider>
       </body>
     </html>
   );

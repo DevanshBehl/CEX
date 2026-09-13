@@ -12,3 +12,5 @@ export * from './withdrawal-states.js';
 export * from './api/withdrawal.js';
 export * from './assets.js';
 export * from './api/capabilities.js';
+export * from './clusters.js';
+export * from './api/portfolio.js';

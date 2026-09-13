@@ -8,7 +8,14 @@ import type {
   TransferPage,
   TxReference,
 } from '@wallet/blockchain';
-import { createSolanaAddressValidator, NATIVE_ASSET, SOLANA_CHAIN_ID } from '@wallet/solana';
+import {
+  createSolanaAddressValidator,
+  GENESIS_HASHES,
+  nativeAssetKey,
+  solanaChainId,
+} from '@wallet/solana';
+import type { Cluster } from '@wallet/types';
+import { TEST_CLUSTER } from './helpers.js';
 
 /**
  * A chain the tests control completely.
@@ -40,7 +47,23 @@ export interface FakeChain extends ChainAdapter {
   fetchCount(): number;
 }
 
-export function createFakeChain(): FakeChain {
+export interface FakeChainOptions {
+  /**
+   * Which cluster this fake claims to be.
+   *
+   * The boot-time genesis check compares what the endpoint reports against
+   * the cluster it is configured as, so a fake standing in for devnet has to
+   * report devnet's genesis hash or the server refuses to start — correctly,
+   * because that check exists to catch a URL that does not serve the network
+   * it is labelled with.
+   */
+  readonly cluster?: Cluster;
+}
+
+export function createFakeChain(options: FakeChainOptions = {}): FakeChain {
+  const cluster = options.cluster ?? TEST_CLUSTER;
+  const chainId = solanaChainId(cluster);
+  const nativeKey = nativeAssetKey(cluster);
   const validator = createSolanaAddressValidator();
   const byAddress = new Map<string, TransferEvent[]>();
   const balances = new Map<string, string>();
@@ -50,14 +73,16 @@ export function createFakeChain(): FakeChain {
   let fetches = 0;
 
   return {
-    chain: SOLANA_CHAIN_ID,
+    // Cluster-qualified, like the real adapter (ADR-0021). A bare `SOL` here
+    // would credit a ledger account no cluster-scoped query can see.
+    chain: chainId,
     validator,
 
     push(input) {
       sequence += 1;
       const transfer: TransferEvent = {
-        chain: SOLANA_CHAIN_ID,
-        asset: NATIVE_ASSET,
+        chain: chainId,
+        asset: nativeKey,
         from: null,
         txReference: input.txReference ?? `sig-${sequence}`,
         instructionIndex: input.instructionIndex ?? 1,
@@ -155,7 +180,10 @@ export function createFakeChain(): FakeChain {
      * `SOLANA_NETWORK=localnet`, which has no constant genesis hash.
      */
     async getNetworkIdentity(): Promise<string> {
-      return 'fake-chain-genesis';
+      // What a real endpoint for this cluster would report. `localnet` has no
+      // constant — a fresh validator generates a new genesis on every reset —
+      // so the check skips it and any string will do.
+      return GENESIS_HASHES[cluster] ?? 'fake-chain-genesis';
     },
 
     async isHealthy(): Promise<boolean> {

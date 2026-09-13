@@ -35,7 +35,13 @@ const FUTURE_PACKAGES = [];
  * custody abstractions) both depend on the accounting domain never learning
  * what a lamport is. `packages/risk` joins it in Phase 3.
  */
-const CHAIN_FREE_PACKAGES = ['packages/ledger/**/*.ts', 'packages/risk/**/*.ts'];
+const CHAIN_FREE_PACKAGES = [
+  'packages/ledger/**/*.ts',
+  'packages/risk/**/*.ts',
+  // Valuation is arithmetic over data it is handed. A price it fetched itself
+  // would be a number nobody could reproduce from the inputs.
+  'packages/portfolio/**/*.ts',
+];
 
 /**
  * The only package allowed to import a Solana SDK (prompt_phase2.md rule 101).

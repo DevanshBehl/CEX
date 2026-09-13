@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { clusterSchema, type Cluster } from '@wallet/types';
 import { tokenAssetSchema } from '@wallet/types';
 
 const nodeEnv = z.enum(['development', 'test', 'production']);
@@ -17,6 +18,49 @@ const httpUrl = z
  * guessable key.
  */
 const secret = (minLength: number) => z.string().min(minLength);
+
+const assetLimitsSchema = z
+  .string()
+  .default('')
+  .transform((value) =>
+    value
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  )
+  .pipe(
+    z.array(
+      z.string().superRefine((entry, ctx) => {
+        const parts = entry.split(':');
+        if (parts.length !== 4) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `"${entry}" must be ASSET:PER_TX:DAILY:REVIEW_ABOVE`,
+          });
+          return;
+        }
+        for (const [index, part] of parts.slice(1).entries()) {
+          if (!/^\d+$/.test(part)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `"${parts[0] ?? ''}" field ${String(index + 2)} must be base units`,
+            });
+          }
+        }
+      }),
+    ),
+  )
+  .transform((entries) =>
+    entries.map((entry) => {
+      const [asset = '', perTx = '0', daily = '0', review = '0'] = entry.split(':');
+      return {
+        asset,
+        perTransactionLimit: perTx,
+        dailyLimit: daily,
+        manualReviewAbove: review,
+      };
+    }),
+  );
 
 export const envSchema = z
   .object({
@@ -73,7 +117,45 @@ export const envSchema = z
 
     // --- Phase 2: chain and custody -----------------------------------------
     SOLANA_RPC_URL: z.string().url(),
-    SOLANA_NETWORK: z.enum(['localnet', 'devnet', 'testnet', 'mainnet-beta']).default('localnet'),
+    /**
+     * The DEFAULT cluster: what a request that names no cluster gets, and
+     * what `SOLANA_RPC_URL`, `TOKEN_MINTS` and `RISK_ASSET_LIMITS` describe.
+     *
+     * Kept under its old name so an existing single-cluster deployment is
+     * unchanged by clusters existing.
+     */
+    SOLANA_NETWORK: clusterSchema.default('localnet'),
+    /**
+     * Every cluster this process serves, comma-separated (ADR-0021).
+     *
+     * Defaults to just `SOLANA_NETWORK`. Each additional cluster needs its own
+     * RPC URL; its mints and risk limits fall back to the unsuffixed variables
+     * only for the default cluster, because a devnet mint address is not a
+     * mainnet mint address and inheriting one would allowlist the wrong token.
+     */
+    SOLANA_CLUSTERS: z
+      .string()
+      .default('')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      )
+      .pipe(z.array(clusterSchema)),
+
+    // Per-cluster endpoints. `MAINNET_BETA` because a hyphen is not legal in
+    // an environment variable name.
+    SOLANA_RPC_URL_LOCALNET: z.string().url().or(z.literal('')).default(''),
+    SOLANA_RPC_URL_DEVNET: z.string().url().or(z.literal('')).default(''),
+    SOLANA_RPC_URL_TESTNET: z.string().url().or(z.literal('')).default(''),
+    SOLANA_RPC_URL_MAINNET_BETA: z.string().url().or(z.literal('')).default(''),
+
+    // Per-cluster allowlists. Same format as TOKEN_MINTS.
+    TOKEN_MINTS_LOCALNET: tokenAssetSchema.default(''),
+    TOKEN_MINTS_DEVNET: tokenAssetSchema.default(''),
+    TOKEN_MINTS_TESTNET: tokenAssetSchema.default(''),
+    TOKEN_MINTS_MAINNET_BETA: tokenAssetSchema.default(''),
     /**
      * ADR-0006. `finalized` is the only value that may be used to credit —
      * anything below it can be rolled back on a fork. Configurable so a test
@@ -166,7 +248,46 @@ export const envSchema = z
      * deliberate: the fallback would be a limit denominated in 10^9 units
      * applied to an asset denominated in 10^6.
      */
-    RISK_ASSET_LIMITS: z
+    RISK_ASSET_LIMITS: assetLimitsSchema,
+    /**
+     * The same, per cluster (ADR-0021).
+     *
+     * A mint address is not portable between clusters, so these do NOT inherit
+     * from `RISK_ASSET_LIMITS` — inheriting would apply a mainnet USDC limit
+     * to whatever mint happens to share that address on devnet. The default
+     * cluster is the exception: its unsuffixed variables are its own.
+     */
+    RISK_ASSET_LIMITS_LOCALNET: assetLimitsSchema,
+    RISK_ASSET_LIMITS_DEVNET: assetLimitsSchema,
+    RISK_ASSET_LIMITS_TESTNET: assetLimitsSchema,
+    RISK_ASSET_LIMITS_MAINNET_BETA: assetLimitsSchema,
+
+    // --- Valuation (Task 3) -------------------------------------------------
+    /**
+     * Where spot prices come from.
+     *
+     * `coingecko` needs no credentials and covers SOL, USDC and USDT.
+     * `pyth` needs an endpoint that actually serves price updates — the public
+     * `hermes.pyth.network/v2/updates/price/latest` answers 401 — so it is for
+     * a deployment with a key or a self-hosted Hermes.
+     * `static` reads `PRICE_STATIC` and is for development with no internet.
+     * `none` disables valuation: the dashboard shows balances and no dollars,
+     * which is the honest state when nothing can price them.
+     */
+    PRICE_SOURCE: z.enum(['coingecko', 'pyth', 'static', 'none']).default('coingecko'),
+    PRICE_ENDPOINT: z.string().url().or(z.literal('')).default(''),
+    PRICE_API_KEY: z.string().default(''),
+    /** How often to poll. Minutes, not seconds: free tiers rate-limit hard. */
+    PRICE_POLL_INTERVAL_MS: z.coerce.number().int().min(10_000).default(300_000),
+    PRICE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+    /**
+     * `SYMBOL:IDENTIFIER` pairs, overriding the built-in mapping.
+     *
+     * The identifier is a CoinGecko coin id or a Pyth feed id depending on the
+     * source. A symbol with no mapping is not priced — never guessed, because
+     * guessing an id is how a balance gets valued at another token's price.
+     */
+    PRICE_FEEDS: z
       .string()
       .default('')
       .transform((value) =>
@@ -174,39 +295,16 @@ export const envSchema = z
           .split(',')
           .map((entry) => entry.trim())
           .filter(Boolean),
-      )
-      .pipe(
-        z.array(
-          z.string().superRefine((entry, ctx) => {
-            const parts = entry.split(':');
-            if (parts.length !== 4) {
-              ctx.addIssue({
-                code: z.ZodIssueCode.custom,
-                message: `"${entry}" must be ASSET:PER_TX:DAILY:REVIEW_ABOVE`,
-              });
-              return;
-            }
-            for (const [index, part] of parts.slice(1).entries()) {
-              if (!/^\d+$/.test(part)) {
-                ctx.addIssue({
-                  code: z.ZodIssueCode.custom,
-                  message: `"${parts[0] ?? ''}" field ${String(index + 2)} must be base units`,
-                });
-              }
-            }
-          }),
-        ),
-      )
-      .transform((entries) =>
-        entries.map((entry) => {
-          const [asset = '', perTx = '0', daily = '0', review = '0'] = entry.split(':');
-          return {
-            asset,
-            perTransactionLimit: perTx,
-            dailyLimit: daily,
-            manualReviewAbove: review,
-          };
-        }),
+      ),
+    /** `SYMBOL:PRICE` pairs for `PRICE_SOURCE=static`. */
+    PRICE_STATIC: z
+      .string()
+      .default('')
+      .transform((value) =>
+        value
+          .split(',')
+          .map((entry) => entry.trim())
+          .filter(Boolean),
       ),
 
     // --- Phase 3: step-up tiering (ADR-0011) --------------------------------
@@ -230,6 +328,22 @@ export const envSchema = z
      * `real` speaks to `services/mpc`.
      */
     SIGNER_KIND: z.enum(['mock', 'real']).default('mock'),
+    /**
+     * Segregated custody (ADR-0020).
+     *
+     * True means every user's deposit address is their OWN 3-of-5 FROST group,
+     * provisioned by the coordinator, and withdrawals are paid from it. False
+     * means the omnibus model: addresses are derived from `DEPOSIT_SEED` and
+     * withdrawals are paid from the treasury.
+     *
+     * Explicit rather than inferred from the signing service, because the two
+     * models have different custody properties and a deployment must not
+     * discover which one it got by looking at an address.
+     */
+    SEGREGATED_CUSTODY: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
     MPC_ENDPOINT: z.string().url().default('http://127.0.0.1:7070'),
     /**
      * The caller's Ed25519 private key, PEM, base64-encoded.
@@ -320,6 +434,74 @@ export const envSchema = z
     // ADR-0006: crediting below finality is a double-credit vector. A
     // non-production environment may loosen it to test against a validator
     // that does not finalize quickly; production may not.
+    /*
+     * Every cluster this process serves must have somewhere to talk to
+     * (ADR-0021).
+     *
+     * Without the check the failure is a cluster that accepts requests,
+     * resolves addresses, and then cannot read a balance or broadcast — which
+     * looks like an outage rather than a missing line of configuration.
+     */
+    {
+      const served = env.SOLANA_CLUSTERS.length > 0 ? env.SOLANA_CLUSTERS : [env.SOLANA_NETWORK];
+
+      for (const cluster of served) {
+        if (rpcUrlFor(env, cluster) === '') {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [rpcUrlVariable(cluster)],
+            message: `is required: SOLANA_CLUSTERS serves "${cluster}"`,
+          });
+        }
+      }
+
+      // The default cluster is what a request with no header gets. Serving
+      // every cluster except that one would make the default unreachable.
+      if (env.SOLANA_CLUSTERS.length > 0 && !served.includes(env.SOLANA_NETWORK)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['SOLANA_CLUSTERS'],
+          message: `must include SOLANA_NETWORK ("${env.SOLANA_NETWORK}"), which is the default cluster`,
+        });
+      }
+    }
+
+    // A source that cannot reach anything would poll forever and record
+    // nothing, and the dashboard would show a portfolio worth $0 rather than
+    // one that says it has no prices.
+    if (env.PRICE_SOURCE === 'pyth' && env.PRICE_ENDPOINT.trim() === '') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['PRICE_ENDPOINT'],
+        message:
+          'is required when PRICE_SOURCE is "pyth": the public Hermes price-update endpoint ' +
+          'returns 401, so an authenticated or self-hosted one is needed',
+      });
+    }
+
+    if (env.PRICE_SOURCE === 'static' && env.PRICE_STATIC.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['PRICE_STATIC'],
+        message: 'is required when PRICE_SOURCE is "static"',
+      });
+    }
+
+    for (const [name, entries] of [
+      ['PRICE_FEEDS', env.PRICE_FEEDS],
+      ['PRICE_STATIC', env.PRICE_STATIC],
+    ] as const) {
+      for (const [index, entry] of entries.entries()) {
+        if (!/^[^:]+:[^:]+$/.test(entry)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [name, index],
+            message: `"${entry}" must be SYMBOL:VALUE`,
+          });
+        }
+      }
+    }
+
     if (env.NODE_ENV === 'production' && env.SOLANA_COMMITMENT !== 'finalized') {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -446,3 +628,34 @@ export const envSchema = z
   });
 
 export type Env = z.infer<typeof envSchema>;
+
+/**
+ * The environment variable naming a cluster's endpoint.
+ *
+ * `mainnet-beta` becomes `MAINNET_BETA`: a hyphen is not legal in an
+ * environment variable name, and the mapping lives in one function so the
+ * validator and the reader cannot disagree about it.
+ */
+export function clusterSuffix(cluster: Cluster): string {
+  return cluster.toUpperCase().replace(/-/g, '_');
+}
+
+export function rpcUrlVariable(cluster: Cluster): string {
+  return `SOLANA_RPC_URL_${clusterSuffix(cluster)}`;
+}
+
+/**
+ * A cluster's RPC endpoint: its own variable, or the unsuffixed one when this
+ * is the default cluster.
+ */
+export function rpcUrlFor(
+  env: { readonly SOLANA_NETWORK: Cluster; readonly SOLANA_RPC_URL: string } & Record<
+    string,
+    unknown
+  >,
+  cluster: Cluster,
+): string {
+  const specific = env[rpcUrlVariable(cluster)];
+  if (typeof specific === 'string' && specific.trim() !== '') return specific;
+  return cluster === env.SOLANA_NETWORK ? env.SOLANA_RPC_URL : '';
+}

@@ -86,8 +86,12 @@ export const SECURITY_EVENTS = [
   'operator.role_granted',
   'operator.role_revoked',
   'reconciliation.drift_persisted',
+  /** A single user's segregated position does not match their address. */
+  'reconciliation.user_diverged',
   /** A negative residual with no withdrawals in flight (rule 148). */
   'reconciliation.negative_residual',
+  /** Spot prices were appended. The COUNT only — never a price (rule 90). */
+  'pricer.recorded',
 ] as const;
 
 export type SecurityEvent = (typeof SECURITY_EVENTS)[number];

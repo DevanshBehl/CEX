@@ -3,6 +3,7 @@
 import type { Balance, Deposit } from '@wallet/types';
 import { formatAmount, isZeroAmount } from '@/lib/format';
 import { StatusBadge } from '@/components/ui';
+import { useAssetLabel } from '@/features/portfolio/use-asset-label';
 
 /**
  * Presentation only (rule 163). It receives balances and renders them; it does
@@ -15,6 +16,9 @@ import { StatusBadge } from '@/components/ui';
  * them equal weight would imply they are not.
  */
 export function BalanceList({ balances }: { balances: readonly Balance[] }) {
+  // The SYMBOL, not the mint. See `useAssetLabel` for what this fixes.
+  const labelOf = useAssetLabel();
+
   return (
     <ul className="divide-y divide-line">
       {balances.map((balance) => (
@@ -23,7 +27,7 @@ export function BalanceList({ balances }: { balances: readonly Balance[] }) {
           className="group flex items-center justify-between gap-4 py-4 transition-colors duration-micro ease-atlas"
         >
           <div className="min-w-0">
-            <p className="text-sm font-medium text-ink">{balance.asset}</p>
+            <p className="text-sm font-medium text-ink">{labelOf(balance.asset, balance.symbol)}</p>
             {!isZeroAmount(balance.locked) && (
               <p className="mt-0.5 flex items-center gap-1.5 text-xs text-warning">
                 <span aria-hidden="true" className="h-1 w-1 rounded-full bg-warning" />

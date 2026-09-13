@@ -468,9 +468,9 @@ model Deposit {
 
   ledgerTransactionId String? @unique @map("ledger_transaction_id") @db.Uuid
 
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
-  creditedAt  DateTime? @map("credited_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  creditedAt DateTime? @map("credited_at") @db.Timestamptz(3)
 
   wallet            Wallet             @relation(fields: [walletId], references: [id])
   address           Address            @relation(fields: [addressId], references: [id])
@@ -559,10 +559,10 @@ model Withdrawal {
   id     String @id @db.Uuid
   userId String @map("user_id") @db.Uuid
 
-  chain  String
-  asset  String
+  chain      String
+  asset      String
   /// Base units. NUMERIC(38,0) — never a float, never a JS number.
-  amount Decimal @db.Decimal(38, 0)
+  amount     Decimal  @db.Decimal(38, 0)
   /// The fee actually paid, known only after settlement.
   networkFee Decimal? @map("network_fee") @db.Decimal(38, 0)
 
@@ -601,14 +601,14 @@ model Withdrawal {
 
   correlationId String? @map("correlation_id")
 
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
-  settledAt   DateTime? @map("settled_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  settledAt DateTime? @map("settled_at") @db.Timestamptz(3)
 
-  user         User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  nonceAccount NonceAccount?          @relation(fields: [nonceAccountId], references: [id])
-  transitions  WithdrawalTransition[]
-  riskDecision RiskDecision?
+  user            User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nonceAccount    NonceAccount?          @relation(fields: [nonceAccountId], references: [id])
+  transitions     WithdrawalTransition[]
+  riskDecision    RiskDecision?
   signingRequests SigningRequest[]
 
   @@unique([userId, idempotencyKey])
@@ -630,7 +630,7 @@ model WithdrawalTransition {
   fromStatus WithdrawalStatus? @map("from_status")
   toStatus   WithdrawalStatus  @map("to_status")
 
-  reason String?
+  reason        String?
   /// null for an automated transition; set for an operator action.
   actorUserId   String? @map("actor_user_id") @db.Uuid
   correlationId String? @map("correlation_id")
@@ -649,16 +649,16 @@ model RiskDecision {
   id           String @id @db.Uuid
   withdrawalId String @unique @map("withdrawal_id") @db.Uuid
 
-  verdict RiskVerdict
+  verdict        RiskVerdict
   /// The full code list. Operator-facing — the client gets a generic message.
-  codes   String[]
+  codes          String[]
   /// The rules that ran, so "was the daily limit checked?" is answerable from
   /// the record rather than from the code as it exists today.
-  evaluatedRules String[] @map("evaluated_rules")
+  evaluatedRules String[]    @map("evaluated_rules")
   /// Inputs and per-rule detail, for replay. Amounts as strings.
-  inputSnapshot  Json     @map("input_snapshot")
+  inputSnapshot  Json        @map("input_snapshot")
   outcomes       Json
-  policyVersion  String   @map("policy_version")
+  policyVersion  String      @map("policy_version")
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
@@ -690,10 +690,10 @@ model SigningRequest {
   /// Opaque handle. The application never learns what it points at.
   keyRef    String @map("key_ref")
 
-  outcome SigningOutcome @default(requested)
+  outcome       SigningOutcome @default(requested)
   /// Which implementation answered. `mock` must never appear in production.
-  signerKind String  @map("signer_kind")
-  failureReason String? @map("failure_reason")
+  signerKind    String         @map("signer_kind")
+  failureReason String?        @map("failure_reason")
 
   /// Who authorised, when, under which policy version. NOT the signature.
   authorization Json
@@ -737,8 +737,8 @@ model NonceAccount {
   currentNonce String? @map("current_nonce")
 
   /// Which withdrawal holds the lease, if any.
-  leasedBy   String?   @map("leased_by") @db.Uuid
-  leasedAt   DateTime? @map("leased_at") @db.Timestamptz(3)
+  leasedBy String?   @map("leased_by") @db.Uuid
+  leasedAt DateTime? @map("leased_at") @db.Timestamptz(3)
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -748,4 +748,47 @@ model NonceAccount {
   @@unique([chain, address])
   @@index([chain, status])
   @@map("nonce_accounts")
+}
+
+// ---------------------------------------------------------------------------
+// Valuation
+// ---------------------------------------------------------------------------
+
+/// A spot USD price, as observed at a moment (Task 3).
+///
+/// APPEND-ONLY, like the ledger and for the same reason: a portfolio chart is
+/// an assertion about what someone's money was worth, and an assertion whose
+/// inputs can be edited afterwards cannot be audited. A correction is a new
+/// tick, not a rewritten one.
+///
+/// Keyed by `(cluster, asset)` rather than by asset alone. A devnet mint is
+/// mapped to a mainnet price feed on purpose — devnet USDC has no market, and a
+/// portfolio of zeroes teaches nothing — but the two are still different rows,
+/// so a mainnet valuation can never read a devnet tick (ADR-0021).
+///
+/// `Decimal(18, 6)` rather than a float: six places is enough for every asset
+/// here and the value survives the round trip exactly. A `DOUBLE PRECISION`
+/// column would make `1.005` come back as `1.0049999999999999`.
+model AssetPriceTick {
+  id BigInt @id @default(autoincrement())
+
+  cluster String @db.VarChar(32)
+
+  /// The ledger asset key WITHOUT its cluster prefix: `SOL`, or a mint.
+  ///
+  /// The cluster is its own column here because a price row is looked up by
+  /// range scan on time, and a composite text key would make that index wider
+  /// for nothing. The ledger's reasoning does not apply: there is no query that
+  /// could accidentally sum two clusters' prices.
+  asset String @db.VarChar(128)
+
+  priceUsd Decimal @map("price_usd") @db.Decimal(18, 6)
+
+  /// Where the number came from, for the audit trail. Never trusted as truth.
+  source String @db.VarChar(32)
+
+  recordedAt DateTime @default(now()) @map("recorded_at") @db.Timestamptz(3)
+
+  @@index([cluster, asset, recordedAt(sort: Desc)], name: "idx_asset_price_ticks")
+  @@map("asset_price_ticks")
 }

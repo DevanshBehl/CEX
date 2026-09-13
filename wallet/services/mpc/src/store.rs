@@ -114,6 +114,20 @@ impl Store {
                 created_at      TEXT NOT NULL
             );
 
+            -- Group PUBLIC keys, as the coordinator knows them.
+            --
+            -- Separate from `frost_shares` because the coordinator holds NO key
+            -- material — only the public package it needs to aggregate and the
+            -- address it needs to report. Storing it in `frost_shares` would
+            -- mean inventing an identifier and an empty encrypted share for a
+            -- process that has neither, and a nullable `encrypted_share` is an
+            -- invitation to read one that is not there.
+            CREATE TABLE IF NOT EXISTS frost_group_keys (
+                key_ref        TEXT PRIMARY KEY,
+                public_package BLOB NOT NULL,
+                created_at     TEXT NOT NULL
+            );
+
             -- THE NONCE LEDGER. The single most important table in 4b.
             --
             -- In FROST, reusing a signing nonce across rounds does not weaken
@@ -333,6 +347,29 @@ impl Store {
             params![key_ref, sealed_share],
         )?;
         Ok(())
+    }
+
+    /// Remember a group's public package. Public material only.
+    pub fn store_group_key(&self, key_ref: &str, public_package: &[u8]) -> Result<()> {
+        let connection = self.lock()?;
+        connection.execute(
+            "INSERT INTO frost_group_keys (key_ref, public_package, created_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (key_ref) DO NOTHING",
+            params![key_ref, public_package, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_group_key(&self, key_ref: &str) -> Result<Option<Vec<u8>>> {
+        let connection = self.lock()?;
+        let mut statement =
+            connection.prepare("SELECT public_package FROM frost_group_keys WHERE key_ref = ?1")?;
+        let mut rows = statement.query(params![key_ref])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
     }
 
     // -----------------------------------------------------------------------

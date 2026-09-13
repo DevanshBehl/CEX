@@ -310,19 +310,23 @@ export function createWithdrawalService(deps: WithdrawalServiceDeps): Withdrawal
     async get(userId, withdrawalId) {
       const withdrawal = await withdrawals.findById(withdrawalId);
       // Another user's withdrawal is not found, never forbidden — a 403 would
-      // confirm the id exists.
-      if (!withdrawal || withdrawal.userId !== userId) {
+      // confirm the id exists. A withdrawal on another cluster is the same:
+      // from this context it does not exist.
+      if (!withdrawal || withdrawal.userId !== userId || withdrawal.chain !== deps.chain) {
         throw new AuthorizationDeniedError('Withdrawal not found');
       }
       return withdrawal;
     },
 
     async list(userId, limit) {
-      return withdrawals.listForUser(userId, limit);
+      // This service belongs to one cluster, so its history does too.
+      return withdrawals.listForUser(userId, limit, deps.chain);
     },
 
     async listForReview(limit) {
-      return withdrawals.listByStatus('MANUAL_REVIEW' as WithdrawalStatus, limit);
+      // This service belongs to one cluster, so its review queue does too: an
+      // operator approving on devnet must not be shown a mainnet withdrawal.
+      return withdrawals.listByStatus('MANUAL_REVIEW' as WithdrawalStatus, limit, deps.chain);
     },
 
     /** An operator approves a reviewed withdrawal, which then locks funds. */

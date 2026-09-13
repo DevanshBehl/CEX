@@ -9,6 +9,8 @@ function report(residual: string): ReconciliationReport {
     healthy: residual === '0',
     addressesConsidered: 3,
     withdrawalsInFlight: 0,
+    users: [],
+    divergedUsers: 0,
     assets: [
       {
         asset: 'SOL',

@@ -50,6 +50,10 @@
         "INDEXER_*",
         "MPC_*",
         "TOKEN_MINTS",
+        "TOKEN_MINTS_*",
+        "RISK_ASSET_LIMITS_*",
+        "PRICE_*",
+        "SEGREGATED_CUSTODY",
         "USE_CONFIGURED_SIGNER"
       ]
     },
@@ -83,7 +87,11 @@
         "SUPPORTED_ASSETS",
         "INDEXER_*",
         "MPC_*",
-        "TOKEN_MINTS"
+        "TOKEN_MINTS",
+        "TOKEN_MINTS_*",
+        "RISK_ASSET_LIMITS_*",
+        "PRICE_*",
+        "SEGREGATED_CUSTODY"
       ]
     },
     "generate": {

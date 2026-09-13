@@ -219,16 +219,24 @@ describe('TOKEN_MINTS', () => {
   it('defaults to no tokens, so an existing deployment is unchanged', () => {
     const config = toApiConfig(parseEnv(valid));
     expect(config.chain.assets.tokens).toEqual([]);
-    expect(config.chain.assets.keys).toEqual(['SOL']);
+    // Cluster-qualified: the registry speaks ledger asset keys (ADR-0021).
+    expect(config.chain.assets.keys).toEqual(['localnet:SOL']);
   });
 
   it('parses SYMBOL:MINT:DECIMALS and keys the registry on the mint', () => {
     const config = toApiConfig(
       parseEnv({ ...valid, TOKEN_MINTS: `USDC:${USDC}:6,USDT:${USDT}:6` }),
     );
-    expect(config.chain.assets.keys).toEqual(['SOL', USDC, USDT]);
-    expect(config.chain.assets.isAllowed(USDC)).toBe(true);
-    expect(config.chain.assets.isAllowed('USDC')).toBe(false);
+    expect(config.chain.assets.keys).toEqual([
+      'localnet:SOL',
+      `localnet:${USDC}`,
+      `localnet:${USDT}`,
+    ]);
+    expect(config.chain.assets.isAllowed(`localnet:${USDC}`)).toBe(true);
+    // Neither the bare mint nor the same mint on another cluster.
+    expect(config.chain.assets.isAllowed(USDC)).toBe(false);
+    expect(config.chain.assets.isAllowed(`devnet:${USDC}`)).toBe(false);
+    expect(config.chain.assets.isAllowed('localnet:USDC')).toBe(false);
   });
 
   it('rejects a mint that is not a base58 address', () => {
@@ -375,5 +383,120 @@ describe('secret references', () => {
 
   it('leaves development alone — .env is the documented development path', () => {
     expect(() => parseEnv(valid)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Clusters (ADR-0021)
+// ---------------------------------------------------------------------------
+
+describe('cluster configuration (ADR-0021)', () => {
+  const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  const DEVNET_USDC = 'Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr';
+
+  it('serves only the default cluster unless told otherwise', () => {
+    const config = toApiConfig(parseEnv(valid));
+    expect(config.chain.clusters).toEqual(['localnet']);
+    expect(config.chain.defaultCluster).toBe('localnet');
+  });
+
+  it('serves several clusters, each with its own endpoint', () => {
+    const config = toApiConfig(
+      parseEnv({
+        ...valid,
+        SOLANA_CLUSTERS: 'localnet,devnet',
+        SOLANA_RPC_URL_DEVNET: 'https://api.devnet.solana.com',
+      }),
+    );
+
+    expect(config.chain.clusters).toEqual(['localnet', 'devnet']);
+    expect(config.chain.byCluster.devnet?.rpcUrl).toBe('https://api.devnet.solana.com');
+    // The unsuffixed URL belongs to the default cluster and is not shared.
+    expect(config.chain.byCluster.localnet?.rpcUrl).toBe('http://127.0.0.1:8899');
+  });
+
+  it('refuses to serve a cluster with no endpoint', () => {
+    // Otherwise the cluster accepts requests and then cannot read a balance or
+    // broadcast — an outage rather than a missing line of configuration.
+    expect(() => parseEnv({ ...valid, SOLANA_CLUSTERS: 'localnet,mainnet-beta' })).toThrow(
+      ConfigValidationError,
+    );
+  });
+
+  it('refuses a cluster list that omits the default cluster', () => {
+    expect(() =>
+      parseEnv({
+        ...valid,
+        SOLANA_CLUSTERS: 'devnet',
+        SOLANA_RPC_URL_DEVNET: 'https://api.devnet.solana.com',
+      }),
+    ).toThrow(ConfigValidationError);
+  });
+
+  it('does NOT inherit mints across clusters', () => {
+    /*
+     * The property that matters most here. A mint address means a different
+     * token on a different cluster — inheriting `TOKEN_MINTS` would allowlist
+     * whatever happens to live at the mainnet USDC address on devnet, and
+     * credit a user for it.
+     */
+    const config = toApiConfig(
+      parseEnv({
+        ...valid,
+        SOLANA_CLUSTERS: 'localnet,devnet',
+        SOLANA_RPC_URL_DEVNET: 'https://api.devnet.solana.com',
+        TOKEN_MINTS: `USDC:${USDC}:6`,
+        TOKEN_MINTS_DEVNET: `USDC:${DEVNET_USDC}:6`,
+      }),
+    );
+
+    expect(config.chain.byCluster.localnet?.assets.keys).toEqual([
+      'localnet:SOL',
+      `localnet:${USDC}`,
+    ]);
+    expect(config.chain.byCluster.devnet?.assets.keys).toEqual([
+      'devnet:SOL',
+      `devnet:${DEVNET_USDC}`,
+    ]);
+    // The mainnet mint is not allowlisted on devnet just because it is on the
+    // other cluster's list.
+    expect(config.chain.byCluster.devnet?.assets.isAllowed(`devnet:${USDC}`)).toBe(false);
+  });
+
+  it('leaves a non-default cluster with no tokens when it configures none', () => {
+    const config = toApiConfig(
+      parseEnv({
+        ...valid,
+        SOLANA_CLUSTERS: 'localnet,devnet',
+        SOLANA_RPC_URL_DEVNET: 'https://api.devnet.solana.com',
+        TOKEN_MINTS: `USDC:${USDC}:6`,
+      }),
+    );
+    expect(config.chain.byCluster.devnet?.assets.keys).toEqual(['devnet:SOL']);
+  });
+
+  it('keys risk limits by cluster-qualified asset', () => {
+    const config = toApiConfig(
+      parseEnv({
+        ...valid,
+        SOLANA_CLUSTERS: 'localnet,devnet',
+        SOLANA_RPC_URL_DEVNET: 'https://api.devnet.solana.com',
+        RISK_ASSET_LIMITS: `${USDC}:1000:2000:500`,
+        RISK_ASSET_LIMITS_DEVNET: `${DEVNET_USDC}:7000:8000:9000`,
+      }),
+    );
+
+    expect(config.risk.assetLimits[`localnet:${USDC}`]?.perTransactionLimit).toBe('1000');
+    expect(config.risk.assetLimits[`devnet:${DEVNET_USDC}`]?.perTransactionLimit).toBe('7000');
+    // No bleed: the devnet list does not inherit the localnet mint's limit.
+    expect(config.risk.assetLimits[`devnet:${USDC}`]).toBeUndefined();
+    // Native limits apply on every served cluster.
+    expect(config.risk.assetLimits['devnet:SOL']?.perTransactionLimit).toBeDefined();
+    expect(config.risk.assetLimits['localnet:SOL']?.perTransactionLimit).toBeDefined();
+  });
+
+  it('does not offer a cluster it does not serve', () => {
+    const config = toApiConfig(parseEnv(valid));
+    expect(config.chain.byCluster['mainnet-beta']).toBeUndefined();
   });
 });

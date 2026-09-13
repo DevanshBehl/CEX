@@ -6,6 +6,8 @@ import {
   seedDepositAddress,
   seedSession,
   startHarness,
+  SOL_KEY,
+  TEST_CLUSTER,
   type Harness,
 } from './helpers.js';
 
@@ -46,6 +48,7 @@ beforeAll(async () => {
 
   h = await startHarness({
     chainAdapter: createSolanaAdapter({
+      cluster: TEST_CLUSTER,
       endpoint: RPC_URL,
       commitment: 'finalized',
       requestTimeoutMs: 30_000,
@@ -154,7 +157,7 @@ describe('end to end on localnet', () => {
         addressesChecked: number;
       }>;
     };
-    const sol = report.assets.find((a) => a.asset === NATIVE_ASSET);
+    const sol = report.assets.find((a) => a.asset === SOL_KEY);
     expect(sol).toBeDefined();
     // Whatever the residual, it must come with an explanation (rule 163).
     expect(sol!.explanation.length).toBeGreaterThan(0);

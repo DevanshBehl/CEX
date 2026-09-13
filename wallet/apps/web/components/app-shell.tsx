@@ -6,6 +6,7 @@ import { useSession } from '@/hooks/use-session';
 import { Button } from './ui';
 import { Wordmark, Mark } from './brand';
 import { useCapabilities } from '@/features/platform/use-capabilities';
+import { NetworkSwitcher } from './network-switcher';
 
 /**
  * Icons, inline.
@@ -137,14 +138,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Link href="/" className="rounded-sm">
               <Wordmark />
             </Link>
-            {!isPublic ||
-              (pathname === '/' && (
-                <Link href="/login">
-                  <Button variant="secondary" size="sm">
-                    Sign in
-                  </Button>
-                </Link>
-              ))}
+            <div className="ml-auto flex items-center gap-3">
+              <NetworkSwitcher />
+              {!isPublic ||
+                (pathname === '/' && (
+                  <Link href="/login">
+                    <Button variant="secondary" size="sm">
+                      Sign in
+                    </Button>
+                  </Link>
+                ))}
+            </div>
           </div>
         </header>
         <main className="mx-auto w-full max-w-[1200px] flex-1 px-6 lg:px-10">{children}</main>
@@ -201,14 +205,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         */}
         <div className="shrink-0 border-t border-line p-3">
           <div className="rounded-md bg-surface/60 px-3 py-2.5">
+            {/*
+              Three states, not two.
+              
+              This tested `=== 'single-key-mpc'` and so labelled a 3-of-5
+              deployment "Mock signing" — understating, which is the safe
+              direction, and still a false statement about custody in a badge
+              that is on screen permanently.
+            */}
             <p className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wider text-ink-muted">
               <span
                 aria-hidden="true"
                 className={`h-1.5 w-1.5 rounded-full ${
-                  capabilities?.signing.mode === 'single-key-mpc' ? 'bg-success' : 'bg-warning'
+                  capabilities?.signing.mode === 'mock' || capabilities === undefined
+                    ? 'bg-warning'
+                    : 'bg-success'
                 }`}
               />
-              {capabilities?.signing.mode === 'single-key-mpc' ? 'MPC signing' : 'Mock signing'}
+              {capabilities?.signing.mode === 'threshold-mpc'
+                ? '3-of-5 signing'
+                : capabilities?.signing.mode === 'single-key-mpc'
+                  ? 'MPC signing'
+                  : 'Mock signing'}
             </p>
             <p className="mt-1.5 text-2xs leading-relaxed text-ink-disabled">
               Not audited. Not production custody.
@@ -226,6 +244,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </Link>
 
             <div className="ml-auto flex items-center gap-3">
+              {/*
+                WHICH CHAIN, in the top bar, on every page (ADR-0021).
+
+                Beside the account rather than buried in settings: the cost of
+                mistaking devnet for mainnet is asymmetric and irreversible in
+                one direction, so it belongs where it is read without looking
+                for it.
+              */}
+              <NetworkSwitcher />
               {/*
                 The account, identified by whatever it actually has. An account
                 created with no email and no display name — which registration

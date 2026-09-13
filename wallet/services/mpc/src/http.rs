@@ -22,7 +22,13 @@ pub struct AppState {
     pub store: Arc<Store>,
     pub caller: CallerVerifier,
     /// Present when this process is running as a FROST participant.
-    pub participant: Option<Arc<crate::frost::Participant>>,
+    ///
+    /// Its KEK, not a preloaded share. Under per-user keys (ADR-0020) a
+    /// participant holds one share PER USER, so the share to use is decided by
+    /// the `key_ref` on each request — a single participant loaded at boot
+    /// would answer every round with the house key's share regardless of who
+    /// the round was for, and produce shares that aggregate to nothing.
+    pub participant_kek: Option<crate::keystore::Kek>,
     /// Present when this process is running as the coordinator.
     pub coordinator: Option<Arc<crate::threshold::Coordinator>>,
 }
@@ -37,6 +43,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         // cannot be talked into pretending it is a participant.
         .route("/v1/frost/commit", post(frost_commit))
         .route("/v1/frost/share", post(frost_share))
+        // Per-user key lifecycle (ADR-0020).
+        .route("/v1/frost/provision", post(frost_provision))
+        .route("/v1/frost/install", post(frost_install))
         .with_state(state)
 }
 
@@ -254,6 +263,14 @@ async fn public_key(
 pub struct HealthResponse {
     status: &'static str,
     storage: &'static str,
+    /// What this process IS: `single-key`, `participant` or `coordinator`.
+    ///
+    /// Coarse on purpose — no endpoint, no key reference, no participant
+    /// count. It is here because the API renders a claim about custody to
+    /// users, and it had no way to tell a single key from a threshold: a
+    /// deployment running 3-of-5 was telling people it was one key. An
+    /// UNDERSTATED claim is the safe direction, but it is still a false one.
+    role: &'static str,
 }
 
 /// Unauthenticated, and reports liveness only.
@@ -267,9 +284,18 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     } else {
         "down"
     };
+    let role = if state.coordinator.is_some() {
+        "coordinator"
+    } else if state.participant_kek.is_some() {
+        "participant"
+    } else {
+        "single-key"
+    };
+
     Json(HealthResponse {
         status: if storage == "up" { "ok" } else { "degraded" },
         storage,
+        role,
     })
 }
 
@@ -310,10 +336,7 @@ async fn frost_commit(
         body.as_bytes(),
     )?;
 
-    let Some(participant) = state.participant.as_ref() else {
-        return Err(MpcError::BadRequest("not_a_participant"));
-    };
-
+    let participant = load_participant(&state, &request.key_ref)?;
     let commitments = participant.commit(&request.nonce_id)?;
 
     Ok(Json(crate::threshold::CommitResponse {
@@ -354,9 +377,7 @@ async fn frost_share(
         body.as_bytes(),
     )?;
 
-    let Some(participant) = state.participant.as_ref() else {
-        return Err(MpcError::BadRequest("not_a_participant"));
-    };
+    let participant = load_participant(&state, &request.key_ref)?;
 
     let payload =
         hex::decode(&request.payload).map_err(|_| MpcError::BadRequest("payload_not_hex"))?;
@@ -386,6 +407,22 @@ async fn frost_share(
     }))
 }
 
+/// Load this participant's share for one key.
+///
+/// Refused, loudly, when there is no share for that key_ref. A participant
+/// asked to sign for a user it holds no share of must not fall back to any
+/// other key — the round would produce a share that aggregates to an invalid
+/// signature, and the failure would surface at broadcast as a rejected
+/// transaction rather than as a missing share.
+fn load_participant(state: &AppState, key_ref: &str) -> Result<crate::frost::Participant> {
+    let Some(kek) = state.participant_kek.as_ref() else {
+        return Err(MpcError::BadRequest("not_a_participant"));
+    };
+
+    crate::frost::Participant::load(Arc::clone(&state.store), kek.duplicate(), key_ref)?
+        .ok_or(MpcError::BadRequest("no_share_for_key_ref"))
+}
+
 /// Shared caller authentication for the participant endpoints.
 fn authenticate(
     state: &AppState,
@@ -410,4 +447,91 @@ fn authenticate(
         signature,
         now_unix(),
     )
+}
+
+/// Provision a per-user 3-of-5 key, and return the address it produces.
+///
+/// Coordinator only. The returned group public key IS the user's segregated
+/// Solana address (ADR-0020) — it is not derived from a seed at an index, and
+/// there is no seed.
+async fn frost_provision(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<crate::threshold::ProvisionResponse>> {
+    let request: crate::threshold::ProvisionRequest =
+        serde_json::from_str(&body).map_err(|_| MpcError::BadRequest("body_not_json"))?;
+
+    authenticate(
+        &state,
+        &headers,
+        "/v1/frost/provision",
+        &request.key_ref,
+        body.as_bytes(),
+    )?;
+
+    let Some(coordinator) = state.coordinator.as_ref() else {
+        return Err(MpcError::BadRequest("not_a_coordinator"));
+    };
+
+    Ok(Json(
+        coordinator.provision_user_key(&request.key_ref).await?,
+    ))
+}
+
+/// Receive and seal one share during provisioning.
+///
+/// Participant only. Refuses to overwrite an existing share: a second install
+/// for a key_ref that already has one would silently orphan whatever the
+/// previous key controlled, and on Solana that means funds at an address
+/// nothing can sign for any more.
+async fn frost_install(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<crate::threshold::InstallShareResponse>> {
+    let request: crate::threshold::InstallShareRequest =
+        serde_json::from_str(&body).map_err(|_| MpcError::BadRequest("body_not_json"))?;
+
+    authenticate(
+        &state,
+        &headers,
+        "/v1/frost/install",
+        &request.key_ref,
+        body.as_bytes(),
+    )?;
+
+    let Some(kek) = state.participant_kek.as_ref() else {
+        return Err(MpcError::BadRequest("not_a_participant"));
+    };
+
+    if state.store.load_share(&request.key_ref)?.is_some() {
+        // Idempotent by refusal, not by overwrite. A retried provisioning is
+        // the coordinator's problem to resolve; silently replacing a share is
+        // how an address becomes unspendable.
+        return Err(MpcError::BadRequest("share_already_installed"));
+    }
+
+    let share = crate::threshold::decode_secret_share(&request.share)?;
+    let public_package = crate::threshold::decode_public_package(&request.public_package)?;
+
+    let generated = crate::frost::GeneratedShare {
+        identifier: *share.identifier(),
+        secret_share: share,
+        public_package,
+    };
+
+    crate::frost::Participant::install(&state.store, kek, &request.key_ref, &generated)?;
+
+    let installed = crate::frost::Participant::load(
+        Arc::clone(&state.store),
+        kek.duplicate(),
+        &request.key_ref,
+    )?
+    .ok_or(MpcError::Internal("share_install_failed"))?;
+
+    Ok(Json(crate::threshold::InstallShareResponse {
+        identifier: crate::threshold::encode_identifier(&installed.identifier()),
+        group_public_key: hex::encode(installed.group_public_key()?),
+    }))
 }

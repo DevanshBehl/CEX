@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Balance, Deposit } from '@wallet/types';
 import { api, ApiError } from '@/lib/api';
+import { useNetwork } from '@/features/network/network-context';
 
 interface LoadState<T> {
   readonly data: T | null;
@@ -21,6 +22,15 @@ const INITIAL = { data: null, loading: true, error: null } as const;
  */
 export function useBalances(pollMs = 0) {
   const [state, setState] = useState<LoadState<Balance[]>>(INITIAL);
+  /*
+   * Balances are PER CLUSTER (ADR-0021).
+   *
+   * `version` changes exactly when the answer would, so switching networks
+   * refetches. `ready` gates the first load: a request made before the cluster
+   * is known carries no header and is answered for the server's default, which
+   * would render one network's balances under another's label for a moment.
+   */
+  const { version, ready } = useNetwork();
 
   const refresh = useCallback(async () => {
     try {
@@ -36,6 +46,8 @@ export function useBalances(pollMs = 0) {
   }, []);
 
   useEffect(() => {
+    if (!ready) return;
+    setState(INITIAL);
     void refresh();
     if (pollMs <= 0) return;
     // Polling rather than WebSockets: rule 177 permits either, and a deposit
@@ -43,13 +55,14 @@ export function useBalances(pollMs = 0) {
     // additional latency is not what the user notices.
     const timer = setInterval(() => void refresh(), pollMs);
     return () => clearInterval(timer);
-  }, [refresh, pollMs]);
+  }, [refresh, pollMs, version, ready]);
 
   return { ...state, refresh };
 }
 
 export function useDeposits(pollMs = 0) {
   const [state, setState] = useState<LoadState<Deposit[]>>(INITIAL);
+  const { version, ready } = useNetwork();
 
   const refresh = useCallback(async () => {
     try {
@@ -65,11 +78,13 @@ export function useDeposits(pollMs = 0) {
   }, []);
 
   useEffect(() => {
+    if (!ready) return;
+    setState(INITIAL);
     void refresh();
     if (pollMs <= 0) return;
     const timer = setInterval(() => void refresh(), pollMs);
     return () => clearInterval(timer);
-  }, [refresh, pollMs]);
+  }, [refresh, pollMs, version, ready]);
 
   return { ...state, refresh };
 }

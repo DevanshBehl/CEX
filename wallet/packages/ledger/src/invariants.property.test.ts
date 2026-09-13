@@ -2,7 +2,7 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
   buildTransaction,
-  chainAssets,
+  houseChainAssets,
   checkAllInvariants,
   checkBooksBalance,
   checkNoNegativeUserBalances,
@@ -29,7 +29,10 @@ import {
  * in the generated space; each has its own property below.
  */
 
-const SOL = 'SOL';
+// Cluster-qualified, because that is what the ledger stores (ADR-0021). A
+// bare `SOL` is refused by `buildTransaction` — deliberately, since a key
+// without a cluster is one account shared by devnet and mainnet.
+const SOL = 'devnet:SOL';
 const USERS = ['u1', 'u2', 'u3'] as const;
 
 /** Positive base-unit amounts, including values above 2^53. */
@@ -151,7 +154,10 @@ describe('rule 90 — the awkward cases', () => {
             kind: 'deposit',
             referenceType: 'deposit',
             referenceId: 'd',
-            entries: [debit(chainAssets(SOL), SOL, 0n), credit(userAvailable(u, SOL), SOL, 0n)],
+            entries: [
+              debit(houseChainAssets(SOL), SOL, 0n),
+              credit(userAvailable(u, SOL), SOL, 0n),
+            ],
           }),
         ).toThrow();
       }),

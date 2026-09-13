@@ -111,7 +111,31 @@ export function userLocked(ownerId: string, asset: string): AccountRef {
   return { ownerId, asset, type: 'user_locked' };
 }
 
-export function chainAssets(asset: string): AccountRef {
+/**
+ * What a SPECIFIC user's segregated address holds on-chain (ADR-0020).
+ *
+ * Partitioned per owner. Under the omnibus model this was one pooled account
+ * per asset with `ownerId: null`, and one user's funds were indistinguishable
+ * from another's — on-chain and in the books.
+ *
+ * Segregation makes the invariant stronger in a way that matters: it is no
+ * longer enough for the aggregate to reconcile. A total that matches while two
+ * users' balances are individually wrong is precisely the failure segregation
+ * exists to prevent, and only a per-owner comparison catches it.
+ */
+export function chainAssets(ownerId: string, asset: string): AccountRef {
+  return { ownerId, asset, type: 'chain_assets' };
+}
+
+/**
+ * On-chain assets the HOUSE holds: the fee-payer wallet, nonce account rent.
+ *
+ * Deliberately a separate function rather than `chainAssets(null, asset)`.
+ * A nullable owner on the segregated helper is an invitation to pass a
+ * `string | null` straight through and pool a user's funds by accident — the
+ * one mistake this partitioning exists to prevent.
+ */
+export function houseChainAssets(asset: string): AccountRef {
   return { ownerId: null, asset, type: 'chain_assets' };
 }
 

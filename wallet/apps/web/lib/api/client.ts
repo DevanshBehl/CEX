@@ -15,6 +15,7 @@ import { errorResponseSchema, type ErrorCode } from '@wallet/types';
  */
 
 import { publicConfig } from '../config';
+import { clusterHeader } from './cluster';
 
 const API_BASE = publicConfig.apiBaseUrl;
 
@@ -80,7 +81,14 @@ export async function request<TResponse>(options: RequestOptions<TResponse>): Pr
       // Without this the session cookie is never sent and every authenticated
       // call fails as if the user were logged out.
       credentials: 'include',
-      headers: options.body !== undefined ? { 'content-type': 'application/json' } : {},
+      headers: {
+        // Which chain this request is about (ADR-0021). Attached here, once,
+        // for the same reason `credentials` is: a call site that forgot it
+        // would silently be answered for the server's default cluster, and
+        // the numbers it rendered would belong to a different network.
+        ...clusterHeader(),
+        ...(options.body !== undefined ? { 'content-type': 'application/json' } : {}),
+      },
       ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
     });
   } catch (cause) {

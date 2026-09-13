@@ -51,14 +51,17 @@ pnpm build:rust && ./services/mpc/target/release/wallet-mpc
 
 Read the rejection reason. It is deliberately a short constant, never a value.
 
-| Reason                             | Cause                                                     |
-| ---------------------------------- | --------------------------------------------------------- |
-| `caller_signature_rejected`        | `MPC_CLIENT_PRIVATE_KEY` ≠ `MPC_CALLER_PUBLIC_KEY`        |
-| `authorization_unsigned`           | service has an approval key; API has none configured      |
-| `authorization_signature_rejected` | `MPC_APPROVAL_PRIVATE_KEY` ≠ `MPC_APPROVAL_PUBLIC_KEY`    |
-| `tier_authority_missing`           | the proof lacks an authority the tier requires (ADR-0018) |
-| `request_id_reused`                | same id, different bytes — see below                      |
-| `timestamp_outside_window`         | clock skew between API and service                        |
+| Reason                                    | Cause                                                                |
+| ----------------------------------------- | -------------------------------------------------------------------- |
+| `caller_signature_rejected`               | `MPC_CLIENT_PRIVATE_KEY` ≠ `MPC_CALLER_PUBLIC_KEY`                   |
+| `caller_signature_rejected` (participant) | `MPC_COORDINATOR_KEY` ≠ that participant's `MPC_CALLER_PUBLIC_KEY`   |
+| `participant_refused_install`             | a participant would not accept a share — usually the line above      |
+| `participant_identifier_mismatch`         | the roster entry does not match the identifier the participant holds |
+| `authorization_unsigned`                  | service has an approval key; API has none configured                 |
+| `authorization_signature_rejected`        | `MPC_APPROVAL_PRIVATE_KEY` ≠ `MPC_APPROVAL_PUBLIC_KEY`               |
+| `tier_authority_missing`                  | the proof lacks an authority the tier requires (ADR-0018)            |
+| `request_id_reused`                       | same id, different bytes — see below                                 |
+| `timestamp_outside_window`                | clock skew between API and service                                   |
 
 ### `request_id_reused` is not a bug to work around
 

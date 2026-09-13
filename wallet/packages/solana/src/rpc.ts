@@ -1,6 +1,7 @@
 import { Connection, PublicKey, type Commitment, type Finality } from '@solana/web3.js';
 import { ChainError } from '@wallet/errors';
 import type { Confirmation } from '@wallet/blockchain';
+import type { Cluster } from '@wallet/types';
 
 /**
  * The RPC boundary (prompt_phase2.md rules 103-104).
@@ -45,6 +46,56 @@ const RETRYABLE_PATTERNS = [
 function isRetryable(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return RETRYABLE_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+/**
+ * One connection per cluster, resolved by cluster and never by accident.
+ *
+ * # Why a pool and not a parameter
+ *
+ * A single `SolanaRpc` that took a cluster per call would need every caller to
+ * pass the right one, and the failure when someone forgot would be a devnet
+ * transaction submitted to mainnet — accepted by the endpoint, signed with a
+ * key that exists there too, against a nonce account that does not. The pool
+ * makes the cluster part of *which object you are holding*, so a caller that
+ * has the devnet RPC cannot reach mainnet at all.
+ *
+ * Connections are created eagerly, at construction: a lazily-created one would
+ * make the first request of a cluster pay for the connection, and would hide a
+ * misconfigured endpoint until traffic arrived.
+ */
+export interface SolanaRpcPool {
+  readonly clusters: readonly Cluster[];
+  /** Throws for a cluster this deployment does not serve. */
+  get(cluster: Cluster): SolanaRpc;
+  has(cluster: Cluster): boolean;
+}
+
+export function createSolanaRpcPool(configs: ReadonlyMap<Cluster, RpcOptions>): SolanaRpcPool {
+  if (configs.size === 0) {
+    throw new ChainError('an RPC pool needs at least one cluster');
+  }
+
+  const pool = new Map<Cluster, SolanaRpc>();
+  for (const [cluster, options] of configs) {
+    pool.set(cluster, createSolanaRpc(options));
+  }
+
+  return {
+    clusters: Object.freeze([...pool.keys()]),
+    has: (cluster) => pool.has(cluster),
+    get(cluster) {
+      const rpc = pool.get(cluster);
+      if (!rpc) {
+        // Naming what IS served, because the usual cause is a cluster missing
+        // from configuration rather than a bad request.
+        throw new ChainError(
+          `no RPC configured for ${cluster}; this deployment serves ${[...pool.keys()].join(', ')}`,
+        );
+      }
+      return rpc;
+    },
+  };
 }
 
 export function createSolanaRpc(options: RpcOptions): SolanaRpc {

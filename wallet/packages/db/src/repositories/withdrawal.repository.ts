@@ -75,8 +75,20 @@ export interface WithdrawalRepository {
     key: string,
     tx?: Executor,
   ): Promise<WithdrawalRecord | null>;
-  listForUser(userId: string, limit: number, tx?: Executor): Promise<WithdrawalRecord[]>;
-  listByStatus(status: WithdrawalStatus, limit: number, tx?: Executor): Promise<WithdrawalRecord[]>;
+  /** One cluster's withdrawals (ADR-0021). See the deposit repository. */
+  listForUser(
+    userId: string,
+    limit: number,
+    chain: string,
+    tx?: Executor,
+  ): Promise<WithdrawalRecord[]>;
+  /** Withdrawals in `status` ON THIS CHAIN. See `claimNext` for why. */
+  listByStatus(
+    status: WithdrawalStatus,
+    limit: number,
+    chain: string,
+    tx?: Executor,
+  ): Promise<WithdrawalRecord[]>;
   /** History used by the risk engine's rolling windows. */
   listRecentForUser(userId: string, since: Date, tx?: Executor): Promise<WithdrawalRecord[]>;
   listPriorDestinations(
@@ -93,10 +105,21 @@ export interface WithdrawalRepository {
    */
   transition(input: TransitionInput, tx?: Executor): Promise<WithdrawalRecord | null>;
   /** Claim the next withdrawal in a state, for exactly one worker. */
+  /**
+   * Claim the next withdrawal in `status` ON THIS CHAIN.
+   *
+   * `chain` is required, and it is not decoration (ADR-0021). Without it a
+   * devnet worker claims a mainnet withdrawal, leases a devnet nonce for it,
+   * and asks a devnet RPC about a mainnet signature. The first symptom is a
+   * chain error in a loop; the second is a withdrawal that can never leave the
+   * state it was claimed into, because no worker that can act on it will ever
+   * see it again.
+   */
   claimNext(
     status: WithdrawalStatus,
     to: WithdrawalStatus,
     correlationId: string,
+    chain: string,
     tx?: Executor,
   ): Promise<WithdrawalRecord | null>;
 }
@@ -161,18 +184,18 @@ export function createWithdrawalRepository(db: Executor): WithdrawalRepository {
       return row ? toRecord(row) : null;
     },
 
-    async listForUser(userId, limit, tx) {
+    async listForUser(userId, limit, chain, tx) {
       const rows = await exec(tx).withdrawal.findMany({
-        where: { userId },
+        where: { userId, chain },
         orderBy: { createdAt: 'desc' },
         take: limit,
       });
       return rows.map(toRecord);
     },
 
-    async listByStatus(status, limit, tx) {
+    async listByStatus(status, limit, chain, tx) {
       const rows = await exec(tx).withdrawal.findMany({
-        where: { status },
+        where: { status, chain },
         orderBy: { createdAt: 'asc' },
         take: limit,
       });
@@ -278,12 +301,13 @@ export function createWithdrawalRepository(db: Executor): WithdrawalRepository {
      * than queueing behind one another, and the transition is guarded, so the
      * claim and the state change are one act.
      */
-    async claimNext(status, to, correlationId, tx) {
+    async claimNext(status, to, correlationId, chain, tx) {
       const e = exec(tx);
 
       const rows = await e.$queryRaw<Array<{ id: string }>>`
         SELECT id FROM withdrawals
         WHERE status = ${status}::"WithdrawalStatus"
+          AND chain = ${chain}
         ORDER BY created_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1

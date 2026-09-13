@@ -3,12 +3,13 @@ import { asBaseUnits } from '@wallet/types';
 import {
   add,
   buildTransaction,
-  chainAssets,
+  houseChainAssets,
   checkAllInvariants,
   checkBooksBalance,
   checkLiabilitiesCovered,
   checkNoNegativeUserBalances,
   credit,
+  CrossClusterTransactionError,
   debit,
   formatForDisplay,
   houseRent,
@@ -24,7 +25,10 @@ import {
   type Entry,
 } from './index.js';
 
-const SOL = 'SOL';
+// Cluster-qualified, because that is what the ledger stores (ADR-0021). A
+// bare `SOL` is refused by `buildTransaction` — deliberately, since a key
+// without a cluster is one account shared by devnet and mainnet.
+const SOL = 'devnet:SOL';
 const LAMPORTS_PER_SOL = 1_000_000_000n;
 
 describe('amounts (rules 59-64)', () => {
@@ -57,7 +61,7 @@ describe('amounts (rules 59-64)', () => {
 
 describe('transaction construction (rules 76-81)', () => {
   const balanced: Entry[] = [
-    debit(chainAssets(SOL), SOL, LAMPORTS_PER_SOL),
+    debit(houseChainAssets(SOL), SOL, LAMPORTS_PER_SOL),
     credit(userAvailable('u1', SOL), SOL, LAMPORTS_PER_SOL),
   ];
 
@@ -79,7 +83,7 @@ describe('transaction construction (rules 76-81)', () => {
         referenceType: 'deposit',
         referenceId: 'd1',
         entries: [
-          debit(chainAssets(SOL), SOL, LAMPORTS_PER_SOL),
+          debit(houseChainAssets(SOL), SOL, LAMPORTS_PER_SOL),
           credit(userAvailable('u1', SOL), SOL, LAMPORTS_PER_SOL - 1n),
         ],
       }),
@@ -92,7 +96,7 @@ describe('transaction construction (rules 76-81)', () => {
         kind: 'deposit',
         referenceType: 'deposit',
         referenceId: 'd1',
-        entries: [debit(chainAssets(SOL), SOL, 1n)],
+        entries: [debit(houseChainAssets(SOL), SOL, 1n)],
       }),
     ).toThrow(InvalidEntryError);
   });
@@ -105,7 +109,7 @@ describe('transaction construction (rules 76-81)', () => {
           referenceType: 'deposit',
           referenceId: 'd1',
           entries: [
-            debit(chainAssets(SOL), SOL, amount),
+            debit(houseChainAssets(SOL), SOL, amount),
             credit(userAvailable('u1', SOL), SOL, amount),
           ],
         }),
@@ -121,8 +125,8 @@ describe('transaction construction (rules 76-81)', () => {
         referenceType: 'deposit',
         referenceId: 'd1',
         entries: [
-          debit(chainAssets(SOL), SOL, 1n),
-          credit({ ownerId: null, asset: 'USDC', type: 'chain_assets' }, 'USDC', 1n),
+          debit(houseChainAssets(SOL), SOL, 1n),
+          credit({ ownerId: null, asset: 'devnet:USDC', type: 'chain_assets' }, 'devnet:USDC', 1n),
         ],
       }),
     ).toThrow(UnbalancedTransactionError);
@@ -135,11 +139,102 @@ describe('transaction construction (rules 76-81)', () => {
         referenceType: 'deposit',
         referenceId: 'd1',
         entries: [
-          { account: chainAssets(SOL), asset: 'USDC', amount: 1n, direction: 'debit' },
+          { account: houseChainAssets(SOL), asset: 'devnet:USDC', amount: 1n, direction: 'debit' },
           credit(userAvailable('u1', SOL), SOL, 1n),
         ],
       }),
     ).toThrow(InvalidEntryError);
+  });
+});
+
+describe('cluster isolation (ADR-0021)', () => {
+  const MAINNET_SOL = 'mainnet-beta:SOL';
+
+  it('refuses a transaction that spans two clusters', () => {
+    // Debit devnet, credit mainnet. This is the shape of "moving" play money
+    // into real money, and it must be impossible to express — not merely
+    // unlikely.
+    expect(() =>
+      buildTransaction({
+        kind: 'adjustment',
+        referenceType: 'test',
+        referenceId: 't1',
+        entries: [
+          debit(houseChainAssets(SOL), SOL, 1n),
+          credit(userAvailable('u1', MAINNET_SOL), MAINNET_SOL, 1n),
+        ],
+      }),
+    ).toThrow(CrossClusterTransactionError);
+  });
+
+  it('refuses even a transaction that BALANCES in both clusters', () => {
+    /*
+     * The case the balance check alone would let through: two balanced pairs,
+     * one per cluster, in one transaction. Nothing is unbalanced and nothing
+     * crosses — but one financial event cannot have happened on two chains,
+     * and a settlement recorded this way would be undoable on one of them.
+     */
+    expect(() =>
+      buildTransaction({
+        kind: 'adjustment',
+        referenceType: 'test',
+        referenceId: 't2',
+        entries: [
+          debit(houseChainAssets(SOL), SOL, 1n),
+          credit(userAvailable('u1', SOL), SOL, 1n),
+          debit(houseChainAssets(MAINNET_SOL), MAINNET_SOL, 1n),
+          credit(userAvailable('u1', MAINNET_SOL), MAINNET_SOL, 1n),
+        ],
+      }),
+    ).toThrow(CrossClusterTransactionError);
+  });
+
+  it('refuses an asset key with no cluster at all', () => {
+    // The one that matters most. A bare `SOL` balances perfectly against
+    // another bare `SOL`, so nothing downstream would ever notice.
+    expect(() =>
+      buildTransaction({
+        kind: 'deposit',
+        referenceType: 'test',
+        referenceId: 't3',
+        entries: [
+          debit({ ownerId: null, asset: 'SOL', type: 'chain_assets' }, 'SOL', 1n),
+          credit({ ownerId: 'u1', asset: 'SOL', type: 'user_available' }, 'SOL', 1n),
+        ],
+      }),
+    ).toThrow(InvalidEntryError);
+  });
+
+  it('refuses an unknown cluster rather than accepting the prefix', () => {
+    expect(() =>
+      buildTransaction({
+        kind: 'deposit',
+        referenceType: 'test',
+        referenceId: 't4',
+        entries: [
+          debit({ ownerId: null, asset: 'staging:SOL', type: 'chain_assets' }, 'staging:SOL', 1n),
+          credit(
+            { ownerId: 'u1', asset: 'staging:SOL', type: 'user_available' },
+            'staging:SOL',
+            1n,
+          ),
+        ],
+      }),
+    ).toThrow(InvalidEntryError);
+  });
+
+  it('accepts a transaction entirely within one cluster', () => {
+    expect(() =>
+      buildTransaction({
+        kind: 'deposit',
+        referenceType: 'test',
+        referenceId: 't5',
+        entries: [
+          debit(houseChainAssets(MAINNET_SOL), MAINNET_SOL, 1n),
+          credit(userAvailable('u1', MAINNET_SOL), MAINNET_SOL, 1n),
+        ],
+      }),
+    ).not.toThrow();
   });
 });
 
@@ -231,7 +326,7 @@ describe('projections (rules 82-85)', () => {
       ...postDeposit({ depositId: 'd2', userId: 'u2', asset: SOL, amount: 500n }).entries,
     ];
     expect(projectUserBalance('u1', SOL, entries).available).toBe(100n);
-    expect(projectUserBalance('u1', 'USDC', entries).available).toBe(0n);
+    expect(projectUserBalance('u1', 'devnet:USDC', entries).available).toBe(0n);
   });
 
   it('reports an unknown user as zero rather than failing', () => {
@@ -241,7 +336,7 @@ describe('projections (rules 82-85)', () => {
 
 describe('invariants (rules 86-88)', () => {
   it('detects books that do not balance', () => {
-    const violations = checkBooksBalance([debit(chainAssets(SOL), SOL, 5n)]);
+    const violations = checkBooksBalance([debit(houseChainAssets(SOL), SOL, 5n)]);
     expect(violations[0]?.invariant).toBe('books_balance');
     expect(violations[0]?.detail.residual).toBe('5');
   });
@@ -249,7 +344,7 @@ describe('invariants (rules 86-88)', () => {
   it('detects a negative user balance', () => {
     const entries: Entry[] = [
       debit(userAvailable('u1', SOL), SOL, 10n),
-      credit(chainAssets(SOL), SOL, 10n),
+      credit(houseChainAssets(SOL), SOL, 10n),
     ];
     expect(checkNoNegativeUserBalances(entries)[0]?.invariant).toBe('no_negative_user_balance');
   });
@@ -259,7 +354,7 @@ describe('invariants (rules 86-88)', () => {
     // ledger this check cannot fire — coverage follows from double-entry — so
     // it is a redundancy check against a state that is already corrupt.
     const entries: Entry[] = [
-      debit(chainAssets(SOL), SOL, 40n),
+      debit(houseChainAssets(SOL), SOL, 40n),
       credit(userAvailable('u1', SOL), SOL, 100n),
     ];
     const violations = checkLiabilitiesCovered(entries);
@@ -287,7 +382,7 @@ describe('invariants (rules 86-88)', () => {
     // 890 is still immobilised. The result is unbalanced, and both the books
     // check and the coverage check report it.
     const overCredited: Entry[] = [
-      debit(chainAssets(SOL), SOL, 1000n),
+      debit(houseChainAssets(SOL), SOL, 1000n),
       credit(userAvailable('u1', SOL), SOL, 1000n),
       credit(houseRent(SOL), SOL, 890n),
     ];

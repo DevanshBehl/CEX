@@ -17,7 +17,7 @@ import {
   createSolanaAdapter,
   createSolanaAddressDeriver,
   deriveAssociatedTokenAddress,
-  NATIVE_ASSET,
+  nativeAssetKey,
   parseTokenTransfers,
   TOKEN_PROGRAM_ID,
 } from './index.js';
@@ -136,8 +136,14 @@ beforeAll(async () => {
 
 afterAll(() => undefined);
 
+/** The ledger asset key for SOL on this cluster (ADR-0021). */
+const LOCALNET_SOL = nativeAssetKey('localnet');
+
 function adapter() {
   return createSolanaAdapter({
+    // A throwaway validator: a fresh one generates a new genesis hash on every
+    // reset, which is why `localnet` is exempt from the genesis check.
+    cluster: 'localnet',
     endpoint: RPC_URL,
     // A local validator finalizes quickly, so this is the real policy, not a
     // relaxed one (ADR-0006).
@@ -156,7 +162,7 @@ describe.runIf(true)('against a local validator', () => {
 
   it('reads the rent-exempt minimum from the network (rule 114)', async () => {
     if (!available) return;
-    const minimum = await adapter().getMinimumAccountBalance(NATIVE_ASSET);
+    const minimum = await adapter().getMinimumAccountBalance(LOCALNET_SOL);
 
     // Not asserted as a constant: it is a network parameter and hardcoding it
     // is exactly what rule 114 forbids. What matters is that it is positive and
@@ -168,7 +174,7 @@ describe.runIf(true)('against a local validator', () => {
   it('reads a zero balance for a fresh address', async () => {
     if (!available) return;
     const fresh = Keypair.generate().publicKey.toBase58();
-    expect(await adapter().getBalance(fresh, NATIVE_ASSET)).toBe('0');
+    expect(await adapter().getBalance(fresh, LOCALNET_SOL)).toBe('0');
   });
 
   it('detects a real airdrop as a finalized transfer', async () => {
@@ -185,7 +191,7 @@ describe.runIf(true)('against a local validator', () => {
     const chain = adapter();
 
     // The balance is visible.
-    expect(BigInt(await chain.getBalance(address, NATIVE_ASSET))).toBe(
+    expect(BigInt(await chain.getBalance(address, LOCALNET_SOL))).toBe(
       BigInt(2 * LAMPORTS_PER_SOL),
     );
 
@@ -198,7 +204,7 @@ describe.runIf(true)('against a local validator', () => {
     expect(transfer!.amount).toBe(String(2 * LAMPORTS_PER_SOL));
     expect(transfer!.to).toBe(address);
     expect(transfer!.confirmation).toBe('final');
-    expect(transfer!.asset).toBe(NATIVE_ASSET);
+    expect(transfer!.asset).toBe(LOCALNET_SOL);
   });
 
   it('resumes from a cursor without repeating what came before', async () => {
@@ -350,12 +356,16 @@ describe('SPL token transfers on a real validator', () => {
         commitment: 'confirmed',
         maxSupportedTransactionVersion: 0,
       }))!,
-      { watchedOwners: new Set([recipient.publicKey.toBase58()]), txReference: txSig },
+      {
+        watchedOwners: new Set([recipient.publicKey.toBase58()]),
+        txReference: txSig,
+        cluster: 'localnet',
+      },
     );
 
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
-      asset: mint.publicKey.toBase58(),
+      asset: `localnet:${mint.publicKey.toBase58()}`,
       amount: '250000000',
       to: recipient.publicKey.toBase58(),
     });
@@ -567,7 +577,10 @@ describe('a token transfer is discoverable only at the token account', () => {
       pageSize: 20,
     });
 
-    const tokenTransfer = page.transfers.find((t) => t.asset === mint.publicKey.toBase58());
+    // The adapter qualifies every asset with its cluster (ADR-0021).
+    const tokenTransfer = page.transfers.find(
+      (t) => t.asset === `localnet:${mint.publicKey.toBase58()}`,
+    );
     expect(tokenTransfer).toBeDefined();
     expect(tokenTransfer?.to).toBe(holder.publicKey.toBase58());
     expect(tokenTransfer?.amount).toBe('250000000');

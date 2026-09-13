@@ -1,4 +1,10 @@
-import { createAssetRegistry, NATIVE_ASSET_KEY, type AssetRegistry } from '@wallet/types';
+import {
+  createAssetRegistry,
+  ledgerAssetKey,
+  NATIVE_ASSET_KEY,
+  type AssetRegistry,
+  type Cluster,
+} from '@wallet/types';
 import {
   CRITICAL_SECRETS,
   resolveSecret,
@@ -14,7 +20,7 @@ import {
  */
 const NATIVE_ASSET_DECIMALS = 9;
 import { readProcessEnv, type RawEnv } from './env.js';
-import { envSchema, type Env } from './schema.js';
+import { clusterSuffix, envSchema, rpcUrlFor, type Env } from './schema.js';
 import { ConfigValidationError, type ConfigIssue } from './errors.js';
 
 export { ConfigValidationError, type ConfigIssue } from './errors.js';
@@ -29,6 +35,17 @@ export interface SharedConfig {
   readonly isProduction: boolean;
   readonly isTest: boolean;
   readonly logLevel: Env['LOG_LEVEL'];
+}
+
+/** One cluster's chain configuration (ADR-0021). */
+export interface ClusterChainConfig {
+  readonly cluster: Cluster;
+  readonly rpcUrl: string;
+  /**
+   * The allowlist for THIS cluster. Its keys are cluster-qualified, so the
+   * same mint address configured on two clusters yields two distinct assets.
+   */
+  readonly assets: AssetRegistry;
 }
 
 export interface ApiConfig {
@@ -64,8 +81,25 @@ export interface ApiConfig {
     readonly globalPerMinute: number;
   };
   readonly chain: {
+    /**
+     * The default cluster's endpoint. Equivalent to
+     * `byCluster[defaultCluster].rpcUrl`, kept because a single-cluster
+     * deployment is still the common case.
+     */
     readonly rpcUrl: string;
     readonly network: Env['SOLANA_NETWORK'];
+    /** Every cluster this process serves (ADR-0021). */
+    readonly clusters: readonly Cluster[];
+    /** What a request naming no cluster resolves to. */
+    readonly defaultCluster: Cluster;
+    /**
+     * Per-cluster endpoint and allowlist.
+     *
+     * Partial: only the served clusters have an entry, so asking for one this
+     * deployment does not serve is `undefined` rather than a silently empty
+     * registry that would allowlist nothing and look like a chain outage.
+     */
+    readonly byCluster: Readonly<Partial<Record<Cluster, ClusterChainConfig>>>;
     readonly commitment: Env['SOLANA_COMMITMENT'];
     readonly rpcTimeoutMs: number;
     readonly rpcMaxRetries: number;
@@ -77,6 +111,17 @@ export interface ApiConfig {
      * what arrives on a withdrawal request.
      */
     readonly assets: AssetRegistry;
+  };
+  readonly prices: {
+    readonly source: Env['PRICE_SOURCE'];
+    readonly endpoint: string;
+    readonly apiKey: string;
+    readonly pollIntervalMs: number;
+    readonly requestTimeoutMs: number;
+    /** Symbol → source identifier, from `PRICE_FEEDS`. */
+    readonly feeds: Readonly<Record<string, string>>;
+    /** Symbol → fixed price, from `PRICE_STATIC`. */
+    readonly fixed: Readonly<Record<string, string>>;
   };
   readonly indexer: {
     readonly enabled: boolean;
@@ -119,6 +164,11 @@ export interface ApiConfig {
     readonly stepUpMaxAgeSeconds: number;
     readonly signerKind: Env['SIGNER_KIND'];
     readonly signerKeyRef: string;
+    /**
+     * Segregated custody (ADR-0020): per-user threshold keys, withdrawals paid
+     * from the user's own address. False is the omnibus model.
+     */
+    readonly segregatedCustody: boolean;
     readonly mpc: {
       readonly endpoint: string;
       readonly clientPrivateKey: string;
@@ -263,7 +313,105 @@ export function parseEnv(raw: RawEnv): Env {
   throw new ConfigValidationError(issues);
 }
 
+/**
+ * Read a suffixed environment value, falling back to the unsuffixed one for
+ * the DEFAULT cluster only.
+ *
+ * The asymmetry is deliberate. A mint address means a different token on a
+ * different cluster, so inheriting `TOKEN_MINTS` across clusters would
+ * allowlist whatever happens to live at that address on devnet. The default
+ * cluster is what the unsuffixed variables were always describing, so there it
+ * is not inheritance at all.
+ */
+function perCluster<T>(env: Env, base: keyof Env, cluster: Cluster, defaultCluster: Cluster): T {
+  const specific = (env as unknown as Record<string, unknown>)[
+    `${String(base)}_${clusterSuffix(cluster)}`
+  ];
+  const hasSpecific = Array.isArray(specific) ? specific.length > 0 : specific !== undefined;
+  if (hasSpecific) return specific as T;
+  return (cluster === defaultCluster ? env[base] : ([] as unknown)) as T;
+}
+
+/** `SYMBOL:VALUE` entries as a record, symbols upper-cased for lookup. */
+function pairs(entries: readonly string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of entries) {
+    const [symbol, value] = entry.split(':');
+    if (symbol !== undefined && value !== undefined)
+      out[symbol.trim().toUpperCase()] = value.trim();
+  }
+  return out;
+}
+
 export function toApiConfig(env: Env): ApiConfig {
+  const defaultCluster = env.SOLANA_NETWORK;
+  const served: Cluster[] =
+    env.SOLANA_CLUSTERS.length > 0 ? [...env.SOLANA_CLUSTERS] : [defaultCluster];
+
+  const byCluster: Partial<Record<Cluster, ClusterChainConfig>> = {};
+  for (const cluster of served) {
+    const tokens = perCluster<Env['TOKEN_MINTS']>(env, 'TOKEN_MINTS', cluster, defaultCluster);
+    byCluster[cluster] = Object.freeze({
+      cluster,
+      rpcUrl: rpcUrlFor(env, cluster),
+      assets: createAssetRegistry({
+        cluster,
+        // Native decimals are a display fallback only; see `assets.ts`.
+        nativeDecimals: NATIVE_ASSET_DECIMALS,
+        tokens: tokens.map((token) => ({
+          symbol: token.symbol,
+          mint: token.mint,
+          decimals: Number(token.decimals),
+        })),
+      }),
+    });
+  }
+
+  const defaultChain = byCluster[defaultCluster];
+  if (!defaultChain) {
+    // Unreachable: `served` always contains the default cluster, enforced in
+    // superRefine. Stated rather than asserted so a future edit that breaks
+    // the invariant fails here instead of producing an empty registry.
+    throw new Error(`the default cluster ${defaultCluster} is not served`);
+  }
+
+  /*
+   * Risk limits, keyed by CLUSTER-QUALIFIED asset key (ADR-0021).
+   *
+   * One flat map rather than a map per cluster, because the keys already carry
+   * the cluster — the same property that keeps the ledger from merging them.
+   * A lookup cannot reach the wrong cluster's limit by omission.
+   */
+  const assetLimits: Record<
+    string,
+    { perTransactionLimit: string; dailyLimit: string; manualReviewAbove: string }
+  > = {};
+
+  for (const cluster of served) {
+    // The native asset keeps the variables it has always had, applied to each
+    // served cluster: a per-transaction ceiling is a policy about SOL, and it
+    // is no less true of devnet SOL.
+    assetLimits[ledgerAssetKey(cluster, NATIVE_ASSET_KEY)] = Object.freeze({
+      perTransactionLimit: env.RISK_PER_TRANSACTION_LIMIT,
+      dailyLimit: env.RISK_DAILY_LIMIT,
+      manualReviewAbove: env.RISK_MANUAL_REVIEW_ABOVE,
+    });
+
+    const limits = perCluster<Env['RISK_ASSET_LIMITS']>(
+      env,
+      'RISK_ASSET_LIMITS',
+      cluster,
+      defaultCluster,
+    );
+    for (const limit of limits) {
+      assetLimits[ledgerAssetKey(cluster, limit.asset)] = Object.freeze({
+        perTransactionLimit: limit.perTransactionLimit,
+        dailyLimit: limit.dailyLimit,
+        manualReviewAbove: limit.manualReviewAbove,
+      });
+    }
+  }
+
   return Object.freeze({
     shared: Object.freeze({
       nodeEnv: env.NODE_ENV,
@@ -308,20 +456,30 @@ export function toApiConfig(env: Env): ApiConfig {
     chain: Object.freeze({
       rpcUrl: env.SOLANA_RPC_URL,
       network: env.SOLANA_NETWORK,
+      defaultCluster: env.SOLANA_NETWORK,
+      clusters: Object.freeze([...served]),
+      byCluster: Object.freeze(
+        Object.fromEntries(
+          served.map((cluster) => [cluster, byCluster[cluster]] as const),
+        ) as Partial<Record<Cluster, ClusterChainConfig>>,
+      ),
       commitment: env.SOLANA_COMMITMENT,
       rpcTimeoutMs: env.SOLANA_RPC_TIMEOUT_MS,
       rpcMaxRetries: env.SOLANA_RPC_MAX_RETRIES,
       depositSeed: env.DEPOSIT_SEED,
       supportedAssets: Object.freeze([...env.SUPPORTED_ASSETS]),
-      assets: createAssetRegistry({
-        // Native decimals are a display fallback only; see `assets.ts`.
-        nativeDecimals: NATIVE_ASSET_DECIMALS,
-        tokens: env.TOKEN_MINTS.map((token) => ({
-          symbol: token.symbol,
-          mint: token.mint,
-          decimals: Number(token.decimals),
-        })),
-      }),
+      // The DEFAULT cluster's registry. Every other cluster is reached through
+      // `byCluster`, and nothing may use this one as a stand-in for them.
+      assets: defaultChain.assets,
+    }),
+    prices: Object.freeze({
+      source: env.PRICE_SOURCE,
+      endpoint: env.PRICE_ENDPOINT,
+      apiKey: env.PRICE_API_KEY,
+      pollIntervalMs: env.PRICE_POLL_INTERVAL_MS,
+      requestTimeoutMs: env.PRICE_REQUEST_TIMEOUT_MS,
+      feeds: Object.freeze(pairs(env.PRICE_FEEDS)),
+      fixed: Object.freeze(pairs(env.PRICE_STATIC)),
     }),
     indexer: Object.freeze({
       enabled: env.INDEXER_ENABLED,
@@ -335,24 +493,7 @@ export function toApiConfig(env: Env): ApiConfig {
       alertAfterCycles: env.RECONCILIATION_ALERT_AFTER_CYCLES,
     }),
     risk: Object.freeze({
-      assetLimits: Object.freeze({
-        // The native asset keeps the variables it has always had.
-        [NATIVE_ASSET_KEY]: Object.freeze({
-          perTransactionLimit: env.RISK_PER_TRANSACTION_LIMIT,
-          dailyLimit: env.RISK_DAILY_LIMIT,
-          manualReviewAbove: env.RISK_MANUAL_REVIEW_ABOVE,
-        }),
-        ...Object.fromEntries(
-          env.RISK_ASSET_LIMITS.map((limit) => [
-            limit.asset,
-            Object.freeze({
-              perTransactionLimit: limit.perTransactionLimit,
-              dailyLimit: limit.dailyLimit,
-              manualReviewAbove: limit.manualReviewAbove,
-            }),
-          ]),
-        ),
-      }),
+      assetLimits: Object.freeze(assetLimits),
       perTransactionLimit: env.RISK_PER_TRANSACTION_LIMIT,
       dailyLimit: env.RISK_DAILY_LIMIT,
       velocityWindowMinutes: env.RISK_VELOCITY_WINDOW_MINUTES,
@@ -365,6 +506,7 @@ export function toApiConfig(env: Env): ApiConfig {
       stepUpMaxAgeSeconds: env.WITHDRAWAL_STEP_UP_MAX_AGE_SECONDS,
       signerKind: env.SIGNER_KIND,
       signerKeyRef: env.SIGNER_KEY_REF,
+      segregatedCustody: env.SEGREGATED_CUSTODY,
       mpc: Object.freeze({
         endpoint: env.MPC_ENDPOINT,
         clientPrivateKey: env.MPC_CLIENT_PRIVATE_KEY,

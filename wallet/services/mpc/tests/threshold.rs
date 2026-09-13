@@ -70,6 +70,8 @@ fn cluster(with_approval_key: bool) -> Cluster {
                 .expect("load")
                 .expect("share");
             let identifier = threshold::encode_identifier(&participant.identifier());
+            let participant_kek_for_state =
+                Kek::from_base64(&B64.encode([40u8 + index as u8; 32])).expect("kek");
 
             let signer_kek = Kek::from_base64(&B64.encode([40u8 + index as u8; 32])).expect("kek");
             let signer = SigningService::new(Arc::clone(&store), signer_kek);
@@ -89,7 +91,10 @@ fn cluster(with_approval_key: bool) -> Cluster {
                     signer,
                     store,
                     caller,
-                    participant: Some(Arc::new(participant)),
+                    // Per-user keys: the share to use is chosen per request by
+                    // key_ref, so a participant holds a KEK rather than one
+                    // preloaded share (ADR-0020).
+                    participant_kek: Some(participant_kek_for_state),
                     coordinator: None,
                 })),
                 identifier,
@@ -368,7 +373,7 @@ async fn a_non_participant_service_refuses_the_round_endpoints() {
         signer,
         store,
         caller,
-        participant: None,
+        participant_kek: None,
         coordinator: None,
     }));
 
