@@ -41,6 +41,39 @@ const ACCOUNT_NAV = [
 
 const PUBLIC_ROUTES = new Set(['/', '/login', '/register']);
 
+const PUBLIC_NAV = [
+  { href: '/#product', label: 'Product' },
+  { href: '/#how-it-works', label: 'How it works' },
+  { href: '/#security', label: 'Security' },
+  { href: '/#roadmap', label: 'Roadmap' },
+  { href: '/#faq', label: 'FAQ' },
+] as const;
+
+const FOOTER_COLUMNS = [
+  {
+    title: 'Product',
+    links: [
+      { href: '/#product', label: 'Atlas Custody' },
+      { href: '/#roadmap', label: 'Atlas Exchange' },
+      { href: '/#how-it-works', label: 'How it works' },
+    ],
+  },
+  {
+    title: 'Trust',
+    links: [
+      { href: '/#security', label: 'Security model' },
+      { href: '/#faq', label: 'FAQ' },
+    ],
+  },
+  {
+    title: 'Account',
+    links: [
+      { href: '/register', label: 'Create an account' },
+      { href: '/login', label: 'Sign in' },
+    ],
+  },
+] as const;
+
 function NavIcon({ d, className = 'h-[15px] w-[15px]' }: { d: string; className?: string }) {
   return (
     <svg
@@ -141,31 +174,88 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     are the front door, not a workspace. `data-theme` on the wrapper re-scopes
     every token for the subtree, so no public component knows about it.
   */
-  if (state.status !== 'authenticated') {
+  // The landing page keeps its public frame even for a signed-in visitor: it
+  // is a page about the product, not a page in the console.
+  if (state.status !== 'authenticated' || pathname === '/') {
+    const signedIn = state.status === 'authenticated';
     return (
       <div data-theme="dark" className="flex min-h-screen flex-col bg-background text-ink">
-        <header className="sticky top-0 z-40 border-b border-line bg-background/85 backdrop-blur-md">
-          <div className="mx-auto flex h-[60px] w-full max-w-[1240px] items-center justify-between px-6 lg:px-10">
+        <header className="sticky top-0 z-40 border-b border-line bg-background/80 backdrop-blur-md">
+          <div className="mx-auto flex h-[60px] w-full max-w-[1240px] items-center gap-8 px-6 lg:px-10">
             <Link href="/" className="rounded-sm">
               <Wordmark />
             </Link>
+
+            <nav aria-label="Site" className="hidden items-center gap-6 md:flex">
+              {PUBLIC_NAV.map((item) => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className="text-[13px] font-medium text-ink-muted transition-colors duration-micro hover:text-ink"
+                >
+                  {item.label}
+                </Link>
+              ))}
+            </nav>
+
             <div className="ml-auto flex items-center gap-2">
               <NetworkSwitcher />
-              {pathname === '/' && (
-                <Link href="/login">
-                  <Button variant="secondary" size="sm">
-                    Sign in
-                  </Button>
+              {signedIn ? (
+                <Link href="/dashboard">
+                  <Button size="sm">Open dashboard</Button>
                 </Link>
+              ) : (
+                pathname === '/' && (
+                  <>
+                    <Link href="/login" className="hidden sm:block">
+                      <Button variant="ghost" size="sm">
+                        Sign in
+                      </Button>
+                    </Link>
+                    <Link href="/register">
+                      <Button size="sm">Get started</Button>
+                    </Link>
+                  </>
+                )
               )}
             </div>
           </div>
         </header>
+
         <main className="mx-auto w-full max-w-[1240px] flex-1 px-6 lg:px-10">{children}</main>
-        <footer className="border-t border-line">
-          <div className="mx-auto flex w-full max-w-[1240px] items-center justify-between gap-3 px-6 py-6 text-xs text-ink-disabled lg:px-10">
-            <span>Educational project — not audited, not for real funds.</span>
-            <span className="font-mono">Atlas</span>
+
+        <footer className="border-t border-line bg-background-subtle">
+          <div className="mx-auto grid w-full max-w-[1240px] gap-10 px-6 py-14 sm:grid-cols-2 lg:grid-cols-[1.4fr_1fr_1fr_1fr] lg:px-10">
+            <div className="max-w-xs">
+              <Wordmark />
+              <p className="mt-4 text-[13px] leading-relaxed text-ink-muted">
+                The custody layer of a crypto exchange — threshold keys, a double-entry ledger and
+                passkey sign-in.
+              </p>
+            </div>
+            {FOOTER_COLUMNS.map((column) => (
+              <div key={column.title}>
+                <p className="text-xs font-semibold text-ink">{column.title}</p>
+                <ul className="mt-4 space-y-2.5">
+                  {column.links.map((link) => (
+                    <li key={link.label}>
+                      <Link
+                        href={link.href}
+                        className="text-[13px] text-ink-muted transition-colors duration-micro hover:text-ink"
+                      >
+                        {link.label}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+          <div className="border-t border-line">
+            <div className="mx-auto flex w-full max-w-[1240px] flex-wrap items-center justify-between gap-3 px-6 py-5 text-xs text-ink-disabled lg:px-10">
+              <span>Educational project — not audited, not for real funds.</span>
+              <span className="font-mono">Atlas · Solana devnet</span>
+            </div>
           </div>
         </footer>
       </div>

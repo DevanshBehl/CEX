@@ -52,6 +52,12 @@ export default {
         danger: { DEFAULT: c('--atlas-danger'), dim: c('--atlas-danger-dim') },
         'on-accent': c('--atlas-on-accent'),
         scrim: c('--atlas-scrim'),
+        term: {
+          DEFAULT: c('--atlas-term'),
+          text: c('--atlas-term-text'),
+          ok: c('--atlas-term-ok'),
+          note: c('--atlas-term-note'),
+        },
       },
 
       borderRadius: {
@@ -117,6 +123,11 @@ export default {
           from: { opacity: '0', transform: 'translateY(10px) scale(0.98)' },
           to: { opacity: '1', transform: 'none' },
         },
+        // A signal leaving a node: a ring that grows and fades.
+        ring: {
+          '0%': { transform: 'scale(0.8)', opacity: '0.6' },
+          '100%': { transform: 'scale(1.7)', opacity: '0' },
+        },
         shimmer: {
           from: { transform: 'translateX(-100%)' },
           to: { transform: 'translateX(100%)' },
@@ -131,6 +142,7 @@ export default {
         fade: 'fade 300ms var(--atlas-ease) both',
         'fade-up': 'fade-up 400ms var(--atlas-ease) both',
         pop: 'pop 350ms cubic-bezier(0.2, 0.8, 0.3, 1) both',
+        ring: 'ring 1.1s ease-out infinite',
         shimmer: 'shimmer 1.6s var(--atlas-ease) infinite',
         'pulse-soft': 'pulse-soft 2.4s var(--atlas-ease) infinite',
       },

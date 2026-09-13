@@ -84,6 +84,12 @@
   --atlas-scrim-opacity: 0.5;
 
   --atlas-scrollbar: 203 210 218;
+
+  /* --- Terminal — a log readout stays dark on both themes. ---------------- */
+  --atlas-term: 15 23 42;
+  --atlas-term-text: 148 163 184;
+  --atlas-term-ok: 74 222 128;
+  --atlas-term-note: 147 197 253;
 }
 
 [data-theme='dark'] {
@@ -126,6 +132,8 @@
   --atlas-scrim-opacity: 0.7;
 
   --atlas-scrollbar: 42 52 65;
+
+  --atlas-term: 5 8 16;
 }
 
 :root {
@@ -149,6 +157,7 @@
 @layer base {
   html {
     scroll-padding-top: 5rem;
+    scroll-behavior: smooth;
   }
 
   body {
