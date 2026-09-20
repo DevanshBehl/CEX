@@ -158,6 +158,9 @@ export interface ApiConfig {
     readonly velocityMaxCount: number;
     readonly manualReviewAbove: string;
     readonly reviewNewDestinations: boolean;
+    /** Whole dollars as a decimal string, or null for base-unit review (ADR-0024). */
+    readonly manualReviewAboveUsd: string | null;
+    readonly priceMaxAgeSeconds: number;
     readonly knownDestinationWindowDays: number;
   };
   readonly withdrawal: {
@@ -500,6 +503,9 @@ export function toApiConfig(env: Env): ApiConfig {
       velocityMaxCount: env.RISK_VELOCITY_MAX_COUNT,
       manualReviewAbove: env.RISK_MANUAL_REVIEW_ABOVE,
       reviewNewDestinations: env.RISK_NEW_DESTINATION_REVIEW,
+      manualReviewAboveUsd:
+        env.RISK_MANUAL_REVIEW_ABOVE_USD === '' ? null : env.RISK_MANUAL_REVIEW_ABOVE_USD,
+      priceMaxAgeSeconds: env.RISK_PRICE_MAX_AGE_SECONDS,
       knownDestinationWindowDays: env.RISK_KNOWN_DESTINATION_WINDOW_DAYS,
     }),
     withdrawal: Object.freeze({

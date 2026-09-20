@@ -11,7 +11,7 @@ import {
 } from '@wallet/db';
 import { postWithdrawalSettlement, toAmount, toBaseUnits } from '@wallet/ledger';
 import { logSecurityEvent, runWithContext, type Logger } from '@wallet/logger';
-import { isTerminal } from '@wallet/types';
+import { isTerminal, parseLedgerAssetKey } from '@wallet/types';
 import type { DeadLetterQueue, JobQueue } from '../observability/dead-letter.js';
 import type { WalletMetrics } from '../observability/metrics.js';
 import type { NonceManager, WithdrawalBroadcaster } from '@wallet/solana';
@@ -220,11 +220,24 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
     nonceAccount: string,
     nonce: string,
   ): Promise<UnsignedWithdrawal> {
-    const sourceTokenAccount = deriveAssociatedTokenAddress(source, withdrawal.asset);
-    const destinationTokenAccount = deriveAssociatedTokenAddress(
-      withdrawal.destination,
-      withdrawal.asset,
-    );
+    /*
+     * THE BARE MINT. `withdrawal.asset` is a LEDGER key, not an address.
+     *
+     * Storage speaks `localnet:EPjF…Dt1v` (ADR-0021) and the chain speaks
+     * `EPjF…Dt1v`. Everything above this line is right to use the qualified
+     * key — `assets.isToken`, the ledger accounts, the risk policy all key on
+     * it — and everything below it is an address the runtime will parse.
+     *
+     * Passed unqualified, `PublicKey` rejects the colon and signing failed
+     * with `ChainError: Invalid Solana address`, every time, for every token.
+     * The cluster dimension arrived after token support and this branch was
+     * never revisited; nothing caught it because no test sent a token past
+     * the request stage.
+     */
+    const mint = parseLedgerAssetKey(withdrawal.asset).asset;
+
+    const sourceTokenAccount = deriveAssociatedTokenAddress(source, mint);
+    const destinationTokenAccount = deriveAssociatedTokenAddress(withdrawal.destination, mint);
 
     const exists = await deps.chainReader.accountExists(destinationTokenAccount);
 
@@ -236,7 +249,7 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
       // a token-only balance could never be withdrawn (ADR-0020 §3).
       feePayer: deps.treasuryAddress,
       destinationOwner: withdrawal.destination,
-      mint: withdrawal.asset,
+      mint,
       amount: withdrawal.amount,
       nonceAccount,
       nonceAuthority: deps.treasuryAddress,
@@ -699,20 +712,34 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
     const amount = toAmount(withdrawal.amount);
     const networkFee = fee === null ? 0n : toAmount(fee);
 
+    /*
+     * The fee is paid in SOL whatever was withdrawn (ADR-0016).
+     *
+     * For a SOL withdrawal this is the same key and the accounts collapse to
+     * the four they always were. For a token withdrawal it is a different
+     * asset entirely, and the house's fee accounts must exist under the NATIVE
+     * key — not under the mint, which is where a lamport fee would otherwise
+     * be posted.
+     */
+    const feeAsset = deps.assets.nativeKey;
+
     await createLedgerRepository(deps.db).ensureAccounts([
       { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_locked' },
       // The funds leave the USER's segregated address (ADR-0020)...
       { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'chain_assets' },
-      // ...and the fee leaves the HOUSE's wallet. Two different addresses,
-      // which is why both accounts are needed for one settlement.
+      // ...and the fee leaves the HOUSE's wallet, in the native asset. Two
+      // different addresses and, for a token, two different assets — which is
+      // why all of these accounts are needed for one settlement.
       { ownerId: null, asset: withdrawal.asset, type: 'chain_assets' },
-      { ownerId: null, asset: withdrawal.asset, type: 'house_fees' },
+      { ownerId: null, asset: feeAsset, type: 'chain_assets' },
+      { ownerId: null, asset: feeAsset, type: 'house_fees' },
     ]);
 
     const posting = postWithdrawalSettlement({
       withdrawalId: withdrawal.id,
       userId: withdrawal.userId,
       asset: withdrawal.asset,
+      feeAsset,
       amount,
       ...(networkFee > 0n ? { networkFee } : {}),
     });

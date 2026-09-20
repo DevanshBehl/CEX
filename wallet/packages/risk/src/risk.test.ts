@@ -315,6 +315,7 @@ describe('the engine', () => {
       'destination',
       'manual_review_threshold',
       'per_transaction_limit',
+      'usd_review_threshold',
       'velocity',
     ]);
   });
@@ -453,5 +454,66 @@ describe('per-asset limits', () => {
   it('reviews a large token amount against the token threshold', () => {
     const decision = evaluate(input({ asset: USDC, amount: 30_000_000n }), withUsdc);
     expect(decision.codes).toContain('MANUAL_REVIEW_THRESHOLD');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Value-based review (ADR-0024)
+// ---------------------------------------------------------------------------
+
+describe('USD review threshold', () => {
+  const USD = 1_000_000n;
+  const USD_POLICY: RiskPolicy = {
+    ...POLICY,
+    reviewNewDestinations: false,
+    manualReviewAboveUsdMicros: 1_000n * USD,
+  };
+
+  it('auto-approves a withdrawal at or under the threshold that passes every check', () => {
+    const decision = evaluate(input({ valueUsdMicros: 1_000n * USD }), USD_POLICY);
+    expect(decision.verdict).toBe('approve');
+  });
+
+  it('reviews a withdrawal worth more than the threshold', () => {
+    const decision = evaluate(input({ valueUsdMicros: 1_000n * USD + 1n }), USD_POLICY);
+    expect(decision.verdict).toBe('review');
+    expect(decision.codes).toContain('USD_REVIEW_THRESHOLD');
+  });
+
+  it('reviews a withdrawal that cannot be priced, rather than assuming it is small', () => {
+    expect(evaluate(input({ valueUsdMicros: null }), USD_POLICY).codes).toContain('VALUE_UNPRICED');
+    expect(evaluate(input(), USD_POLICY).verdict).toBe('review');
+  });
+
+  it('supersedes the base-unit review threshold', () => {
+    // 30 SOL is above the 25 SOL base-unit threshold, but worth only $900.
+    const decision = evaluate(
+      input({ amount: 30n * ONE_SOL, valueUsdMicros: 900n * USD }),
+      USD_POLICY,
+    );
+    expect(decision.verdict).toBe('approve');
+    expect(decision.codes).not.toContain('MANUAL_REVIEW_THRESHOLD');
+  });
+
+  it('auto-approves a first-time destination when new-destination review is off', () => {
+    const decision = evaluate(
+      input({ priorDestinations: [], valueUsdMicros: 50n * USD }),
+      USD_POLICY,
+    );
+    expect(decision.verdict).toBe('approve');
+  });
+
+  it('never softens a hard denial, however small the value', () => {
+    const decision = evaluate(
+      input({ accountStatus: 'suspended', valueUsdMicros: 1n * USD }),
+      USD_POLICY,
+    );
+    expect(decision.verdict).toBe('deny');
+  });
+
+  it('abstains entirely when no USD threshold is configured', () => {
+    const decision = evaluate(input({ valueUsdMicros: 1_000_000n * USD }), POLICY);
+    expect(decision.codes).not.toContain('USD_REVIEW_THRESHOLD');
+    expect(decision.verdict).toBe('approve');
   });
 });

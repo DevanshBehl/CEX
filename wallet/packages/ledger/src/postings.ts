@@ -163,6 +163,18 @@ export interface WithdrawalSettlePosting extends WithdrawalLockPosting {
    * reason, never a silent reduction of the user's amount (rule 118).
    */
   readonly networkFee?: Amount;
+  /**
+   * The asset the FEE is denominated in. ALWAYS the native asset, never the
+   * mint — even when `asset` is a token (ADR-0016).
+   *
+   * Required rather than defaulted to `asset`, for the same reason
+   * `postTokenAccountRent` takes `nativeAsset` explicitly: a validator is paid
+   * in lamports whatever is being moved, and posting a lamport fee against a
+   * mint invents SOL out of USDC. Defaulting would make the correct call and
+   * the wrong one look identical at the call site, and the wrong one is the
+   * one you get by not thinking about it.
+   */
+  readonly feeAsset: string;
 }
 
 /**
@@ -198,15 +210,21 @@ export function postWithdrawalSettlement(input: WithdrawalSettlePosting): Ledger
     // movement and the cost of making it stay separately visible.
     entries.push(
       /*
-       * The fee is the HOUSE's, and leaves the HOUSE's wallet.
+       * The fee is the HOUSE's, leaves the HOUSE's wallet, and is denominated
+       * in the NATIVE asset.
        *
        * Under segregation the fee payer is deliberately not the user: a
        * token-only balance would otherwise be unspendable, because the user
        * has no SOL at their address to pay with. Charging it to the user's
        * `chain_assets` would also mean debiting an address the fee never left.
+       *
+       * `feeAsset`, not `asset`. Withdrawing USDC costs lamports, and these
+       * two entries used to carry the mint — which credited the house's USDC
+       * chain assets with a number of lamports and left every token
+       * withdrawal short in the books by exactly the fee it paid.
        */
-      debit(houseFees(input.asset), input.asset, fee),
-      credit(houseChainAssets(input.asset), input.asset, fee),
+      debit(houseFees(input.feeAsset), input.feeAsset, fee),
+      credit(houseChainAssets(input.feeAsset), input.feeAsset, fee),
     );
   }
 

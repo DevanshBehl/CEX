@@ -32,6 +32,15 @@ export const REASON_CODES = [
    */
   'ASSET_LIMITS_NOT_CONFIGURED',
 
+  /** Worth more than the configured USD review threshold (ADR-0024). */
+  'USD_REVIEW_THRESHOLD',
+  /**
+   * No recent price for the asset, so its value is unknown. Reviewed, never
+   * auto-approved: a withdrawal that cannot be shown to be small is not
+   * treated as small.
+   */
+  'VALUE_UNPRICED',
+
   // --- input ---
   'AMOUNT_NOT_POSITIVE',
   'ASSET_NOT_SUPPORTED',

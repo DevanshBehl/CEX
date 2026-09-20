@@ -23,7 +23,22 @@ import { baseUnitsSchema } from '../money.js';
  * (ADR-0016), and duplicating that judgement in a wire schema means two places
  * to change when a chain with different address encoding arrives.
  */
-export const assetSchema = z.string().min(1).max(44);
+export const assetSchema = z
+  .string()
+  .min(1)
+  .max(44)
+  /*
+   * A BARE asset, never a cluster-qualified ledger key.
+   *
+   * The wire says `SOL` and storage says `devnet:SOL` (ADR-0021), and the
+   * boundary qualifies one into the other. `ledgerAssetKey` refuses an asset
+   * containing the separator — it would not round-trip — so without this
+   * refinement a request naming `devnet:SOL` passed validation and threw a
+   * TypeError inside the controller, which the error handler could only
+   * report as a 500. A malformed asset is a bad request, and this is where
+   * that judgement belongs.
+   */
+  .refine((asset) => !asset.includes(':'), 'must not name a cluster');
 export const chainSchema = z.string().min(1).max(32);
 
 export const balanceSchema = z.object({

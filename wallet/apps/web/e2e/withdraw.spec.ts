@@ -64,6 +64,47 @@ test.describe('withdrawal journey', () => {
     await expect(page.getByText(/greater than zero/i)).toBeVisible();
   });
 
+  /**
+   * The asset picker (ADR-0016).
+   *
+   * The page sent SOL and only SOL: the asset was a string literal in the
+   * submit handler and the decimals were a literal nine. A user holding USDC
+   * had a balance the interface showed them and gave them no way to move.
+   */
+  test('offers every asset the platform can send, not only SOL', async ({ page }) => {
+    await register(page);
+    await page.goto('/withdraw');
+
+    const picker = page.getByRole('radiogroup', { name: /asset to withdraw/i });
+    await expect(picker).toBeVisible();
+    // SOL is always allowlisted, so it is always an option. Any configured
+    // token appears beside it without this test naming it — asserting on a
+    // specific mint would tie the suite to one deployment's TOKEN_MINTS.
+    await expect(picker.getByRole('radio', { name: /SOL/ })).toBeVisible();
+  });
+
+  test('the amount field follows the selected asset', async ({ page }) => {
+    await register(page);
+    await page.goto('/withdraw');
+
+    const options = page.getByRole('radiogroup', { name: /asset to withdraw/i }).getByRole('radio');
+    // Awaited, not counted immediately: the picker is driven by the balances
+    // fetch, so a bare `count()` on arrival reads zero and the test skips
+    // itself for a reason that was never true.
+    await expect(options.first()).toBeVisible();
+
+    // Only meaningful where a second asset is configured.
+    test.skip((await options.count()) < 2, 'this deployment allowlists only the native asset');
+
+    await page.getByPlaceholder('0.0').fill('1.23');
+    await options.nth(1).click();
+
+    // Cleared, because "1.23" means a different amount under each asset, and
+    // carrying it across is how a user sends the wrong size.
+    await expect(page.getByPlaceholder('0.0')).toHaveValue('');
+    await expect(options.nth(1)).toHaveAttribute('aria-checked', 'true');
+  });
+
   test('warns that a sent transaction cannot be reversed', async ({ page }) => {
     await register(page);
     await page.goto('/withdraw');

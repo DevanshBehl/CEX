@@ -32,7 +32,7 @@ import {
 } from '@wallet/db';
 import { createLogger, type Logger } from '@wallet/logger';
 import { GENESIS_HASHES, type NonceManager, type WithdrawalBroadcaster } from '@wallet/solana';
-import type { Cluster } from '@wallet/types';
+import { ledgerAssetKey, type Cluster } from '@wallet/types';
 import type { MpcRole } from '@wallet/blockchain';
 import {
   createClusterRuntime,
@@ -526,7 +526,38 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   const stepUpGuard = createStepUpGuard(guardDeps);
   const withdrawalStepUpGuard = createWithdrawalStepUpGuard({
     ...guardDeps,
-    reviewThreshold: BigInt(config.risk.manualReviewAbove),
+    /*
+     * The threshold for the asset actually named in the request (ADR-0016).
+     *
+     * `assetLimits` is already keyed by cluster-qualified asset and already
+     * carries a per-asset `manualReviewAbove` in that asset's own base units,
+     * which is exactly what this needs — the native asset's entry is the SOL
+     * number this guard used unconditionally before, so SOL behaviour is
+     * unchanged and every token gets its own figure instead of SOL's.
+     *
+     * An asset with no entry returns null, which the guard reads as large.
+     * That is the same posture the risk engine takes for an unconfigured
+     * asset, which it denies outright (`assetLimitsConfiguredRule`).
+     */
+    reviewThresholdFor: (cluster, asset) => {
+      /*
+       * The body has NOT been validated when this runs, so `asset` is
+       * whatever was posted. `ledgerAssetKey` throws on an asset containing a
+       * colon, and an unhandled throw at `preValidation` answers 500 where
+       * the schema would have answered 400 a moment later.
+       *
+       * Every failure here means the same thing — no threshold for this
+       * asset — which the guard already reads as large. So a malformed asset
+       * costs a fresher passkey assertion and nothing else, and the
+       * validation error it really deserves is still the one returned.
+       */
+      try {
+        const limits = config.risk.assetLimits[ledgerAssetKey(cluster, asset)];
+        return limits === undefined ? null : BigInt(limits.manualReviewAbove);
+      } catch {
+        return null;
+      }
+    },
     strictMaxAgeSeconds: config.withdrawal.stepUpMaxAgeSeconds,
   });
 

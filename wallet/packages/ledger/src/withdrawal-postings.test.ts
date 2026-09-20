@@ -25,6 +25,15 @@ import {
 const SOL = 'devnet:SOL';
 const ONE = 1_000_000_000n;
 
+/*
+ * A token, for the settlement path where the amount and the fee are different
+ * assets. Six decimals against SOL's nine, which is the other half of why a
+ * fee posted under the wrong key is so hard to see: the numbers look
+ * plausible either way.
+ */
+const USDC = 'devnet:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const USDC_ONE = 1_000_000n;
+
 /** A user funded by a deposit, as every withdrawal test needs. */
 function funded(amount = 10n * ONE): Entry[] {
   return [...postDeposit({ depositId: 'd1', userId: 'u1', asset: SOL, amount }).entries];
@@ -123,6 +132,7 @@ describe('settlement (rules 116-119)', () => {
         withdrawalId: 'w1',
         userId: 'u1',
         asset: SOL,
+        feeAsset: SOL,
         amount: 3n * ONE,
       }).entries,
     ];
@@ -157,6 +167,7 @@ describe('settlement (rules 116-119)', () => {
         withdrawalId: 'w1',
         userId: 'u1',
         asset: SOL,
+        feeAsset: SOL,
         amount: 3n * ONE,
         networkFee: fee,
       }).entries,
@@ -192,6 +203,7 @@ describe('settlement (rules 116-119)', () => {
         withdrawalId: 'w1',
         userId: 'u1',
         asset: SOL,
+        feeAsset: SOL,
         amount: ONE,
         networkFee: 5_000n,
       }).entries,
@@ -202,12 +214,89 @@ describe('settlement (rules 116-119)', () => {
     expect(violations.some((v) => v.invariant === 'account_sign')).toBe(true);
   });
 
+  /*
+   * A TOKEN withdrawal, whose fee is paid in SOL (ADR-0016).
+   *
+   * The asymmetry that makes this worth its own test: the amount moves in
+   * USDC and the fee moves in SOL, in ONE posting. Every other settlement
+   * test uses SOL for both, which is exactly why the fee carried the mint for
+   * as long as it did — the two keys were always the same, so nothing
+   * disagreed.
+   */
+  it('denominates a token withdrawal fee in the native asset, not the mint', () => {
+    const fee = 5_000n;
+    const posting = postWithdrawalSettlement({
+      withdrawalId: 'w1',
+      userId: 'u1',
+      asset: USDC,
+      feeAsset: SOL,
+      amount: 100n * USDC_ONE,
+      networkFee: fee,
+    });
+
+    const byAsset = (asset: string) => posting.entries.filter((entry) => entry.asset === asset);
+
+    // The user's side moves in USDC and only in USDC.
+    expect(byAsset(USDC)).toHaveLength(2);
+    // The fee moves in SOL and only in SOL.
+    const feeEntries = byAsset(SOL);
+    expect(feeEntries).toHaveLength(2);
+    for (const entry of feeEntries) {
+      expect(entry.amount).toBe(fee);
+      // And against the HOUSE's accounts — a user never pays it.
+      expect(entry.account.ownerId).toBeNull();
+    }
+  });
+
+  it('keeps a token withdrawal balanced per asset, and leaves house USDC alone', () => {
+    const entries = [
+      ...postHouseFunding({ reference: 'treasury-1', asset: SOL, amount: ONE }).entries,
+      ...postDeposit({ depositId: 'd1', userId: 'u1', asset: USDC, amount: 500n * USDC_ONE })
+        .entries,
+      ...postWithdrawalLock({
+        withdrawalId: 'w1',
+        userId: 'u1',
+        asset: USDC,
+        amount: 100n * USDC_ONE,
+      }).entries,
+      ...postWithdrawalSettlement({
+        withdrawalId: 'w1',
+        userId: 'u1',
+        asset: USDC,
+        feeAsset: SOL,
+        amount: 100n * USDC_ONE,
+        networkFee: 5_000n,
+      }).entries,
+    ];
+
+    const projected = projectAll(entries);
+
+    // The user is out exactly the tokens they withdrew, and nothing else.
+    expect(projectUserBalance('u1', USDC, entries).total).toBe(400n * USDC_ONE);
+    // The house paid the fee out of its SOL.
+    expect(projected.get(accountKey(houseChainAssets(SOL)))?.balance).toBe(ONE - 5_000n);
+    /*
+     * And the house's USDC was never touched.
+     *
+     * THE REGRESSION. Posting the fee against the mint credited this account
+     * with 5,000 — five thousandths of a USDC the house never held and never
+     * spent — so the books claimed a USDC cost for a SOL fee, and every token
+     * withdrawal drifted the house's token position by its own fee.
+     */
+    expect(projected.get(accountKey(houseChainAssets(USDC)))).toBeUndefined();
+
+    // Balanced per asset, which is the invariant that would have caught it.
+    expect(isBalanced(entries)).toBe(true);
+    expect(checkAllInvariants(entries)).toEqual([]);
+  });
+
   it('refuses a negative fee', () => {
     expect(() =>
       postWithdrawalSettlement({
         withdrawalId: 'w1',
         userId: 'u1',
         asset: SOL,
+        feeAsset: SOL,
         amount: ONE,
         networkFee: -1n,
       }),
@@ -226,6 +315,7 @@ describe('settlement (rules 116-119)', () => {
         withdrawalId: 'w1',
         userId: 'u1',
         asset: SOL,
+        feeAsset: SOL,
         amount: 3n * ONE,
         networkFee: 5_000n,
       }).entries,
@@ -412,6 +502,7 @@ describe('segregated custody', () => {
         withdrawalId: 'w1',
         userId: 'alice',
         asset: SOL,
+        feeAsset: SOL,
         amount: 2n * ONE,
       }).entries,
     ];

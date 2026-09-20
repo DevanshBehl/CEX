@@ -27,9 +27,30 @@ export type RequestWithdrawalRequest = z.infer<typeof requestWithdrawalSchema>;
 export const withdrawalSchema = z.object({
   id: z.string(),
   asset: assetSchema,
+  /**
+   * What to CALL this asset — `SOL`, `USDC`.
+   *
+   * Carried for the same reason `balanceSchema` carries it: `asset` is a mint
+   * address for a token, and the server holds the only authoritative mapping
+   * from a mint to a name. Without it the withdrawal history rendered a
+   * 44-character base58 string where a ticker belongs — the exact defect the
+   * balances endpoint already had and fixed.
+   */
+  symbol: z.string(),
   decimals: z.number().int().min(0).max(32),
   amount: baseUnitsSchema,
   networkFee: baseUnitsSchema.nullable(),
+  /**
+   * The fee's own symbol and decimals — NOT the withdrawn asset's.
+   *
+   * A validator is paid in SOL whatever is being moved (ADR-0016), so a USDC
+   * withdrawal has a fee denominated in lamports at nine decimals while the
+   * amount beside it is denominated in USDC at six. Rendering the fee with
+   * the withdrawal's own decimals and ticker overstated it by a factor of a
+   * thousand and labelled it as the token.
+   */
+  networkFeeSymbol: z.string(),
+  networkFeeDecimals: z.number().int().min(0).max(32),
   destination: z.string(),
   status: withdrawalStatusSchema,
   /** True while the funds are reserved in `user_locked`. */

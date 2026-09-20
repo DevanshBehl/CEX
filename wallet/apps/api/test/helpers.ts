@@ -1,6 +1,6 @@
 import { Redis } from 'ioredis';
 import type { FastifyInstance } from 'fastify';
-import { loadApiConfigOrExit, parseEnv, toApiConfig } from '@wallet/config';
+import { loadApiConfigOrExit, parseEnv, toApiConfig, type ApiConfig } from '@wallet/config';
 import type { ChainAdapter, Signer } from '@wallet/blockchain';
 import {
   NATIVE_ASSET,
@@ -75,6 +75,33 @@ export interface HarnessOptions {
    * whatever the live market did during the assertion.
    */
   startPricer?: boolean;
+  /**
+   * Risk policy overrides.
+   *
+   * The suite defaults to the BASE-UNIT review policy (no USD threshold,
+   * first-time destinations reviewed), because most suites assert on
+   * lifecycle and ledger behaviour rather than on pricing, and a USD policy
+   * with no seeded prices reviews everything. The value-based suite opts in.
+   */
+  risk?: Partial<ApiConfig['risk']>;
+  /**
+   * Allowlist a token on the DEFAULT cluster, with its withdrawal limits.
+   *
+   * Built here rather than read from `TOKEN_MINTS` so a token suite does not
+   * depend on what happens to be in the developer's `.env`, and so the two
+   * halves a token needs cannot drift apart: a mint in the allowlist with no
+   * entry in `RISK_ASSET_LIMITS` is depositable and NOT withdrawable
+   * (`ASSET_LIMITS_NOT_CONFIGURED`), which is the exact configuration gap this
+   * option exists to make impossible to reproduce by accident.
+   */
+  tokens?: readonly {
+    readonly symbol: string;
+    readonly mint: string;
+    readonly decimals: number;
+    readonly perTransactionLimit: string;
+    readonly dailyLimit: string;
+    readonly manualReviewAbove: string;
+  }[];
 }
 
 export async function startHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -83,13 +110,56 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
   const db = createPrismaClient({ url: config.database.url });
   const redis = new Redis(config.redis.url, { maxRetriesPerRequest: 3 });
 
+  /*
+   * The default cluster's registry, with any suite-declared tokens added.
+   *
+   * `config.chain.assets` and `config.chain.byCluster[default].assets` are two
+   * references to the same allowlist, and BOTH are read: the runtime takes the
+   * per-cluster one, and a few call sites take the flat one. Replacing only
+   * one produces a server that credits a token and cannot price or withdraw
+   * it, which looks exactly like the bug this suite is about.
+   */
+  const declaredTokens = options.tokens ?? [];
+  const defaultAssets =
+    declaredTokens.length === 0
+      ? config.chain.assets
+      : createAssetRegistry({
+          cluster: config.chain.defaultCluster,
+          nativeDecimals: NATIVE_DECIMALS,
+          tokens: [
+            ...config.chain.assets.tokens,
+            ...declaredTokens.map((token) => ({
+              symbol: token.symbol,
+              mint: token.mint,
+              decimals: token.decimals,
+            })),
+          ],
+        });
+
+  const tokenAssetLimits = Object.fromEntries(
+    declaredTokens.map((token) => [
+      assetKey(token.mint),
+      {
+        perTransactionLimit: token.perTransactionLimit,
+        dailyLimit: token.dailyLimit,
+        manualReviewAbove: token.manualReviewAbove,
+      },
+    ]),
+  );
+
   const extra = options.extraCluster;
   const chainConfig = extra
     ? {
         ...config.chain,
+        assets: defaultAssets,
+        supportedAssets: defaultAssets.keys,
         clusters: [...config.chain.clusters, extra],
         byCluster: {
           ...config.chain.byCluster,
+          [config.chain.defaultCluster]: {
+            ...config.chain.byCluster[config.chain.defaultCluster],
+            assets: defaultAssets,
+          },
           [extra]: {
             cluster: extra,
             // The same endpoint. What makes the two clusters distinct in this
@@ -105,11 +175,29 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
           },
         },
       }
-    : config.chain;
+    : {
+        ...config.chain,
+        assets: defaultAssets,
+        supportedAssets: defaultAssets.keys,
+        byCluster: {
+          ...config.chain.byCluster,
+          [config.chain.defaultCluster]: {
+            ...config.chain.byCluster[config.chain.defaultCluster],
+            assets: defaultAssets,
+          },
+        },
+      };
 
   const effectiveConfig = {
     ...config,
     chain: chainConfig,
+    risk: {
+      ...config.risk,
+      manualReviewAboveUsd: null,
+      reviewNewDestinations: true,
+      assetLimits: { ...config.risk.assetLimits, ...tokenAssetLimits },
+      ...options.risk,
+    },
     withdrawal: {
       ...config.withdrawal,
       ...(options.operatorUserIds === undefined

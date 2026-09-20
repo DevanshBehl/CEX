@@ -255,7 +255,7 @@ export default function DashboardPage() {
                   <li key={w.id} className="py-3 first:pt-0 last:pb-0">
                     <div className="flex items-center justify-between gap-3">
                       <span className="font-mono text-sm text-ink">
-                        −{formatAmount(w.amount, w.decimals)} {w.asset}
+                        −{formatAmount(w.amount, w.decimals)} {w.symbol}
                       </span>
                       <WithdrawalStatusBadge status={w.status} />
                     </div>

@@ -119,7 +119,7 @@ export default function OperatorPage() {
             <div className="flex items-baseline justify-between gap-4">
               <span className="font-mono text-sm font-semibold tabular-nums">
                 {formatAmount(item.withdrawal.amount, item.withdrawal.decimals)}{' '}
-                {item.withdrawal.asset}
+                {item.withdrawal.symbol}
               </span>
               <WithdrawalStatusBadge status={item.withdrawal.status} />
             </div>

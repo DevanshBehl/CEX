@@ -7,6 +7,8 @@ export {
   dailyLimitRule,
   manualReviewThresholdRule,
   perTransactionLimitRule,
+  usdReviewEnabled,
   velocityRule,
 } from './rules/limits.js';
+export { usdReviewThresholdRule } from './rules/value.js';
 export { evaluate, problemCodes, POLICY_VERSION, RULES } from './engine.js';

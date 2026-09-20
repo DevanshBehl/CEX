@@ -136,7 +136,9 @@ export const velocityRule: Rule = (input, policy) => {
  */
 export const manualReviewThresholdRule: Rule = (input, policy) => {
   const limits = limitsFor(input, policy);
-  if (limits === undefined) {
+  // A USD threshold supersedes the base-unit one (ADR-0024). Abstaining here
+  // rather than removing the rule keeps old decisions replayable.
+  if (limits === undefined || usdReviewEnabled(policy)) {
     return { rule: 'manual_review_threshold', verdict: 'approve', codes: [] };
   }
 
@@ -154,6 +156,13 @@ export const manualReviewThresholdRule: Rule = (input, policy) => {
   }
   return { rule: 'manual_review_threshold', verdict: 'approve', codes: [] };
 };
+
+/** Whether review is decided by USD value rather than per-asset base units. */
+export function usdReviewEnabled(policy: RiskPolicy): boolean {
+  return (
+    policy.manualReviewAboveUsdMicros !== undefined && policy.manualReviewAboveUsdMicros !== null
+  );
+}
 
 function sumSince(input: RiskInput, cutoff: Date): bigint {
   return input.recentWithdrawals

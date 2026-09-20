@@ -22,6 +22,7 @@ import {
   type DestinationCheck,
 } from '@wallet/risk';
 import type { WithdrawalStatus } from '@wallet/types';
+import type { WithdrawalValuation } from './withdrawal-valuation.js';
 
 export interface WithdrawalServiceDeps {
   readonly db: PrismaClient;
@@ -31,6 +32,11 @@ export interface WithdrawalServiceDeps {
   readonly logger: Logger;
   /** Injected so risk evaluation stays testable at a window boundary. */
   readonly clock?: () => Date;
+  /**
+   * Prices a withdrawal for value-based review (ADR-0024). Without it the
+   * engine is told nothing about value, which a USD-threshold policy reviews.
+   */
+  readonly valuation?: WithdrawalValuation;
 }
 
 export interface RequestWithdrawalInput {
@@ -171,6 +177,15 @@ export function createWithdrawalService(deps: WithdrawalServiceDeps): Withdrawal
       select: { id: true },
     });
 
+    // Priced here, before the engine, because the engine reads no database.
+    // A pricing failure is an unknown value, never an exception that blocks
+    // the request: unknown values are reviewed.
+    const amount = toAmount(input.amount);
+    const valueUsdMicros =
+      deps.valuation === undefined
+        ? undefined
+        : await deps.valuation(input.asset, amount, at).catch(() => null);
+
     const destinationCheck: DestinationCheck = verdict.ok
       ? { ok: true, isPlatformOwned: owned !== null }
       : { ok: false, reason: verdict.reason === 'not_signable' ? 'not_signable' : 'invalid' };
@@ -179,9 +194,10 @@ export function createWithdrawalService(deps: WithdrawalServiceDeps): Withdrawal
       userId: input.userId,
       accountStatus: user.status,
       asset: input.asset,
-      amount: toAmount(input.amount),
+      amount,
       destination: input.destination,
       destinationCheck,
+      ...(valueUsdMicros !== undefined ? { valueUsdMicros } : {}),
       priorDestinations,
       recentWithdrawals: recent.map((w) => ({
         amount: toAmount(w.amount),
@@ -241,6 +257,10 @@ export function createWithdrawalService(deps: WithdrawalServiceDeps): Withdrawal
           destinationCheck: riskInput.destinationCheck,
           priorDestinationCount: riskInput.priorDestinations.length,
           recentWithdrawalCount: riskInput.recentWithdrawals.length,
+          valueUsdMicros:
+            riskInput.valueUsdMicros === undefined || riskInput.valueUsdMicros === null
+              ? null
+              : riskInput.valueUsdMicros.toString(),
           trailingTotal: riskInput.recentWithdrawals
             .reduce((total, w) => total + w.amount, 0n)
             .toString(),

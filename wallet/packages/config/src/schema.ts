@@ -228,10 +228,36 @@ export const envSchema = z
     RISK_VELOCITY_WINDOW_MINUTES: z.coerce.number().int().positive().default(60),
     RISK_VELOCITY_MAX_COUNT: z.coerce.number().int().positive().default(10),
     RISK_MANUAL_REVIEW_ABOVE: z.string().default('25000000000'), // 25 SOL
+    /**
+     * First-time destinations are reviewed only when this is on (ADR-0010).
+     *
+     * Off by default since ADR-0024: review is decided by value, so a small
+     * withdrawal to a new address is approved automatically once every hard
+     * check passes. Turn it back on for the stricter posture.
+     */
     RISK_NEW_DESTINATION_REVIEW: z
       .enum(['true', 'false'])
-      .default('true')
+      .default('false')
       .transform((v) => v === 'true'),
+    /**
+     * Value-based review (ADR-0024), in whole US dollars as a decimal string.
+     *
+     * A withdrawal worth MORE than this, at the latest recorded price, goes to
+     * an operator; everything else that passes the hard checks is approved by
+     * code. An asset with no recent price is always reviewed. Replaces the
+     * per-asset `REVIEW_ABOVE` base-unit thresholds when set; an empty value
+     * restores them.
+     */
+    RISK_MANUAL_REVIEW_ABOVE_USD: z
+      .string()
+      .trim()
+      .default('5000')
+      .refine((v) => v === '' || /^\d+(\.\d{1,6})?$/.test(v), 'must be a dollar amount like 1000'),
+    /**
+     * How old a price may be and still value a withdrawal. Older than this and
+     * the withdrawal is treated as unpriced, and reviewed.
+     */
+    RISK_PRICE_MAX_AGE_SECONDS: z.coerce.number().int().positive().default(3600),
     RISK_KNOWN_DESTINATION_WINDOW_DAYS: z.coerce.number().int().positive().default(90),
 
     /**

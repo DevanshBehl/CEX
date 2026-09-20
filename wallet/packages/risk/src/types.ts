@@ -53,6 +53,15 @@ export interface RiskInput {
   readonly priorDestinations: readonly PriorDestination[];
   /** Withdrawals in the trailing window, supplied by the caller. */
   readonly recentWithdrawals: readonly WithdrawalHistoryEntry[];
+  /**
+   * What this withdrawal is worth, in micro-dollars (10^-6 USD), from the most
+   * recent recorded price — supplied by the caller, like every other input.
+   *
+   * `null` means the caller tried and could not price it (no feed, no recent
+   * tick). Absent means the caller did not try. The USD review rule treats
+   * the two differently: an unpriced withdrawal cannot be shown to be small.
+   */
+  readonly valueUsdMicros?: bigint | null;
   readonly now: Date;
 }
 
@@ -93,6 +102,17 @@ export interface RiskPolicy {
   readonly velocityMaxCount: number;
   readonly manualReviewAbove: Amount;
   readonly reviewNewDestinations: boolean;
+  /**
+   * Value-based review (ADR-0024): a withdrawal worth MORE than this many
+   * micro-dollars goes to a person; everything under it that passes the hard
+   * checks is approved automatically.
+   *
+   * When set, it REPLACES the per-asset base-unit review thresholds — one
+   * dollar figure across every asset, rather than a SOL number and a USDC
+   * number that drift apart as prices move. `null` or absent keeps the
+   * base-unit thresholds.
+   */
+  readonly manualReviewAboveUsdMicros?: bigint | null;
   /** How far back a destination counts as "known". */
   readonly knownDestinationWindowDays: number;
 }

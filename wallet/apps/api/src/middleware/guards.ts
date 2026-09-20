@@ -4,6 +4,7 @@ import { checkCsrf } from '@wallet/auth';
 import type { SessionRecord } from '@wallet/db';
 import { AuthenticationRequiredError, AuthorizationDeniedError } from '@wallet/errors';
 import { attachIdentity, logSecurityEvent, type Logger } from '@wallet/logger';
+import type { Cluster } from '@wallet/types';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -113,7 +114,24 @@ export function createStepUpGuard(deps: GuardDeps, maxAgeSeconds?: number) {
  * read defensively and an unreadable one gets the STRICTER tier.
  */
 export function createWithdrawalStepUpGuard(
-  deps: GuardDeps & { readonly reviewThreshold: bigint; readonly strictMaxAgeSeconds: number },
+  deps: GuardDeps & {
+    /**
+     * The "large" threshold in the BASE UNITS OF THE ASSET NAMED IN THE BODY,
+     * or null when this deployment has no threshold for it.
+     *
+     * A function of (cluster, asset) rather than one number, because base
+     * units are not comparable across assets. SOL has nine decimals and USDC
+     * has six, so one threshold of 25,000,000,000 means 25 SOL and 25,000
+     * USDC — and a 20,000 USDC withdrawal, a far larger loss than the SOL
+     * figure the number was chosen for, was handed the LAX freshness window.
+     * The bug was invisible while SOL was the only withdrawable asset.
+     *
+     * Returning null means "no threshold configured for this asset", which is
+     * treated as large. See `large` below.
+     */
+    readonly reviewThresholdFor: (cluster: Cluster, asset: string) => bigint | null;
+    readonly strictMaxAgeSeconds: number;
+  },
 ) {
   return async function withdrawalStepUpGuard(
     request: FastifyRequest,
@@ -122,12 +140,25 @@ export function createWithdrawalStepUpGuard(
     const session = request.session;
     if (!session) throw new AuthenticationRequiredError();
 
-    const body = request.body as { amount?: unknown } | undefined;
-    const raw = typeof body?.amount === 'string' ? body.amount : null;
+    const body = request.body as { amount?: unknown; asset?: unknown } | undefined;
+    const rawAmount = typeof body?.amount === 'string' ? body.amount : null;
+    const rawAsset = typeof body?.asset === 'string' ? body.asset : null;
 
-    let large = true; // the safe default
-    if (raw !== null && /^\d+$/.test(raw)) {
-      large = BigInt(raw) >= deps.reviewThreshold;
+    /*
+     * Large until shown otherwise — and now that has to be shown for the
+     * RIGHT asset.
+     *
+     * An unreadable amount, an unnamed asset, and an asset with no configured
+     * threshold all land here. The body has not been validated yet (this runs
+     * at `preValidation` so an unauthenticated caller never learns the
+     * endpoint's shape), so each of those is a real possibility on a
+     * well-formed request, and the strict tier is the one that costs a user a
+     * second passkey tap rather than a withdrawal.
+     */
+    let large = true;
+    if (rawAmount !== null && rawAsset !== null && /^\d+$/.test(rawAmount)) {
+      const threshold = deps.reviewThresholdFor(request.cluster, rawAsset);
+      if (threshold !== null) large = BigInt(rawAmount) >= threshold;
     }
 
     deps.sessions.requireStepUp(session, large ? deps.strictMaxAgeSeconds : undefined);

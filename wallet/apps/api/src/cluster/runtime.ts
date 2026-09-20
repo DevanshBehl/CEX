@@ -27,6 +27,8 @@ import { createDepositPipeline, type DepositPipeline } from '../services/deposit
 import { createPortfolioService, type PortfolioService } from '../services/portfolio.service.js';
 import { createReconciliationService } from '../services/reconciliation.service.js';
 import { createWithdrawalService, type WithdrawalService } from '../services/withdrawal.service.js';
+import { createWithdrawalValuation } from '../services/withdrawal-valuation.js';
+import { parseUsd } from '@wallet/portfolio';
 import { createIndexer, type Indexer } from '../workers/indexer.js';
 import { createWithdrawalWorkers, type WithdrawalWorkers } from '../workers/withdrawal-workers.js';
 import { createCustodyRepository } from '@wallet/db';
@@ -159,6 +161,12 @@ export function createClusterRuntime(deps: ClusterRuntimeDeps): ClusterRuntime {
     validator: createSolanaAddressValidator(),
     chain: chainId,
     logger,
+    valuation: createWithdrawalValuation({
+      db,
+      cluster,
+      assets: chain.assets,
+      maxAgeSeconds: config.risk.priceMaxAgeSeconds,
+    }),
     policy: {
       // Every asset the platform will credit on this cluster is an asset it
       // must be able to reason about withdrawing (ADR-0016).
@@ -170,6 +178,11 @@ export function createClusterRuntime(deps: ClusterRuntimeDeps): ClusterRuntime {
       velocityMaxCount: config.risk.velocityMaxCount,
       manualReviewAbove: BigInt(config.risk.manualReviewAbove),
       reviewNewDestinations: config.risk.reviewNewDestinations,
+      // One dollar threshold across every asset (ADR-0024).
+      manualReviewAboveUsdMicros:
+        config.risk.manualReviewAboveUsd === null
+          ? null
+          : parseUsd(config.risk.manualReviewAboveUsd),
       knownDestinationWindowDays: config.risk.knownDestinationWindowDays,
     },
   });

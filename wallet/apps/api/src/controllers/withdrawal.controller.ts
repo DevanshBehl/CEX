@@ -210,7 +210,15 @@ export function createWithdrawalControllers(deps: WithdrawalControllerDeps): Wit
   };
 
   function render(runtime: { readonly assets: AssetRegistry }, row: WithdrawalRecord): Withdrawal {
-    return toWithdrawal(row, runtime.assets.decimalsOf(row.asset), wireAsset(row.asset));
+    const { assets } = runtime;
+    return toWithdrawal(row, {
+      asset: wireAsset(row.asset),
+      symbol: assets.symbolOf(row.asset),
+      decimals: assets.decimalsOf(row.asset),
+      // The fee is the NATIVE asset's, whatever was withdrawn (ADR-0016).
+      feeSymbol: assets.symbolOf(assets.nativeKey),
+      feeDecimals: assets.decimalsOf(assets.nativeKey),
+    });
   }
 }
 
@@ -238,13 +246,24 @@ const STATUS_DETAIL: Readonly<Record<WithdrawalStatus, string>> = {
   FAILED: 'This withdrawal could not be completed. Your funds have been returned.',
 };
 
-function toWithdrawal(row: WithdrawalRecord, decimals: number, asset: string): Withdrawal {
+interface AssetDisplay {
+  readonly asset: string;
+  readonly symbol: string;
+  readonly decimals: number;
+  readonly feeSymbol: string;
+  readonly feeDecimals: number;
+}
+
+function toWithdrawal(row: WithdrawalRecord, display: AssetDisplay): Withdrawal {
   return {
     id: row.id,
-    asset,
-    decimals,
+    asset: display.asset,
+    symbol: display.symbol,
+    decimals: display.decimals,
     amount: row.amount,
     networkFee: row.networkFee,
+    networkFeeSymbol: display.feeSymbol,
+    networkFeeDecimals: display.feeDecimals,
     destination: row.destination,
     status: row.status,
     fundsLocked: holdsLock(row.status),

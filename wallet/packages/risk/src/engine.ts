@@ -9,6 +9,7 @@ import {
   perTransactionLimitRule,
   velocityRule,
 } from './rules/limits.js';
+import { usdReviewThresholdRule } from './rules/value.js';
 import type { RiskDecision, RiskInput, RiskPolicy, Rule, RuleOutcome, Verdict } from './types.js';
 
 /**
@@ -27,6 +28,7 @@ export const RULES: readonly Rule[] = [
   dailyLimitRule,
   velocityRule,
   manualReviewThresholdRule,
+  usdReviewThresholdRule,
 ];
 
 /**
@@ -34,7 +36,7 @@ export const RULES: readonly Rule[] = [
  * one the current policy would produce. Not a version of the limits — those
  * are configuration and are captured in the decision's detail.
  */
-export const POLICY_VERSION = '1';
+export const POLICY_VERSION = '2';
 
 /**
  * Evaluate every rule and compose one decision
