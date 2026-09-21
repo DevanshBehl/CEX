@@ -1,6 +1,6 @@
 # ADR-0025: A central limit order book, and two tiers of custody
 
-**Status:** proposed · **Date:** 2026-09-20 · **Phase:** S1–S4
+**Status:** accepted · **Date:** 2026-09-20 · **Phase:** S1–S4
 **Amends:** ADR-0020 (segregated custody) · **Extends:** ADR-0017 (sweep policy), ADR-0021 (cluster dimension), ADR-0024 (value-based review)
 
 ## Context

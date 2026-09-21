@@ -1,6 +1,6 @@
 # ADR-0028: Engine durability and replay
 
-**Status:** proposed · **Date:** 2026-09-21 · **Phase:** S1
+**Status:** accepted · **Date:** 2026-09-21 · **Phase:** S1
 **Required by:** ADR-0025 · **Relates to:** ADR-0012 (retry and expiry budgets)
 
 ## Context

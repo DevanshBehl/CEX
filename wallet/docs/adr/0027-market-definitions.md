@@ -1,6 +1,6 @@
 # ADR-0027: Market definitions, ticks and collars
 
-**Status:** proposed · **Date:** 2026-09-21 · **Phase:** S1
+**Status:** accepted · **Date:** 2026-09-21 · **Phase:** S1
 **Extends:** ADR-0021 (cluster dimension), ADR-0026 (fixed-point price) · **Required by:** ADR-0025
 
 ## Context

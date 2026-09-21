@@ -1,6 +1,6 @@
 # ADR-0029: Maker/taker fees, and the asset they are charged in
 
-**Status:** proposed · **Date:** 2026-09-21 · **Phase:** S1 (contract) · S4 (charged)
+**Status:** accepted · **Date:** 2026-09-21 · **Phase:** S1 (contract) · S4 (charged)
 **Required by:** ADR-0025 · **Relates to:** ADR-0026 (fixed-point arithmetic)
 
 ## Context
