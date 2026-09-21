@@ -16,21 +16,34 @@
 //! (ADR-0028), and both are only possible if a replay reproduces the original
 //! byte for byte.
 //!
-//! # What this crate must never acquire
+//! # What the ENGINE must never acquire
 //!
-//! A database handle, an HTTP client, a Redis connection, or any notion of a
-//! balance. The engine owns price and priority; the ledger owns money. An
-//! engine that could answer a question about a balance has been given a job
-//! that is not its own.
+//! `engine`, `book` and `types` know nothing of the network. No clock, no
+//! socket, no file — `Engine::apply` takes a command and returns events, and
+//! that is the whole of its world.
+//!
+//! S2 gives the crate a transport (`auth`, `egress`, `http`, `service`), and
+//! the separation is the point: the transport may hold a Redis connection and
+//! a TLS listener, and the engine may not learn that either exists. A command
+//! arriving over HTTP and a command replayed from the journal are the same
+//! command, which is what keeps a replay byte-identical to the original run.
+//!
+//! **Nothing in this crate, at any layer, holds a database handle or any notion
+//! of a balance.** The engine owns price and priority; the ledger owns money.
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod book;
 pub mod config;
+pub mod egress;
 pub mod engine;
 pub mod error;
+pub mod http;
 pub mod journal;
+pub mod lookup;
 pub mod runtime;
+pub mod service;
 pub mod snapshot;
 pub mod types;
 

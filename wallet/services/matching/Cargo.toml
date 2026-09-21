@@ -20,6 +20,24 @@ path = "src/main.rs"
 bench = false
 
 [dependencies]
+# HTTP control plane. The engine's only caller is the gateway; an end user
+# never reaches it.
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tower-http = { version = "0.5", features = ["trace"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
+# Caller authentication (ADR-0031). The engine holds only a PUBLIC key: it
+# cannot impersonate its caller, and compromising it yields no ability to sign.
+ed25519-dalek = "2"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+
+# Egress (ADR-0030). Transport, never the source of truth — that is the journal.
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+
 # Serialisation. bincode is deterministic for a given schema, which is what a
 # replayable journal needs — a format that reorders fields produces a different
 # byte stream from the same command.
@@ -35,6 +53,8 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 [dev-dependencies]
 proptest = "1"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 

@@ -69,6 +69,19 @@ impl Engine {
         self.market.status = status;
     }
 
+    /// The journaled form. Emits an event like every other command, because a
+    /// command that produced none would be a gap in the sequence a consumer
+    /// cannot distinguish from a lost one.
+    fn set_status_command(&mut self, seq: u64, status: crate::types::MarketStatus) -> Vec<Event> {
+        let previous = self.market.status;
+        self.market.status = status;
+        vec![Event::StatusChanged {
+            seq,
+            previous,
+            current: status,
+        }]
+    }
+
     /// The reference price, in the order ADR-0027 fixes: last trade, then the
     /// mid of a two-sided quote, then nothing.
     ///
@@ -104,6 +117,7 @@ impl Engine {
                 price,
                 qty,
             } => self.amend(seq, timestamp_ms, order_id, new_order_id, price, qty),
+            Command::SetStatus { status } => self.set_status_command(seq, status),
         }
     }
 

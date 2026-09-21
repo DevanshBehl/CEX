@@ -234,7 +234,9 @@ proptest! {
                 | Event::Expired { order_id, remaining_qty, .. } => {
                     *released.entry(order_id.clone()).or_default() += u128::from(*remaining_qty);
                 }
-                Event::Accepted { .. } => {}
+                // Neither moves quantity: an accepted order still holds what
+                // it placed, and a status change is not about an order at all.
+                Event::Accepted { .. } | Event::StatusChanged { .. } => {}
             }
         }
 

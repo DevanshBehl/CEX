@@ -13,9 +13,8 @@ use wallet_matching::{journal, snapshot};
 
 fn config(dir: &std::path::Path, snapshot_every_n: u64) -> Config {
     Config {
-        data_dir: dir.to_path_buf(),
         snapshot_every_n,
-        market: market(),
+        ..Config::local(dir, market())
     }
 }
 

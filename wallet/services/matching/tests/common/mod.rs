@@ -1,4 +1,9 @@
 //! Shared test scaffolding.
+//!
+//! Each integration test binary compiles this module separately, so a helper
+//! used by one and not another is dead code in that binary. That is expected
+//! for a shared module and is not a signal worth acting on.
+#![allow(dead_code)]
 
 use wallet_matching::types::{
     Command, MarketConfig, MarketStatus, OrderRequest, OrderType, Side, StpMode, TimeInForce,

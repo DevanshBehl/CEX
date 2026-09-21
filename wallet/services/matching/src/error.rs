@@ -37,6 +37,15 @@ pub enum MatchingError {
 
     #[error("configuration: {0}")]
     Config(String),
+
+    /// The event did not reach the stream.
+    ///
+    /// The command is still journaled and the book has still mutated, so this
+    /// is AMBIGUOUS to the caller rather than a failure to act. It becomes a
+    /// 503, resolved through the lookup endpoint and never by retrying blind
+    /// (ADR-0030).
+    #[error("egress: {0}")]
+    Egress(String),
 }
 
 pub type Result<T> = std::result::Result<T, MatchingError>;

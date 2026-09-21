@@ -123,6 +123,20 @@ pub enum Command {
         price: Price,
         qty: Qty,
     },
+    /// Change the market's trading status.
+    ///
+    /// Journaled like any other command, so a replay reproduces the market
+    /// having been halted at exactly the sequence it was halted at. A status
+    /// held outside the journal would be a second source of truth about what
+    /// the book was allowed to do.
+    ///
+    /// APPENDED to this enum deliberately. bincode encodes a variant by index,
+    /// so a new variant at the end leaves `Place`, `Cancel` and `Amend`
+    /// decodable in every journal already written. Inserting one anywhere else
+    /// silently reinterprets recorded history.
+    SetStatus {
+        status: MarketStatus,
+    },
 }
 
 /// A command with its assigned sequence and timestamp. This is what the journal
@@ -185,6 +199,12 @@ pub enum Event {
         order_id: OrderId,
         remaining_qty: Qty,
     },
+    /// Appended for the same reason `Command::SetStatus` is.
+    StatusChanged {
+        seq: Seq,
+        previous: MarketStatus,
+        current: MarketStatus,
+    },
 }
 
 impl Event {
@@ -193,7 +213,8 @@ impl Event {
             Event::Accepted { seq, .. }
             | Event::Rejected { seq, .. }
             | Event::Cancelled { seq, .. }
-            | Event::Expired { seq, .. } => *seq,
+            | Event::Expired { seq, .. }
+            | Event::StatusChanged { seq, .. } => *seq,
             Event::Fill(fill) => fill.seq,
         }
     }
