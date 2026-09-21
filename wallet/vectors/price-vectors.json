@@ -1,0 +1,126 @@
+{
+  "_comment": "Shared TypeScript/Rust arithmetic vectors (ADR-0026). Decoded and asserted by packages/types and services/matching, so the duplicated fixed-point arithmetic cannot drift silently. prompt_phase_s1.md rules 76 and 137.",
+  "priceScaleExp": 9,
+  "priceScale": "1000000000",
+  "bpsDenominator": "10000",
+  "maxU64": "18446744073709551615",
+  "notional": [
+    {
+      "name": "SOL/USDC at 150, one whole SOL",
+      "note": "the worked example in ADR-0026: 150000000 quote base units == 150 USDC",
+      "price": "150000000",
+      "qty": "1000000000",
+      "expected": "150000000"
+    },
+    {
+      "name": "SOL/USDC at 150, half a SOL",
+      "price": "150000000",
+      "qty": "500000000",
+      "expected": "75000000"
+    },
+    {
+      "name": "zero quantity",
+      "price": "150000000",
+      "qty": "0",
+      "expected": "0"
+    },
+    {
+      "name": "truncates toward zero, smallest possible product",
+      "note": "1 * 1 / 1e9 == 0. The residual is not charged to anyone.",
+      "price": "1",
+      "qty": "1",
+      "expected": "0"
+    },
+    {
+      "name": "rounding boundary, one below a whole unit",
+      "price": "1",
+      "qty": "999999999",
+      "expected": "0"
+    },
+    {
+      "name": "rounding boundary, exactly a whole unit",
+      "price": "1",
+      "qty": "1000000000",
+      "expected": "1"
+    },
+    {
+      "name": "rounding boundary, one above a whole unit",
+      "price": "1",
+      "qty": "1000000001",
+      "expected": "1"
+    },
+    {
+      "name": "truncation with a non-trivial price",
+      "note": "3 * 333333333 == 999999999, which floors to 0",
+      "price": "3",
+      "qty": "333333333",
+      "expected": "0"
+    },
+    {
+      "name": "intermediate exceeds u64 but the result does not",
+      "note": "1.5e8 * 1e15 == 1.5e23, far above u64 max 1.8e19. This vector is the reason Rust must multiply in u128; a u64 intermediate wraps here.",
+      "price": "150000000",
+      "qty": "1000000000000000",
+      "expected": "150000000000000"
+    },
+    {
+      "name": "large price, small quantity",
+      "price": "18446744073709551615",
+      "qty": "1",
+      "expected": "18446744073"
+    }
+  ],
+  "notionalOverflow": [
+    {
+      "name": "result exceeds u64",
+      "note": "1e19 * 1e10 / 1e9 == 1e20, above u64 max. Must be an error, never a wrap.",
+      "price": "10000000000000000000",
+      "qty": "10000000000"
+    }
+  ],
+  "fee": [
+    {
+      "name": "taker on 150 USDC at 20 bp",
+      "notional": "150000000",
+      "bps": 20,
+      "expected": "300000"
+    },
+    {
+      "name": "maker on 150 USDC at 10 bp",
+      "notional": "150000000",
+      "bps": 10,
+      "expected": "150000"
+    },
+    {
+      "name": "zero basis points",
+      "notional": "150000000",
+      "bps": 0,
+      "expected": "0"
+    },
+    {
+      "name": "fee truncates toward zero",
+      "note": "1 * 20 / 10000 == 0.002, floors to 0",
+      "notional": "1",
+      "bps": 20,
+      "expected": "0"
+    },
+    {
+      "name": "fee truncation on a fractional boundary",
+      "note": "4999 * 20 / 10000 == 9.998, floors to 9",
+      "notional": "4999",
+      "bps": 20,
+      "expected": "9"
+    },
+    {
+      "name": "fee on zero notional",
+      "notional": "0",
+      "bps": 20,
+      "expected": "0"
+    }
+  ],
+  "isMultipleOf": [
+    { "name": "exact tick", "value": "150000000", "step": "1000000", "expected": true },
+    { "name": "off tick by one", "value": "150000001", "step": "1000000", "expected": false },
+    { "name": "zero is a multiple of anything", "value": "0", "step": "1000000", "expected": true }
+  ]
+}

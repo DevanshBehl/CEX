@@ -24,9 +24,10 @@
     "infra:nuke": "docker compose -f infra/docker-compose.yml down -v",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test:rust": "cd services/mpc && cargo test",
-    "build:rust": "cd services/mpc && cargo build --release",
-    "mpc": "cd services/mpc && cargo run --release"
+    "test:rust": "for m in services/*/Cargo.toml; do (cd \"$(dirname \"$m\")\" && cargo test) || exit 1; done",
+    "build:rust": "for m in services/*/Cargo.toml; do (cd \"$(dirname \"$m\")\" && cargo build --release) || exit 1; done",
+    "mpc": "cd services/mpc && cargo run --release",
+    "matching": "cd services/matching && cargo run --release"
   },
   "devDependencies": {
     "@eslint/js": "9.17.0",

@@ -1,0 +1,49 @@
+[package]
+name = "wallet-matching"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+publish = false
+description = "Deterministic central limit order book. Owns price and priority; owns no money."
+
+[lib]
+name = "wallet_matching"
+path = "src/lib.rs"
+# The default libtest bench harness would otherwise intercept criterion's own
+# flags, so `cargo bench -- --measurement-time 2` fails with "Unrecognized
+# option" before criterion ever runs.
+bench = false
+
+[[bin]]
+name = "wallet-matching"
+path = "src/main.rs"
+bench = false
+
+[dependencies]
+# Serialisation. bincode is deterministic for a given schema, which is what a
+# replayable journal needs — a format that reorders fields produces a different
+# byte stream from the same command.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1.3"
+crc32fast = "1"
+
+# Errors and observability
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "matching"
+harness = false
+
+[profile.release]
+# Same reasoning as services/mpc: a panic mid-command is a state we have not
+# reasoned about, and a matching engine that continues from one is a book that
+# never existed.
+panic = "abort"

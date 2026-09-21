@@ -41,6 +41,10 @@ const CHAIN_FREE_PACKAGES = [
   // Valuation is arithmetic over data it is handed. A price it fetched itself
   // would be a number nobody could reproduce from the inputs.
   'packages/portfolio/**/*.ts',
+  // Order validation and hold computation take the reference price and the
+  // market as arguments, for the same reason the risk engine takes `now` as an
+  // argument: a decision that reads the world cannot be replayed (S1 §6).
+  'packages/orders/**/*.ts',
 ];
 
 /**

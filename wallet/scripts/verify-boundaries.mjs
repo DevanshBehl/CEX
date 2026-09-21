@@ -68,6 +68,18 @@ const CASES = [
     expect: /must not depend on a chain, a database, or a cache/,
   },
   {
+    name: 'the order domain reaching for a chain',
+    file: 'packages/orders/src/__boundary_probe.ts',
+    source: "import '@solana/web3.js';\n",
+    expect: /Only packages\/solana may import a chain SDK/,
+  },
+  {
+    name: 'the order domain reaching for persistence',
+    file: 'packages/orders/src/__boundary_probe2.ts',
+    source: "import '@wallet/db';\n",
+    expect: /must not depend on a chain, a database, or a cache/,
+  },
+  {
     name: 'fetch outside the typed API client',
     file: 'apps/web/features/auth/__boundary_probe.ts',
     source: 'export const bad = () => fetch("/anything");\n',

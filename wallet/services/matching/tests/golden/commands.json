@@ -1,0 +1,212 @@
+[
+  {
+    "seq": 1,
+    "timestamp_ms": 1700000000001,
+    "command": {
+      "Place": {
+        "order_id": "mk-1",
+        "request": {
+          "client_order_id": "c-alice-2000000",
+          "side": "sell",
+          "order_type": "limit",
+          "time_in_force": "GTC",
+          "price": 11000000,
+          "qty": 2000000,
+          "post_only": false,
+          "stp_mode": "cancel_taker",
+          "account_id": "alice"
+        }
+      }
+    }
+  },
+  {
+    "seq": 2,
+    "timestamp_ms": 1700000000002,
+    "command": {
+      "Place": {
+        "order_id": "mk-2",
+        "request": {
+          "client_order_id": "c-bob-3000000",
+          "side": "sell",
+          "order_type": "limit",
+          "time_in_force": "GTC",
+          "price": 12000000,
+          "qty": 3000000,
+          "post_only": false,
+          "stp_mode": "cancel_taker",
+          "account_id": "bob"
+        }
+      }
+    }
+  },
+  {
+    "seq": 3,
+    "timestamp_ms": 1700000000003,
+    "command": {
+      "Place": {
+        "order_id": "mk-3",
+        "request": {
+          "client_order_id": "c-carol-2000000",
+          "side": "buy",
+          "order_type": "limit",
+          "time_in_force": "GTC",
+          "price": 10000000,
+          "qty": 2000000,
+          "post_only": false,
+          "stp_mode": "cancel_taker",
+          "account_id": "carol"
+        }
+      }
+    }
+  },
+  {
+    "seq": 4,
+    "timestamp_ms": 1700000000004,
+    "command": {
+      "Place": {
+        "order_id": "tk-1",
+        "request": {
+          "client_order_id": "c-dave-1000000",
+          "side": "buy",
+          "order_type": "limit",
+          "time_in_force": "GTC",
+          "price": 11000000,
+          "qty": 1000000,
+          "post_only": false,
+          "stp_mode": "cancel_taker",
+          "account_id": "dave"
+        }
+      }
+    }
+  },
+  {
+    "seq": 5,
+    "timestamp_ms": 1700000000005,
+    "command": {
+      "Place": {
+        "order_id": "tk-2",
+        "request": {
+          "client_order_id": "c-dave-5000000",
+          "side": "buy",
+          "order_type": "limit",
+          "time_in_force": "GTC",
+          "price": 12000000,
+          "qty": 5000000,
+          "post_only": false,
+          "stp_mode": "cancel_taker",
+          "account_id": "dave"
+        }
+      }
+    }
+  },
+  {
+    "seq": 6,
+    "timestamp_ms": 1700000000006,
+    "command": {
+      "Place": {
+        "order_id": "ioc-1",
+        "request": {
+          "client_order_id": "c-erin-9000000",
+          "side": "sell",
+          "order_type": "limit",
+          "time_in_force": "IOC",
+          "price": 10000000,
+          "qty": 9000000,
+          "post_only": false,
+          "stp_mode": "cancel_taker",
+          "account_id": "erin"
+        }
+      }
+    }
+  },
+  {
+    "seq": 7,
+    "timestamp_ms": 1700000000007,
+    "command": {
+      "Place": {
+        "order_id": "fok-1",
+        "request": {
+          "client_order_id": "c-erin-99000000",
+          "side": "buy",
+          "order_type": "limit",
+          "time_in_force": "FOK",
+          "price": 12000000,
+          "qty": 99000000,
+          "post_only": false,
+          "stp_mode": "cancel_taker",
+          "account_id": "erin"
+        }
+      }
+    }
+  },
+  {
+    "seq": 8,
+    "timestamp_ms": 1700000000008,
+    "command": {
+      "Place": {
+        "order_id": "po-1",
+        "request": {
+          "client_order_id": "c-frank-1000000",
+          "side": "sell",
+          "order_type": "limit",
+          "time_in_force": "GTC",
+          "price": 10000000,
+          "qty": 1000000,
+          "post_only": true,
+          "stp_mode": "cancel_taker",
+          "account_id": "frank"
+        }
+      }
+    }
+  },
+  {
+    "seq": 9,
+    "timestamp_ms": 1700000000009,
+    "command": {
+      "Place": {
+        "order_id": "stp-1",
+        "request": {
+          "client_order_id": "c-carol-1000000",
+          "side": "sell",
+          "order_type": "limit",
+          "time_in_force": "GTC",
+          "price": 10000000,
+          "qty": 1000000,
+          "post_only": false,
+          "stp_mode": "cancel_maker",
+          "account_id": "carol"
+        }
+      }
+    }
+  },
+  {
+    "seq": 10,
+    "timestamp_ms": 1700000000010,
+    "command": {
+      "Cancel": {
+        "order_id": "mk-2"
+      }
+    }
+  },
+  {
+    "seq": 11,
+    "timestamp_ms": 1700000000011,
+    "command": {
+      "Cancel": {
+        "order_id": "mk-2"
+      }
+    }
+  },
+  {
+    "seq": 12,
+    "timestamp_ms": 1700000000012,
+    "command": {
+      "Amend": {
+        "order_id": "tk-2",
+        "new_order_id": "tk-2-v2",
+        "price": 10000000,
+        "qty": 1000000
+      }
+    }
+  }
+]

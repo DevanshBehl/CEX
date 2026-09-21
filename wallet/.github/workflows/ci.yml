@@ -105,6 +105,7 @@ jobs:
         run: |
           cargo install cargo-audit --locked
           cd services/mpc && cargo audit --deny warnings
+          cd ../matching && cargo audit --deny warnings
 
   boundaries:
     name: Architectural boundaries actually bite
@@ -264,6 +265,30 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  matching:
+    name: Matching engine (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/matching
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: services/matching
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      # Benchmarks run and print their numbers. They do not gate the merge in
+      # S1 (prompt_phase_s1.md rule 148) — they exist so a regression is
+      # visible, and a latency threshold enforced before there is a gateway in
+      # front of the engine would be measuring the wrong thing.
+      - name: Benchmarks
+        run: cargo bench -- --warm-up-time 1 --measurement-time 2
 
   signer-swap:
     name: Phase 3 suite against the real signer

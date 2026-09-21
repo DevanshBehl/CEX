@@ -17,9 +17,12 @@ playwright-report/
 test-results/
 
 # Rust
-services/mpc/target/
+services/*/target/
 services/mpc/*.sqlite
 services/mpc/*.sqlite-*
+# The matching engine's journal and snapshots: local state, never committed.
+.matching/
+services/matching/.matching/
 scripts/.mpc-cluster.env
 
 # LinkedIn post material (local only)

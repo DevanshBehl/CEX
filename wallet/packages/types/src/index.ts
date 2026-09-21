@@ -14,3 +14,6 @@ export * from './assets.js';
 export * from './api/capabilities.js';
 export * from './clusters.js';
 export * from './api/portfolio.js';
+export * from './price.js';
+export * from './market.js';
+export * from './orders.js';
