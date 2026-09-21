@@ -29,12 +29,18 @@ whether the user crosses it knowingly**.
 
 A second problem arrives with the first. The matching engine decides who trades
 with whom, in microseconds, in memory. The ledger decides who owns what, in
-PostgreSQL, under a deferred balance constraint. If the engine can match an order
-whose funds were never reserved, settlement posts a transaction that drives a user
-balance negative — and `NON_NEGATIVE_ACCOUNT_TYPES` plus the balance trigger reject
-it _at COMMIT_, after the fill is public and the counterparty has been told they
-traded. The failure surfaces at the one point in the system where it cannot be
-handled.
+PostgreSQL. If the engine can match an order whose funds were never reserved,
+settlement posts a transaction that drives a user balance negative — and **nothing
+refuses it.** The database's deferred trigger enforces that a transaction balances
+per asset, not that a balance stays non-negative; `NON_NEGATIVE_ACCOUNT_TYPES` is
+asserted by tests and reconciliation, never on write. The trade settles, the books
+balance, and a user owes the platform money they never had.
+
+_Corrected 2026-09-22: an earlier revision said the non-negative check would
+reject such a settlement at COMMIT. No such constraint exists. The sufficient-funds
+check is the SERIALIZABLE read-then-post in the service that takes the hold, as
+`lockFunds` is for withdrawals, which makes hold-first the only defence rather
+than the earlier of two._
 
 ## Decision
 

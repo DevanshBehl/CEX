@@ -20,8 +20,8 @@ import {
   toAmount,
   toBaseUnits,
   UnbalancedTransactionError,
-  userAvailable,
-  userLocked,
+  userCustodyAvailable,
+  userCustodyLocked,
   type Entry,
 } from './index.js';
 
@@ -62,7 +62,7 @@ describe('amounts (rules 59-64)', () => {
 describe('transaction construction (rules 76-81)', () => {
   const balanced: Entry[] = [
     debit(houseChainAssets(SOL), SOL, LAMPORTS_PER_SOL),
-    credit(userAvailable('u1', SOL), SOL, LAMPORTS_PER_SOL),
+    credit(userCustodyAvailable('u1', SOL), SOL, LAMPORTS_PER_SOL),
   ];
 
   it('accepts a balanced transaction', () => {
@@ -84,7 +84,7 @@ describe('transaction construction (rules 76-81)', () => {
         referenceId: 'd1',
         entries: [
           debit(houseChainAssets(SOL), SOL, LAMPORTS_PER_SOL),
-          credit(userAvailable('u1', SOL), SOL, LAMPORTS_PER_SOL - 1n),
+          credit(userCustodyAvailable('u1', SOL), SOL, LAMPORTS_PER_SOL - 1n),
         ],
       }),
     ).toThrow(UnbalancedTransactionError);
@@ -110,7 +110,7 @@ describe('transaction construction (rules 76-81)', () => {
           referenceId: 'd1',
           entries: [
             debit(houseChainAssets(SOL), SOL, amount),
-            credit(userAvailable('u1', SOL), SOL, amount),
+            credit(userCustodyAvailable('u1', SOL), SOL, amount),
           ],
         }),
       ).toThrow(InvalidEntryError);
@@ -140,7 +140,7 @@ describe('transaction construction (rules 76-81)', () => {
         referenceId: 'd1',
         entries: [
           { account: houseChainAssets(SOL), asset: 'devnet:USDC', amount: 1n, direction: 'debit' },
-          credit(userAvailable('u1', SOL), SOL, 1n),
+          credit(userCustodyAvailable('u1', SOL), SOL, 1n),
         ],
       }),
     ).toThrow(InvalidEntryError);
@@ -161,7 +161,7 @@ describe('cluster isolation (ADR-0021)', () => {
         referenceId: 't1',
         entries: [
           debit(houseChainAssets(SOL), SOL, 1n),
-          credit(userAvailable('u1', MAINNET_SOL), MAINNET_SOL, 1n),
+          credit(userCustodyAvailable('u1', MAINNET_SOL), MAINNET_SOL, 1n),
         ],
       }),
     ).toThrow(CrossClusterTransactionError);
@@ -181,9 +181,9 @@ describe('cluster isolation (ADR-0021)', () => {
         referenceId: 't2',
         entries: [
           debit(houseChainAssets(SOL), SOL, 1n),
-          credit(userAvailable('u1', SOL), SOL, 1n),
+          credit(userCustodyAvailable('u1', SOL), SOL, 1n),
           debit(houseChainAssets(MAINNET_SOL), MAINNET_SOL, 1n),
-          credit(userAvailable('u1', MAINNET_SOL), MAINNET_SOL, 1n),
+          credit(userCustodyAvailable('u1', MAINNET_SOL), MAINNET_SOL, 1n),
         ],
       }),
     ).toThrow(CrossClusterTransactionError);
@@ -199,7 +199,7 @@ describe('cluster isolation (ADR-0021)', () => {
         referenceId: 't3',
         entries: [
           debit({ ownerId: null, asset: 'SOL', type: 'chain_assets' }, 'SOL', 1n),
-          credit({ ownerId: 'u1', asset: 'SOL', type: 'user_available' }, 'SOL', 1n),
+          credit({ ownerId: 'u1', asset: 'SOL', type: 'user_custody_available' }, 'SOL', 1n),
         ],
       }),
     ).toThrow(InvalidEntryError);
@@ -214,7 +214,7 @@ describe('cluster isolation (ADR-0021)', () => {
         entries: [
           debit({ ownerId: null, asset: 'staging:SOL', type: 'chain_assets' }, 'staging:SOL', 1n),
           credit(
-            { ownerId: 'u1', asset: 'staging:SOL', type: 'user_available' },
+            { ownerId: 'u1', asset: 'staging:SOL', type: 'user_custody_available' },
             'staging:SOL',
             1n,
           ),
@@ -231,7 +231,7 @@ describe('cluster isolation (ADR-0021)', () => {
         referenceId: 't5',
         entries: [
           debit(houseChainAssets(MAINNET_SOL), MAINNET_SOL, 1n),
-          credit(userAvailable('u1', MAINNET_SOL), MAINNET_SOL, 1n),
+          credit(userCustodyAvailable('u1', MAINNET_SOL), MAINNET_SOL, 1n),
         ],
       }),
     ).not.toThrow();
@@ -309,8 +309,8 @@ describe('projections (rules 82-85)', () => {
       ...postDeposit({ depositId: 'd1', userId: 'u1', asset: SOL, amount: 100n }).entries,
       // What Phase 3 will do on approval: a balanced transfer between two
       // accounts, not a mutation.
-      debit(userAvailable('u1', SOL), SOL, 30n),
-      credit(userLocked('u1', SOL), SOL, 30n),
+      debit(userCustodyAvailable('u1', SOL), SOL, 30n),
+      credit(userCustodyLocked('u1', SOL), SOL, 30n),
     ];
 
     const balance = projectUserBalance('u1', SOL, entries);
@@ -343,7 +343,7 @@ describe('invariants (rules 86-88)', () => {
 
   it('detects a negative user balance', () => {
     const entries: Entry[] = [
-      debit(userAvailable('u1', SOL), SOL, 10n),
+      debit(userCustodyAvailable('u1', SOL), SOL, 10n),
       credit(houseChainAssets(SOL), SOL, 10n),
     ];
     expect(checkNoNegativeUserBalances(entries)[0]?.invariant).toBe('no_negative_user_balance');
@@ -355,7 +355,7 @@ describe('invariants (rules 86-88)', () => {
     // it is a redundancy check against a state that is already corrupt.
     const entries: Entry[] = [
       debit(houseChainAssets(SOL), SOL, 40n),
-      credit(userAvailable('u1', SOL), SOL, 100n),
+      credit(userCustodyAvailable('u1', SOL), SOL, 100n),
     ];
     const violations = checkLiabilitiesCovered(entries);
     expect(violations[0]?.invariant).toBe('liabilities_covered');
@@ -383,7 +383,7 @@ describe('invariants (rules 86-88)', () => {
     // check and the coverage check report it.
     const overCredited: Entry[] = [
       debit(houseChainAssets(SOL), SOL, 1000n),
-      credit(userAvailable('u1', SOL), SOL, 1000n),
+      credit(userCustodyAvailable('u1', SOL), SOL, 1000n),
       credit(houseRent(SOL), SOL, 890n),
     ];
     expect(checkLiabilitiesCovered(overCredited)[0]?.detail.shortfall).toBe('890');

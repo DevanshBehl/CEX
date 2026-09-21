@@ -675,7 +675,7 @@ export default function HomePage() {
                       <td className="px-5 py-1.5 text-right text-ink-disabled">—</td>
                     </tr>
                     <tr className="border-b border-line">
-                      <td className="px-5 py-1.5 pb-3 text-ink">user_available</td>
+                      <td className="px-5 py-1.5 pb-3 text-ink">user_custody_available</td>
                       <td className="px-5 py-1.5 pb-3 text-right text-ink-disabled">—</td>
                       <td className="px-5 py-1.5 pb-3 text-right">2.000000</td>
                     </tr>
@@ -688,12 +688,12 @@ export default function HomePage() {
                       </td>
                     </tr>
                     <tr>
-                      <td className="px-5 py-1.5 text-ink">user_available</td>
+                      <td className="px-5 py-1.5 text-ink">user_custody_available</td>
                       <td className="px-5 py-1.5 text-right">1.500000</td>
                       <td className="px-5 py-1.5 text-right text-ink-disabled">—</td>
                     </tr>
                     <tr className="border-b border-line">
-                      <td className="px-5 py-1.5 pb-3 text-ink">user_locked</td>
+                      <td className="px-5 py-1.5 pb-3 text-ink">user_custody_locked</td>
                       <td className="px-5 py-1.5 pb-3 text-right text-ink-disabled">—</td>
                       <td className="px-5 py-1.5 pb-3 text-right">1.500000</td>
                     </tr>

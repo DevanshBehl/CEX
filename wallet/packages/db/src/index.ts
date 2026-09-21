@@ -33,6 +33,7 @@ export {
   createLedgerRepository,
   type AccountRefInput,
   type AssetTotalsRow,
+  type ClearingTotalsRow,
   type EntryDirection,
   type EntryInput,
   type LedgerAccountType,
@@ -91,3 +92,17 @@ export {
   type SigningRequestRepository,
 } from './repositories/signing-request.repository.js';
 export * from './repositories/operator.repository.js';
+
+export { LEDGER_ACCOUNT_TYPES, LEDGER_TRANSACTION_KINDS } from './account-types.generated.js';
+export {
+  createOrderRepository,
+  type CreatePendingOrderInput,
+  type CreatePendingOrderResult,
+  type OrderKind,
+  type OrderRecord,
+  type OrderRepository,
+  type OrderSide,
+  type OrderTimeInForce,
+  type OrderTransitionInput,
+  type OrderTransitionPatch,
+} from './repositories/order.repository.js';

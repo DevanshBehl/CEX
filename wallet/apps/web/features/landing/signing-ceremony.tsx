@@ -22,7 +22,11 @@ type Step = {
 const STEPS: readonly Step[] = [
   { state: 'REQUESTED', log: '> passkey step-up verified · bound to this request', tone: 'run' },
   { state: 'APPROVED', log: '✓ risk engine · every rule evaluated · within policy', tone: 'ok' },
-  { state: 'FUNDS_LOCKED', log: '✓ ledger · user_available → user_locked · Σ = 0', tone: 'ok' },
+  {
+    state: 'FUNDS_LOCKED',
+    log: '✓ ledger · user_custody_available → user_custody_locked · Σ = 0',
+    tone: 'ok',
+  },
   { state: 'SIGNING', log: '> round 1 · {signers} publish nonce commitments', tone: 'run' },
   { state: 'SIGNING', log: '> round 2 · signature shares from {signers}', tone: 'run' },
   { state: 'SIGNED', log: '✓ aggregate verifies · no private key reconstructed', tone: 'note' },

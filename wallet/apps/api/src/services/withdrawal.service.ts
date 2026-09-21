@@ -92,11 +92,11 @@ export function createWithdrawalService(deps: WithdrawalServiceDeps): Withdrawal
     const amount = toAmount(withdrawal.amount);
 
     // Ledger accounts are created BEFORE the serializable transaction — the
-    // Phase 2 lesson (rules 61-62). `user_locked` will not exist for most users
+    // Phase 2 lesson (rules 61-62). `user_custody_locked` will not exist for most users
     // until their first withdrawal, so this is exactly the contended case.
     await ledger.ensureAccounts([
-      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_available' },
-      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_locked' },
+      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_custody_available' },
+      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_custody_locked' },
     ]);
 
     return withTransaction(deps.db, async (tx) => {

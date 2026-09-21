@@ -17,7 +17,7 @@ import type { Brand } from './brands.js';
  *
  * Putting the cluster in the key makes that mistake unrepresentable. There is
  * no query that merges clusters by omission, because there is no key that means
- * "both". Same reasoning as `user_locked` being an account rather than a column.
+ * "both". Same reasoning as `user_custody_locked` being an account rather than a column.
  */
 
 export const CLUSTERS = ['localnet', 'devnet', 'testnet', 'mainnet-beta'] as const;

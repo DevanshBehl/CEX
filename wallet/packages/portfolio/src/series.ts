@@ -61,7 +61,7 @@ export interface PortfolioPoint {
 
 export interface ProjectInput {
   /**
-   * Every `user_available` entry up to the last bucket, ASCENDING by time.
+   * Every `user_custody_available` entry up to the last bucket, ASCENDING by time.
    *
    * All of them, not just those inside the window: a balance at time T is the
    * sum of everything before T, so a window that began after the first deposit

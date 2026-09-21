@@ -53,7 +53,7 @@ export const withdrawalSchema = z.object({
   networkFeeDecimals: z.number().int().min(0).max(32),
   destination: z.string(),
   status: withdrawalStatusSchema,
-  /** True while the funds are reserved in `user_locked`. */
+  /** True while the funds are reserved in `user_custody_locked`. */
   fundsLocked: z.boolean(),
   /** Terminal states need no further action from anyone. */
   isTerminal: z.boolean(),

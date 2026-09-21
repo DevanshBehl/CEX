@@ -35,7 +35,7 @@ export interface Entry {
  *
  * A deposit of 1 SOL is therefore:
  *   debit  chain_assets:SOL       1   (we now hold more on-chain)
- *   credit user_available:u1:SOL  1   (we now owe the user more)
+ *   credit user_custody_available:u1:SOL  1   (we now owe the user more)
  *
  * and the two sum to zero under `signedAmount`, which is what "balanced" means.
  */
@@ -52,6 +52,17 @@ export const TRANSACTION_KINDS = [
   /** Phase 4 — sweeps and fee accounting. */
   'sweep',
   'fee',
+  /**
+   * S3 — the trading tier (ADR-0025, ADR-0032).
+   *
+   * `trade_settle` is deliberately ABSENT until S4 adds the posting function
+   * that produces it. A kind with no producer is a kind somebody will invent a
+   * producer for.
+   */
+  'allocation',
+  'deallocation',
+  'order_hold',
+  'order_release',
   /** Operational correction. Always paired with an audit record. */
   'adjustment',
 ] as const;

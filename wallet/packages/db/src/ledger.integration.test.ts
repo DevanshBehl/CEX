@@ -48,7 +48,7 @@ async function postDepositLike(userId: string, amount: string, rent = '0'): Prom
   // the dominant source of write conflicts.
   await ledger.ensureAccounts([
     { ownerId: null, asset: ASSET, type: 'chain_assets' },
-    { ownerId: userId, asset: ASSET, type: 'user_available' },
+    { ownerId: userId, asset: ASSET, type: 'user_custody_available' },
     { ownerId: null, asset: ASSET, type: 'house_rent' },
   ]);
 
@@ -66,7 +66,7 @@ async function postDepositLike(userId: string, amount: string, rent = '0'): Prom
     const creditable = (BigInt(amount) - BigInt(rent)).toString();
     if (BigInt(creditable) > 0n) {
       entries.push({
-        account: { ownerId: userId, asset: ASSET, type: 'user_available' },
+        account: { ownerId: userId, asset: ASSET, type: 'user_custody_available' },
         asset: ASSET,
         amount: creditable,
         direction: 'credit',
@@ -121,7 +121,7 @@ describe('posting transactions', () => {
     await Promise.all(Array.from({ length: 10 }, () => postDepositLike(user, '10')));
 
     const accounts = await db.ledgerAccount.count({
-      where: { ownerId: user, asset: ASSET, type: 'user_available' },
+      where: { ownerId: user, asset: ASSET, type: 'user_custody_available' },
     });
     expect(accounts).toBe(1);
     expect((await ledger.getUserBalance(user, ASSET)).available).toBe('100');
@@ -145,7 +145,7 @@ describe('the database rejects an unbalanced transaction (rule 200)', () => {
                 direction: 'debit',
               },
               {
-                account: { ownerId: userA, asset: ASSET, type: 'user_available' },
+                account: { ownerId: userA, asset: ASSET, type: 'user_custody_available' },
                 asset: ASSET,
                 amount: '999',
                 direction: 'credit',
@@ -226,7 +226,7 @@ describe('the database rejects an unbalanced transaction (rule 200)', () => {
               direction: 'debit',
             },
             {
-              account: { ownerId: userA, asset: ASSET, type: 'user_available' },
+              account: { ownerId: userA, asset: ASSET, type: 'user_custody_available' },
               asset: ASSET,
               amount: '4',
               direction: 'credit',
@@ -302,7 +302,7 @@ describe('a rejected commit is reported as a failure', () => {
                 direction: 'debit',
               },
               {
-                account: { ownerId: userA, asset: ASSET, type: 'user_available' },
+                account: { ownerId: userA, asset: ASSET, type: 'user_custody_available' },
                 asset: ASSET,
                 amount: '99',
                 direction: 'credit',
@@ -370,7 +370,7 @@ describe('entry-level constraints', () => {
                   direction: 'debit',
                 },
                 {
-                  account: { ownerId: userA, asset: ASSET, type: 'user_available' },
+                  account: { ownerId: userA, asset: ASSET, type: 'user_custody_available' },
                   asset: ASSET,
                   amount,
                   direction: 'credit',
@@ -418,7 +418,7 @@ describe('cluster isolation, enforced by the database (ADR-0021)', () => {
                 direction: 'debit',
               },
               {
-                account: { ownerId: userA, asset: MAINNET, type: 'user_available' },
+                account: { ownerId: userA, asset: MAINNET, type: 'user_custody_available' },
                 asset: MAINNET,
                 amount: '100',
                 direction: 'credit',
@@ -456,7 +456,7 @@ describe('cluster isolation, enforced by the database (ADR-0021)', () => {
                 direction: 'debit',
               },
               {
-                account: { ownerId: userA, asset: ASSET, type: 'user_available' },
+                account: { ownerId: userA, asset: ASSET, type: 'user_custody_available' },
                 asset: ASSET,
                 amount: '100',
                 direction: 'credit',
@@ -468,7 +468,7 @@ describe('cluster isolation, enforced by the database (ADR-0021)', () => {
                 direction: 'debit',
               },
               {
-                account: { ownerId: userA, asset: MAINNET, type: 'user_available' },
+                account: { ownerId: userA, asset: MAINNET, type: 'user_custody_available' },
                 asset: MAINNET,
                 amount: '100',
                 direction: 'credit',

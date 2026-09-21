@@ -17,3 +17,4 @@ export * from './api/portfolio.js';
 export * from './price.js';
 export * from './market.js';
 export * from './orders.js';
+export * from './order-states.js';

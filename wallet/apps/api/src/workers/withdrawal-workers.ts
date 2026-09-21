@@ -724,7 +724,7 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
     const feeAsset = deps.assets.nativeKey;
 
     await createLedgerRepository(deps.db).ensureAccounts([
-      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_locked' },
+      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_custody_locked' },
       // The funds leave the USER's segregated address (ADR-0020)...
       { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'chain_assets' },
       // ...and the fee leaves the HOUSE's wallet, in the native asset. Two

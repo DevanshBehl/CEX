@@ -58,6 +58,7 @@ model User {
   recoveryCodes RecoveryCode[]
   wallets       Wallet[]
   withdrawals   Withdrawal[]
+  orders        Order[]
   roles         OperatorRole[]
   grantedRoles  OperatorRole[] @relation("GrantedBy")
 
@@ -335,8 +336,12 @@ model Address {
 // ---------------------------------------------------------------------------
 
 enum LedgerAccountType {
-  user_available
-  user_locked
+  user_custody_available
+  user_custody_locked
+  user_trading_available
+  user_order_locked
+  clearing_assets
+  house_trading_fees
   chain_assets
   house_fees
   house_rent
@@ -369,6 +374,10 @@ enum LedgerTransactionKind {
   withdrawal_settle
   sweep
   fee
+  allocation
+  deallocation
+  order_hold
+  order_release
   adjustment
 }
 
@@ -386,6 +395,7 @@ model LedgerTransaction {
 
   entries LedgerEntry[]
   deposit Deposit?
+  heldFor Order[]       @relation("OrderHold")
 
   @@index([referenceType, referenceId])
   @@index([kind, createdAt])
@@ -567,6 +577,15 @@ model Withdrawal {
   networkFee Decimal? @map("network_fee") @db.Decimal(38, 0)
 
   destination String
+
+  /// What this movement is FOR (prompt_phase_s3.md rule 73).
+  ///
+  /// An allocation is a withdrawal whose destination is the house clearing
+  /// address (ADR-0017, ADR-0025): it reuses the whole lifecycle rather than a
+  /// parallel one. The destination of anything but `external` is derived from
+  /// configuration, never supplied by a client — an allocation whose
+  /// destination a client can choose is a withdrawal wearing a costume.
+  purpose WithdrawalPurpose @default(external)
 
   status WithdrawalStatus @default(REQUESTED)
 
@@ -791,4 +810,121 @@ model AssetPriceTick {
 
   @@index([cluster, asset, recordedAt(sort: Desc)], name: "idx_asset_price_ticks")
   @@map("asset_price_ticks")
+}
+
+// ---------------------------------------------------------------------------
+// Phase S3 — the order gateway (ADR-0025, prompt_phase_s3.md)
+// ---------------------------------------------------------------------------
+
+enum WithdrawalPurpose {
+  /// Value leaves the platform.
+  external
+  /// Vault tier -> clearing tier. Destination: the house clearing address.
+  allocation
+  /// Clearing tier -> vault tier. Paid from the clearing address.
+  deallocation
+}
+
+/// Declared once in packages/types/src/order-states.ts. The legal PAIRS are
+/// enforced by a trigger whose list CI checks against that file.
+enum OrderStatus {
+  PENDING_ENGINE
+  OPEN
+  PARTIALLY_FILLED
+  PENDING_CANCEL
+  FILLED
+  CANCELLED
+  REJECTED
+  EXPIRED
+  FAILED
+}
+
+enum OrderSide {
+  buy
+  sell
+}
+
+enum OrderKind {
+  limit
+  market
+}
+
+enum OrderTimeInForce {
+  GTC
+  IOC
+  FOK
+}
+
+/// An order, and the hold posted for it.
+///
+/// There is NO balance-bearing column here. `holdAmount` records the hold as
+/// it was POSTED — an immutable fact about this order, like a withdrawal's
+/// `amount`. What is still held is always a projection over the ledger entries
+/// referencing this order, never a number stored beside it.
+model Order {
+  id     String @id @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  /// UNIQUE(user_id, client_order_id): a resubmission is the SAME order. It is
+  /// not re-validated, not re-held and not re-sent to the engine.
+  clientOrderId String @map("client_order_id")
+
+  market      String
+  side        OrderSide
+  kind        OrderKind
+  timeInForce OrderTimeInForce @map("time_in_force")
+  postOnly    Boolean          @map("post_only")
+  /// Scaled price (ADR-0026). Null for a market order.
+  price       Decimal?         @db.Decimal(38, 0)
+  /// Base-asset base units.
+  qty         Decimal          @db.Decimal(38, 0)
+  filledQty   Decimal          @default(0) @map("filled_qty") @db.Decimal(38, 0)
+
+  status OrderStatus @default(PENDING_ENGINE)
+
+  holdAsset               String  @map("hold_asset")
+  holdAmount              Decimal @map("hold_amount") @db.Decimal(38, 0)
+  holdLedgerTransactionId String  @map("hold_ledger_transaction_id") @db.Uuid
+
+  /// The engine sequence that accepted it, once known.
+  engineSeq     BigInt? @map("engine_seq")
+  /// Operator- and log-facing only. The client is told a generic reason.
+  rejectReason  String? @map("reject_reason")
+  /// Bounded retries for the PENDING_ENGINE sweeper.
+  sweepAttempts Int     @default(0) @map("sweep_attempts")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user        User              @relation(fields: [userId], references: [id])
+  transitions OrderTransition[]
+  /// The hold posted for this order. The constraint is DEFERRABLE INITIALLY
+  /// DEFERRED in the migration — Prisma cannot express that and does not
+  /// compare it — because the order row is written before its hold exists.
+  hold        LedgerTransaction @relation("OrderHold", fields: [holdLedgerTransactionId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "orders_hold_ledger_transaction_fkey")
+
+  @@unique([userId, clientOrderId])
+  /// The sweeper's claim query: oldest PENDING_ENGINE first.
+  @@index([status, createdAt])
+  @@index([userId, market, status])
+  @@map("orders")
+}
+
+/// APPEND-ONLY. Every state change an order makes.
+model OrderTransition {
+  id      String @id @db.Uuid
+  orderId String @map("order_id") @db.Uuid
+
+  fromStatus OrderStatus? @map("from_status")
+  toStatus   OrderStatus  @map("to_status")
+
+  reason        String?
+  correlationId String? @map("correlation_id")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+  @@map("order_transitions")
 }

@@ -12,24 +12,18 @@ import { newId } from '../ids.js';
  * so application code is not even tempted (prompt_phase2.md rule 78).
  */
 
-export type LedgerAccountType =
-  | 'user_available'
-  | 'user_locked'
-  | 'chain_assets'
-  | 'house_fees'
-  | 'house_rent'
-  | 'external';
+// Generated from ACCOUNT_TYPES / TRANSACTION_KINDS in packages/ledger, rather
+// than written out here by hand a second time (ADR-0032).
+import type { LedgerAccountType, LedgerTransactionKind } from '../account-types.generated.js';
+export type { LedgerAccountType, LedgerTransactionKind };
 
 export type EntryDirection = 'debit' | 'credit';
 
-export type LedgerTransactionKind =
-  | 'deposit'
-  | 'withdrawal_lock'
-  | 'withdrawal_release'
-  | 'withdrawal_settle'
-  | 'sweep'
-  | 'fee'
-  | 'adjustment';
+export interface ClearingTotalsRow {
+  readonly asset: string;
+  readonly tradingLiabilities: string;
+  readonly clearingAssets: string;
+}
 
 export interface AccountRefInput {
   readonly ownerId: string | null;
@@ -46,6 +40,16 @@ export interface EntryInput {
 }
 
 export interface PostTransactionInput {
+  /**
+   * A pre-generated id, for a caller that must reference this transaction
+   * BEFORE posting it.
+   *
+   * The order gateway needs this: it inserts the order row `ON CONFLICT DO
+   * NOTHING` first, and posts the hold only if that insert won — so a repeated
+   * `clientOrderId` can never post a second hold. The order row must name its
+   * hold, so the id has to exist before the hold does.
+   */
+  readonly id?: string;
   readonly kind: LedgerTransactionKind;
   readonly referenceType: string;
   readonly referenceId: string;
@@ -98,6 +102,29 @@ export interface LedgerRepository {
   getUserBalance(userId: string, asset: string, tx?: Executor): Promise<UserBalanceRow>;
   getAssetTotals(cluster: Cluster, tx?: Executor): Promise<AssetTotalsRow[]>;
   /**
+   * A user's CLEARING-tier balances (ADR-0025).
+   *
+   * Deliberately a separate query from `getUserBalances`, which is the vault
+   * tier only. Folding them together would show a trading balance as spendable
+   * in the wallet — where it is not, because it sits at the clearing address
+   * rather than the user's own.
+   */
+  getUserTradingBalances(
+    userId: string,
+    cluster: Cluster,
+    tx?: Executor,
+  ): Promise<UserBalanceRow[]>;
+  /**
+   * The aggregate clearing equation, per asset:
+   *
+   *   clearing_assets >= SUM(user_trading_available + user_order_locked)
+   *
+   * Separate from `getAssetTotals` and `getSegregatedPositions`, which are the
+   * VAULT equation. The two tiers are covered by different on-chain balances,
+   * and a surplus in one must never be allowed to hide a shortfall in the other.
+   */
+  getClearingTotals(cluster: Cluster, tx?: Executor): Promise<ClearingTotalsRow[]>;
+  /**
    * Per-user on-chain position and liability, for segregated reconciliation
    * (ADR-0020).
    *
@@ -109,7 +136,7 @@ export interface LedgerRepository {
    */
   getSegregatedPositions(cluster: Cluster, tx?: Executor): Promise<SegregatedPositionRow[]>;
   /**
-   * Every `user_available` entry for a user on one cluster, ASCENDING.
+   * Every `user_custody_available` entry for a user on one cluster, ASCENDING.
    *
    * For historical valuation (Task 3). Deliberately unbounded in time: a
    * balance at time T is the sum of everything before T, so a query windowed to
@@ -201,7 +228,7 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
      */
     async postTransaction(input, tx) {
       const e = exec(tx);
-      const transactionId = newId();
+      const transactionId = input.id ?? newId();
 
       await e.$executeRaw`
         INSERT INTO ledger_transactions (id, kind, reference_type, reference_id, created_at)
@@ -236,16 +263,16 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
       >`
         SELECT
           a.asset,
-          COALESCE(SUM(CASE WHEN a.type = 'user_available'
+          COALESCE(SUM(CASE WHEN a.type = 'user_custody_available'
             THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
             ELSE 0 END), 0)::text AS available,
-          COALESCE(SUM(CASE WHEN a.type = 'user_locked'
+          COALESCE(SUM(CASE WHEN a.type = 'user_custody_locked'
             THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
             ELSE 0 END), 0)::text AS locked
         FROM ledger_accounts a
         LEFT JOIN ledger_entries e ON e.account_id = a.id
         WHERE a.owner_id = ${userId}::uuid
-          AND a.type IN ('user_available', 'user_locked')
+          AND a.type IN ('user_custody_available', 'user_custody_locked')
           AND a.asset LIKE ${`${cluster}:%`}
         GROUP BY a.asset
         ORDER BY a.asset
@@ -285,7 +312,7 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
           COALESCE(SUM(CASE WHEN a.type = 'chain_assets'
             THEN (CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)
             ELSE 0 END), 0)::text AS "chainAssets",
-          COALESCE(SUM(CASE WHEN a.type IN ('user_available','user_locked')
+          COALESCE(SUM(CASE WHEN a.type IN ('user_custody_available','user_custody_locked')
             THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
             ELSE 0 END), 0)::text AS "liability"
         FROM ledger_accounts a
@@ -296,7 +323,7 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
         HAVING COALESCE(SUM(CASE WHEN a.type = 'chain_assets'
                  THEN (CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)
                  ELSE 0 END), 0) <> 0
-            OR COALESCE(SUM(CASE WHEN a.type IN ('user_available','user_locked')
+            OR COALESCE(SUM(CASE WHEN a.type IN ('user_custody_available','user_custody_locked')
                  THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
                  ELSE 0 END), 0) <> 0
         ORDER BY a.owner_id, a.asset
@@ -305,7 +332,7 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
 
     async getUserAvailableEntries(userId, cluster, until, limit, tx) {
       /*
-       * `user_available` only — not `user_locked`.
+       * `user_custody_available` only — not `user_custody_locked`.
        *
        * A locked balance is still the user's money, but it is money they
        * cannot spend, and the dashboard's headline figure is "what you have".
@@ -320,7 +347,7 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
           FROM ledger_entries e
           JOIN ledger_accounts a ON a.id = e.account_id
          WHERE a.owner_id = ${userId}::uuid
-           AND a.type = 'user_available'
+           AND a.type = 'user_custody_available'
            AND a.asset LIKE ${`${cluster}:%`}
            AND e.created_at <= ${until}
          ORDER BY e.created_at ASC, e.id ASC
@@ -335,11 +362,58 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
       }));
     },
 
+    async getUserTradingBalances(userId, cluster, tx) {
+      const rows = await exec(tx).$queryRaw<
+        Array<{ asset: string; available: string; locked: string }>
+      >`
+        SELECT
+          a.asset,
+          COALESCE(SUM(CASE WHEN a.type = 'user_trading_available'
+            THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
+            ELSE 0 END), 0)::text AS available,
+          COALESCE(SUM(CASE WHEN a.type = 'user_order_locked'
+            THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
+            ELSE 0 END), 0)::text AS locked
+        FROM ledger_accounts a
+        LEFT JOIN ledger_entries e ON e.account_id = a.id
+        WHERE a.owner_id = ${userId}::uuid
+          AND a.type IN ('user_trading_available', 'user_order_locked')
+          AND a.asset LIKE ${`${cluster}:%`}
+        GROUP BY a.asset
+        ORDER BY a.asset
+      `;
+      return rows.map((row) => ({
+        asset: row.asset,
+        available: row.available,
+        locked: row.locked,
+        total: (BigInt(row.available) + BigInt(row.locked)).toString(),
+      }));
+    },
+
+    async getClearingTotals(cluster, tx) {
+      return exec(tx).$queryRaw<ClearingTotalsRow[]>`
+        SELECT
+          a.asset,
+          COALESCE(SUM(CASE WHEN a.type IN ('user_trading_available','user_order_locked')
+            THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
+            ELSE 0 END), 0)::text AS "tradingLiabilities",
+          COALESCE(SUM(CASE WHEN a.type = 'clearing_assets'
+            THEN (CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)
+            ELSE 0 END), 0)::text AS "clearingAssets"
+        FROM ledger_accounts a
+        LEFT JOIN ledger_entries e ON e.account_id = a.id
+        WHERE a.type IN ('user_trading_available','user_order_locked','clearing_assets')
+          AND a.asset LIKE ${`${cluster}:%`}
+        GROUP BY a.asset
+        ORDER BY a.asset
+      `;
+    },
+
     async getAssetTotals(cluster, tx) {
       return exec(tx).$queryRaw<AssetTotalsRow[]>`
         SELECT
           a.asset,
-          COALESCE(SUM(CASE WHEN a.type IN ('user_available','user_locked')
+          COALESCE(SUM(CASE WHEN a.type IN ('user_custody_available','user_custody_locked')
             THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
             ELSE 0 END), 0)::text AS "userLiabilities",
           COALESCE(SUM(CASE WHEN a.type = 'chain_assets'

@@ -11,8 +11,8 @@ import {
   isBalanced,
   postDeposit,
   projectUserBalance,
-  userAvailable,
-  userLocked,
+  userCustodyAvailable,
+  userCustodyLocked,
   type Entry,
 } from './index.js';
 
@@ -102,7 +102,7 @@ describe('invariants hold over any deposit sequence', () => {
           const expected = transactions
             .filter((t) => t.referenceType === 'deposit')
             .flatMap((t) => t.entries)
-            .filter((e) => e.account.ownerId === u && e.account.type === 'user_available')
+            .filter((e) => e.account.ownerId === u && e.account.type === 'user_custody_available')
             .reduce((total, e) => total + e.amount, 0n);
           expect(projected).toBe(expected);
         }
@@ -156,7 +156,7 @@ describe('rule 90 — the awkward cases', () => {
             referenceId: 'd',
             entries: [
               debit(houseChainAssets(SOL), SOL, 0n),
-              credit(userAvailable(u, SOL), SOL, 0n),
+              credit(userCustodyAvailable(u, SOL), SOL, 0n),
             ],
           }),
         ).toThrow();
@@ -187,8 +187,8 @@ describe('locking preserves the invariants (the Phase 3 shape)', () => {
         const toLock = (available * BigInt(fraction)) / 100n;
         if (toLock <= 0n) continue;
         entries.push(
-          debit(userAvailable(u, SOL), SOL, toLock),
-          credit(userLocked(u, SOL), SOL, toLock),
+          debit(userCustodyAvailable(u, SOL), SOL, toLock),
+          credit(userCustodyLocked(u, SOL), SOL, toLock),
         );
       }
       return entries;

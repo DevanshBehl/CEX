@@ -19,6 +19,7 @@ prompt_phase3.md
 prompt_phase4.md
 prompt_phase_s1.md
 prompt_phase_s2.md
+prompt_phase_s3.md
 
 # Next.js rewrites this file's `include` array during build.
 apps/web/tsconfig.json

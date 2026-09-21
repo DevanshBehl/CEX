@@ -167,7 +167,7 @@ export function createDepositPipeline(deps: DepositPipelineDeps): DepositPipelin
       await ledger.ensureAccounts([
         // Segregated: this user's own on-chain position, not a pool (ADR-0020).
         { ownerId: wallet.userId, asset: event.asset, type: 'chain_assets' },
-        { ownerId: wallet.userId, asset: event.asset, type: 'user_available' },
+        { ownerId: wallet.userId, asset: event.asset, type: 'user_custody_available' },
         // House-owned: rent the platform sponsored and the user cannot spend.
         { ownerId: null, asset: event.asset, type: 'house_rent' },
       ]);

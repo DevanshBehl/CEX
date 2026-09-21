@@ -70,7 +70,7 @@ export const TERMINAL_WITHDRAWAL_STATUSES: ReadonlySet<WithdrawalStatus> =
   new Set<WithdrawalStatus>(['SETTLED', 'REJECTED', 'FAILED']);
 
 /**
- * States in which funds are reserved in `user_locked`.
+ * States in which funds are reserved in `user_custody_locked`.
  *
  * Used to assert that the ledger and the state machine agree: a withdrawal in
  * one of these states must have a lock, and one outside them must not

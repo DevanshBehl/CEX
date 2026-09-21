@@ -397,7 +397,7 @@ export async function creditUser(
   // every per-user reconciliation test read zero and pass for the wrong reason.
   await ledger.ensureAccounts([
     { ownerId: userId, asset, type: 'chain_assets' },
-    { ownerId: userId, asset, type: 'user_available' },
+    { ownerId: userId, asset, type: 'user_custody_available' },
   ]);
 
   await withTransaction(harness.app.appDeps.db, async (tx) =>
@@ -414,7 +414,7 @@ export async function creditUser(
             direction: 'debit',
           },
           {
-            account: { ownerId: userId, asset, type: 'user_available' },
+            account: { ownerId: userId, asset, type: 'user_custody_available' },
             asset,
             amount,
             direction: 'credit',
@@ -450,7 +450,7 @@ export async function creditUserAt(
 
   await ledger.ensureAccounts([
     { ownerId: userId, asset, type: 'chain_assets' },
-    { ownerId: userId, asset, type: 'user_available' },
+    { ownerId: userId, asset, type: 'user_custody_available' },
   ]);
 
   const db = harness.app.appDeps.db;
@@ -467,7 +467,7 @@ export async function creditUserAt(
 
     for (const [type, direction] of [
       ['chain_assets', 'debit'],
-      ['user_available', 'credit'],
+      ['user_custody_available', 'credit'],
     ] as const) {
       await tx.$executeRawUnsafe(
         `INSERT INTO ledger_entries

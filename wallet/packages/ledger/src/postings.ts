@@ -1,10 +1,13 @@
 import {
   chainAssets,
+  clearingAssets,
   houseChainAssets,
   houseFees,
   houseRent,
-  userAvailable,
-  userLocked,
+  userCustodyAvailable,
+  userCustodyLocked,
+  userOrderLocked,
+  userTradingAvailable,
 } from './accounts.js';
 import { isNegative, isZero, type Amount } from './amount.js';
 import { credit, debit, type LedgerTransaction } from './entries.js';
@@ -40,7 +43,7 @@ export interface DepositPosting {
  * A deposit (prompt_phase2.md rule 156).
  *
  *   debit  chain_assets   — the platform now controls more on-chain
- *   credit user_available — the platform now owes the user more
+ *   credit user_custody_available — the platform now owes the user more
  *   credit house_rent     — except the part that can never be withdrawn
  *
  * Note there is no `external` entry. The chain-assets account increasing IS the
@@ -74,7 +77,7 @@ export function postDeposit(input: DepositPosting): LedgerTransaction {
   const entries = [debit(chainAssets(input.userId, input.asset), input.asset, input.amount)];
 
   if (!isZero(creditable)) {
-    entries.push(credit(userAvailable(input.userId, input.asset), input.asset, creditable));
+    entries.push(credit(userCustodyAvailable(input.userId, input.asset), input.asset, creditable));
   }
   if (!isZero(rent)) {
     entries.push(credit(houseRent(input.asset), input.asset, rent));
@@ -92,7 +95,7 @@ export function postDeposit(input: DepositPosting): LedgerTransaction {
 // Withdrawals (prompt_phase3.md rules 109-120)
 //
 // A lock is a BALANCED TRANSFER between two accounts, never a column update.
-// That is what `user_locked` was created for in Phase 2 and left unused until
+// That is what `user_custody_locked` was created for in Phase 2 and left unused until
 // now: the movement shows up in the entry history, reverses by the same
 // mechanism that created it, and cannot be half-applied.
 // ---------------------------------------------------------------------------
@@ -107,8 +110,8 @@ export interface WithdrawalLockPosting {
 /**
  * Reserve funds against an approved withdrawal (master-prompt rule 118).
  *
- *   debit  user_available — the user may no longer spend it
- *   credit user_locked    — but still owns it
+ *   debit  user_custody_available — the user may no longer spend it
+ *   credit user_custody_locked    — but still owns it
  *
  * Total liability to the user is unchanged; only its spendability moves. That
  * is exactly what a reservation is, and expressing it as a transfer rather than
@@ -127,8 +130,8 @@ export function postWithdrawalLock(input: WithdrawalLockPosting): LedgerTransact
     referenceType: 'withdrawal',
     referenceId: input.withdrawalId,
     entries: [
-      debit(userAvailable(input.userId, input.asset), input.asset, input.amount),
-      credit(userLocked(input.userId, input.asset), input.asset, input.amount),
+      debit(userCustodyAvailable(input.userId, input.asset), input.asset, input.amount),
+      credit(userCustodyLocked(input.userId, input.asset), input.asset, input.amount),
     ],
   });
 }
@@ -148,8 +151,8 @@ export function postWithdrawalRelease(input: WithdrawalLockPosting): LedgerTrans
     referenceType: 'withdrawal',
     referenceId: input.withdrawalId,
     entries: [
-      debit(userLocked(input.userId, input.asset), input.asset, input.amount),
-      credit(userAvailable(input.userId, input.asset), input.asset, input.amount),
+      debit(userCustodyLocked(input.userId, input.asset), input.asset, input.amount),
+      credit(userCustodyAvailable(input.userId, input.asset), input.asset, input.amount),
     ],
   });
 }
@@ -180,7 +183,7 @@ export interface WithdrawalSettlePosting extends WithdrawalLockPosting {
 /**
  * The money has left the platform (master-prompt rule 143).
  *
- *   debit  user_locked  — the liability is discharged
+ *   debit  user_custody_locked  — the liability is discharged
  *   credit chain_assets — we control that much less on-chain
  *
  * THIS IS THE ONLY PLACE `chain_assets` DECREASES. Phase 2 could not do it at
@@ -199,7 +202,7 @@ export function postWithdrawalSettlement(input: WithdrawalSettlePosting): Ledger
   }
 
   const entries = [
-    debit(userLocked(input.userId, input.asset), input.asset, input.amount),
+    debit(userCustodyLocked(input.userId, input.asset), input.asset, input.amount),
     // Out of the user's OWN segregated address, not a pooled vault.
     credit(chainAssets(input.userId, input.asset), input.asset, input.amount),
   ];
@@ -398,6 +401,136 @@ export function postTokenAccountRent(input: {
     entries: [
       debit(chainAssets(input.ownerId, input.nativeAsset), input.nativeAsset, input.amount),
       credit(houseRent(input.nativeAsset), input.nativeAsset, input.amount),
+    ],
+  });
+}
+
+// ---------------------------------------------------------------------------
+// S3 — the trading tier (ADR-0025, ADR-0032)
+// ---------------------------------------------------------------------------
+
+export interface OrderHoldPosting {
+  readonly orderId: string;
+  readonly userId: string;
+  readonly asset: string;
+  readonly amount: Amount;
+}
+
+/**
+ * Reserve funds against a live order.
+ *
+ *   debit  user_trading_available — the user may no longer spend it
+ *   credit user_order_locked      — but still owns it
+ *
+ * THIS IS THE SUFFICIENT-FUNDS CHECK, exactly as `postWithdrawalLock` is for a
+ * withdrawal — but only in combination with its caller, which must read the
+ * trading balance and post this hold inside ONE `SERIALIZABLE` transaction,
+ * refusing if the balance cannot cover it. Serializable isolation is what stops
+ * two concurrent orders both passing the read; this function only builds the
+ * entries.
+ *
+ * NO DATABASE CONSTRAINT BACKS THIS UP. The deferred trigger enforces per-asset
+ * balance, not non-negative balances, so a hold posted without that read would
+ * simply drive the balance negative and commit. That is also why the hold must
+ * exist BEFORE the matching engine is told the order exists: a fill against an
+ * unheld order would settle into a negative balance and nothing would stop it.
+ */
+export function postOrderHold(input: OrderHoldPosting): LedgerTransaction {
+  requirePositive(input.amount, input.orderId, 'order hold');
+
+  return buildTransaction({
+    kind: 'order_hold',
+    referenceType: 'order',
+    referenceId: input.orderId,
+    entries: [
+      debit(userTradingAvailable(input.userId, input.asset), input.asset, input.amount),
+      credit(userOrderLocked(input.userId, input.asset), input.asset, input.amount),
+    ],
+  });
+}
+
+/**
+ * Return reserved funds to the trader.
+ *
+ * Used on rejection, cancellation, expiry, and on the unfilled remainder of a
+ * partially filled order. The exact inverse of the hold, which is the point: a
+ * release cannot forget part of the amount.
+ */
+export function postOrderRelease(input: OrderHoldPosting): LedgerTransaction {
+  requirePositive(input.amount, input.orderId, 'order release');
+
+  return buildTransaction({
+    kind: 'order_release',
+    referenceType: 'order',
+    referenceId: input.orderId,
+    entries: [
+      debit(userOrderLocked(input.userId, input.asset), input.asset, input.amount),
+      credit(userTradingAvailable(input.userId, input.asset), input.asset, input.amount),
+    ],
+  });
+}
+
+export interface AllocationPosting {
+  readonly allocationId: string;
+  readonly userId: string;
+  readonly asset: string;
+  readonly amount: Amount;
+}
+
+/**
+ * Move value from the vault tier to the clearing tier (ADR-0025 §2.1).
+ *
+ * Posted when the ON-CHAIN transfer settles, never when it is requested. Four
+ * legs, because two tiers each have a liability side and an asset side:
+ *
+ *   debit  user_custody_locked    — the vault tier no longer owes it
+ *   credit chain_assets[user]     — the user's own address holds less
+ *   debit  clearing_assets        — the clearing address holds more
+ *   credit user_trading_available — the trading tier now owes it
+ *
+ * Per-asset zero-sum holds: two debits and two credits of the same amount.
+ *
+ * The funds come out of `user_custody_locked` rather than `user_custody_available`
+ * because an allocation runs on the withdrawal lifecycle, which locked them when
+ * it was approved. That lock is also what covers the in-flight window: while the
+ * transfer is unconfirmed the coins are still at the user's address and the
+ * liability is still locked, so the vault's reconciliation equation holds
+ * unchanged and clearing is simply not yet credited.
+ */
+export function postAllocation(input: AllocationPosting): LedgerTransaction {
+  requirePositive(input.amount, input.allocationId, 'allocation');
+
+  return buildTransaction({
+    kind: 'allocation',
+    referenceType: 'allocation',
+    referenceId: input.allocationId,
+    entries: [
+      debit(userCustodyLocked(input.userId, input.asset), input.asset, input.amount),
+      credit(chainAssets(input.userId, input.asset), input.asset, input.amount),
+      debit(clearingAssets(input.asset), input.asset, input.amount),
+      credit(userTradingAvailable(input.userId, input.asset), input.asset, input.amount),
+    ],
+  });
+}
+
+/**
+ * The exact inverse: clearing tier back to the vault tier.
+ *
+ * Paid from the clearing address with the clearing key — one signing round, not
+ * the two a segregated withdrawal needs.
+ */
+export function postDeallocation(input: AllocationPosting): LedgerTransaction {
+  requirePositive(input.amount, input.allocationId, 'deallocation');
+
+  return buildTransaction({
+    kind: 'deallocation',
+    referenceType: 'allocation',
+    referenceId: input.allocationId,
+    entries: [
+      debit(userTradingAvailable(input.userId, input.asset), input.asset, input.amount),
+      credit(clearingAssets(input.asset), input.asset, input.amount),
+      debit(chainAssets(input.userId, input.asset), input.asset, input.amount),
+      credit(userCustodyAvailable(input.userId, input.asset), input.asset, input.amount),
     ],
   });
 }

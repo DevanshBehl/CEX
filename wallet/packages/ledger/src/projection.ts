@@ -1,4 +1,6 @@
 import {
+  isCustodyAccount,
+  isTradingAccount,
   ACCOUNT_CLASS,
   accountKey,
   isUserAccount,
@@ -83,8 +85,8 @@ export function projectUserBalance(
     if (account.ownerId !== userId || account.asset !== asset) continue;
     // Negated: a credit to a liability increases what the user holds.
     const value = -signedAmount(entry);
-    if (account.type === 'user_available') available += value;
-    else if (account.type === 'user_locked') locked += value;
+    if (account.type === 'user_custody_available') available += value;
+    else if (account.type === 'user_custody_locked') locked += value;
   }
 
   return { userId, asset, available, locked, total: available + locked };
@@ -170,37 +172,67 @@ export function checkAccountSigns(entries: readonly Entry[]): InvariantViolation
  * reconciliation (master-prompt rule 120), which reads the chain.
  */
 export function checkLiabilitiesCovered(entries: readonly Entry[]): InvariantViolation[] {
-  const liabilities = new Map<string, Amount>();
-  const assets = new Map<string, Amount>();
+  // Two tiers, two equations (ADR-0025 §3). Each tier's liabilities are
+  // covered by its OWN on-chain holdings, never by the other's:
+  //
+  //   vault:    chain_assets - house_rent >= user_custody_available + user_custody_locked
+  //   clearing: clearing_assets           >= user_trading_available + user_order_locked
+  //
+  // Pooling them would be wrong in both directions. Counting trading
+  // liabilities against chain_assets alone reports a false shortfall on every
+  // allocation, because the funds moved to the clearing address. Counting
+  // clearing_assets towards the vault would let a surplus in one tier hide a
+  // shortfall in the other.
+  const custody = new Map<string, Amount>();
+  const trading = new Map<string, Amount>();
+  const chain = new Map<string, Amount>();
+  const clearing = new Map<string, Amount>();
   const rent = new Map<string, Amount>();
 
+  const add = (bucket: Map<string, Amount>, asset: string, value: Amount) =>
+    bucket.set(asset, (bucket.get(asset) ?? 0n) + value);
+
   for (const [, { account, balance }] of projectAll(entries)) {
-    const bucket = isUserAccount(account.type)
-      ? liabilities
-      : account.type === 'chain_assets'
-        ? assets
-        : account.type === 'house_rent'
-          ? rent
-          : null;
-    if (!bucket) continue;
     const value = normalBalance(account.type, balance);
-    bucket.set(account.asset, (bucket.get(account.asset) ?? 0n) + value);
+    if (isCustodyAccount(account.type)) add(custody, account.asset, value);
+    else if (isTradingAccount(account.type)) add(trading, account.asset, value);
+    else if (account.type === 'chain_assets') add(chain, account.asset, value);
+    else if (account.type === 'clearing_assets') add(clearing, account.asset, value);
+    else if (account.type === 'house_rent') add(rent, account.asset, value);
   }
 
   const violations: InvariantViolation[] = [];
-  for (const [asset, owed] of liabilities) {
-    const held = assets.get(asset) ?? 0n;
+
+  for (const [asset, owed] of custody) {
+    const held = chain.get(asset) ?? 0n;
     const immobilised = rent.get(asset) ?? 0n;
     const spendable = held - immobilised;
     if (owed > spendable) {
       violations.push({
         invariant: 'liabilities_covered',
         detail: {
+          tier: 'custody',
           asset,
           liabilities: owed.toString(),
           chainAssets: held.toString(),
           rent: immobilised.toString(),
           shortfall: (owed - spendable).toString(),
+        },
+      });
+    }
+  }
+
+  for (const [asset, owed] of trading) {
+    const held = clearing.get(asset) ?? 0n;
+    if (owed > held) {
+      violations.push({
+        invariant: 'liabilities_covered',
+        detail: {
+          tier: 'clearing',
+          asset,
+          liabilities: owed.toString(),
+          clearingAssets: held.toString(),
+          shortfall: (owed - held).toString(),
         },
       });
     }
@@ -228,7 +260,7 @@ export function checkAllInvariants(entries: readonly Entry[]): InvariantViolatio
  * with 890 immobilised as rent posts as
  *
  *   debit  chain_assets    1000     (assets)
- *   credit user_available   110     (claims)
+ *   credit user_custody_available   110     (claims)
  *   credit house_rent       890     (claims)
  *
  * so total claims equal total assets, and the coverage check in
