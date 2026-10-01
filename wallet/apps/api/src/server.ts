@@ -81,6 +81,21 @@ import type { AppDeps } from './services/deps.js';
 import { createAuthRoutes } from './routes/auth.routes.js';
 import { createHealthRoutes } from './routes/health.routes.js';
 import { createMeRoutes } from './routes/me.routes.js';
+import { createTradingControllers } from './controllers/trading.controller.js';
+import { createTradingRoutes } from './routes/trading.routes.js';
+import {
+  createHttpEngineClient,
+  engineKeyFromSeed,
+  enginePublicKeyBase64,
+  type EngineClient,
+} from './services/trading/engine-client.js';
+import { createMarketRegistry, type MarketRegistry } from './services/trading/markets.js';
+import { createOrderService, type OrderService } from './services/trading/order.service.js';
+import {
+  createPendingEngineSweeper,
+  type PendingEngineSweeper,
+} from './workers/pending-engine-sweeper.js';
+import { logSecurityEvent } from '@wallet/logger';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -97,6 +112,12 @@ declare module 'fastify' {
     signer: Signer;
     reconcile: () => Promise<unknown>;
     reconciliationWorker: ReconciliationWorker;
+    /** Present only when TRADING_ENABLED. Tests drive the sweeper by hand. */
+    trading: {
+      readonly orders: OrderService;
+      readonly markets: MarketRegistry;
+      readonly sweeper: PendingEngineSweeper;
+    } | null;
     shutdown: () => Promise<void>;
   }
 }
@@ -132,6 +153,13 @@ export interface BuildServerOptions {
   readonly startPricer?: boolean;
   /** Per-cluster test seams. See `overridesFor`. */
   readonly clusterOverrides?: Partial<Record<Cluster, ClusterOverrides>>;
+  /**
+   * Engines keyed by market symbol, so a test can make one refuse, hang, or
+   * answer ambiguously on demand — the paths that decide whether a hold is
+   * released. Production builds signed HTTP clients.
+   */
+  readonly tradingEngines?: ReadonlyMap<string, EngineClient>;
+  readonly startSweeper?: boolean;
 }
 
 /**
@@ -460,6 +488,120 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     intervalMs: config.reconciliation.intervalMs,
   });
 
+  // --- Trading (S3) ----------------------------------------------------------
+  let trading: FastifyInstance['trading'] = null;
+  let tradingControllers: ReturnType<typeof createTradingControllers> | null = null;
+
+  if (config.trading.enabled) {
+    const runtime = defaultRuntime;
+
+    /*
+     * THE CLEARING KEY IS VERIFIED, NOT TRUSTED (prompt_phase_s3.md rules 79-84).
+     *
+     * It is created by the same DKG ceremony as every other key — no second
+     * key-generation path — and the address it yields must be the configured
+     * one. A mismatch means allocations would send users' funds to an address
+     * whose key the signer does not hold. That is the one trading
+     * misconfiguration worth refusing to start over.
+     */
+    if (keyProvisioner) {
+      const clearingKey = await keyProvisioner.provisionKey({ id: config.trading.clearingKeyRef });
+      if (clearingKey.address !== config.trading.clearingAddress) {
+        throw new Error(
+          `CLEARING_ADDRESS does not match the key ${config.trading.clearingKeyRef} the signer ` +
+            `holds (it controls ${clearingKey.address}). Allocations would send funds to an ` +
+            'address nothing here can sign for.',
+        );
+      }
+    } else {
+      logger.warn('clearing address not verified against a key: the signer cannot provision', {
+        event: 'trading.engine_caller_key',
+        outcome: 'failure',
+      });
+    }
+
+    const callerKey = options.tradingEngines
+      ? null
+      : engineKeyFromSeed(config.trading.engineCallerSeed);
+    if (callerKey) {
+      // The engine holds only this PUBLIC key. Printed so it need not be
+      // derived by hand — the same courtesy the MPC coordinator extends.
+      logSecurityEvent(logger, 'trading.engine_caller_key', {
+        outcome: 'success',
+        targetType: 'engine',
+        targetId: enginePublicKeyBase64(callerKey),
+      });
+    }
+    const engines =
+      options.tradingEngines ??
+      new Map(
+        config.trading.markets.map((market) => [
+          market.symbol,
+          createHttpEngineClient({
+            market: market.symbol,
+            baseUrl: config.trading.engineUrls[market.symbol] ?? '',
+            key: callerKey!,
+            timeoutMs: config.trading.engineTimeoutMs,
+          }),
+        ]),
+      );
+
+    const markets = createMarketRegistry({
+      cluster: runtime.cluster,
+      assets: runtime.assets,
+      markets: config.trading.markets,
+      engines,
+      logger,
+    });
+    // Non-fatal: an unreachable engine is re-checked on first use, and a market
+    // that disagrees is refused rather than taking deposits down with it.
+    await markets.verifyAll();
+
+    const marketId = (symbol: string): string => `${runtime.cluster}:${symbol}`;
+    const toLimits = (map: Readonly<Record<string, string>>) =>
+      Object.fromEntries(
+        Object.entries(map).map(([symbol, value]) => [marketId(symbol), BigInt(value)]),
+      );
+
+    const orders = createOrderService({
+      db,
+      logger,
+      cluster: runtime.cluster,
+      markets,
+      riskPolicy: {
+        maxOrderQty: toLimits(config.trading.risk.maxOrderQty),
+        maxOpenNotional: toLimits(config.trading.risk.maxOpenNotional),
+        maxOpenOrdersPerMarket: config.trading.risk.maxOpenOrdersPerMarket,
+        orderRateWindowSeconds: config.trading.risk.orderRateWindowSeconds,
+        orderRateMaxCount: config.trading.risk.orderRateMaxCount,
+      },
+    });
+
+    const sweeper = createPendingEngineSweeper({
+      db,
+      logger,
+      orders,
+      markets,
+      deadLetters,
+      afterMs: config.trading.sweeper.afterMs,
+      intervalMs: config.trading.sweeper.intervalMs,
+      maxAttempts: config.trading.sweeper.maxAttempts,
+      engineToleranceSeconds: config.trading.engineToleranceSeconds,
+    });
+
+    trading = { orders, markets, sweeper };
+    tradingControllers = createTradingControllers({
+      db,
+      cluster: runtime.cluster,
+      chainId: runtime.chainId,
+      assets: runtime.assets,
+      markets,
+      orders,
+      withdrawals: runtime.withdrawals,
+      clearingAddress: config.trading.clearingAddress,
+    });
+  }
+
   const withdrawalControllers = createWithdrawalControllers({
     db,
     runtimeFor,
@@ -657,6 +799,17 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     }),
   );
 
+  if (tradingControllers) {
+    await app.register(
+      createTradingRoutes({
+        controllers: tradingControllers,
+        sessionGuard: sessionGuard as never,
+        csrfGuard: csrfGuard as never,
+        withdrawalStepUpGuard: withdrawalStepUpGuard as never,
+      }),
+    );
+  }
+
   await app.register(
     createOperationsRoutes({
       metrics: metrics.registry,
@@ -723,6 +876,12 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   app.decorate('signer', signer);
   app.decorate('reconcile', () => defaultRuntime.reconcile());
   app.decorate('reconciliationWorker', reconciliationWorker);
+  app.decorate('trading', trading);
+
+  // Tests drive `runOnce()` by hand so "what the sweeper did" is answerable.
+  if (trading && (options.startSweeper ?? config.trading.sweeper.enabled)) {
+    trading.sweeper.start();
+  }
 
   // Tests call `runOnce()` by hand so a valuation is a fixed number rather
   // than whatever the market did during the assertion.
@@ -766,6 +925,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     // Workers stop first so no cycle is mid-transaction when the connection
     // closes.
     if (withdrawalTimer) clearTimeout(withdrawalTimer);
+    trading?.sweeper.stop();
     pricer.stop();
     reconciliationWorker.stop();
     await Promise.all([...clusters.values()].map(async (runtime) => runtime.indexer.stop()));

@@ -1,6 +1,6 @@
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { z } from 'zod';
-import type { DeadLetterQueue, JobQueue } from '../observability/dead-letter.js';
+import { JOB_QUEUES, type DeadLetterQueue, type JobQueue } from '../observability/dead-letter.js';
 import type { Metrics } from '../observability/metrics.js';
 
 /**
@@ -19,12 +19,7 @@ import type { Metrics } from '../observability/metrics.js';
  * chain — so it carries the same step-up requirement as approving a withdrawal.
  */
 
-const QUEUES = [
-  'withdrawal_sign',
-  'withdrawal_broadcast',
-  'withdrawal_expiry',
-  'sweep',
-] as const satisfies readonly JobQueue[];
+const QUEUES = JOB_QUEUES;
 
 const deadLetterSchema = z.object({
   id: z.string(),

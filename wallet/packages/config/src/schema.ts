@@ -62,6 +62,77 @@ const assetLimitsSchema = z
     }),
   );
 
+/**
+ * `KEY=VALUE,KEY=VALUE`, used where a value may itself contain a colon — an
+ * engine URL does — so the colon-separated list shape above cannot carry it.
+ */
+const keyValueList = z
+  .string()
+  .default('')
+  .transform((raw) =>
+    raw
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0),
+  )
+  .pipe(
+    z.array(
+      z.string().refine((entry) => {
+        const at = entry.indexOf('=');
+        return at > 0 && at < entry.length - 1;
+      }, 'must be KEY=VALUE'),
+    ),
+  )
+  .transform(
+    (entries) =>
+      Object.fromEntries(
+        entries.map((entry) => {
+          const at = entry.indexOf('=');
+          return [entry.slice(0, at), entry.slice(at + 1)];
+        }),
+      ) as Record<string, string>,
+  );
+
+/** `SYMBOL:TICK:LOT:MIN_NOTIONAL:COLLAR_BPS` — a market (ADR-0027). */
+const tradingMarketList = z
+  .string()
+  .default('')
+  .transform((raw) =>
+    raw
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0),
+  )
+  .pipe(
+    z.array(
+      z.string().superRefine((entry, ctx) => {
+        const parts = entry.split(':');
+        if (parts.length !== 5 || !/^[A-Z0-9]+-[A-Z0-9]+$/.test(parts[0] ?? '')) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `"${entry}" must be SYMBOL:TICK:LOT:MIN_NOTIONAL:COLLAR_BPS, e.g. SOL-USDC:1000:1000000:1000000:1000`,
+          });
+          return;
+        }
+        for (const part of parts.slice(1)) {
+          if (!/^[1-9]\d*$/.test(part)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `"${parts[0] ?? ''}" has a field that is not a positive integer`,
+            });
+          }
+        }
+      }),
+    ),
+  )
+  .transform((entries) =>
+    entries.map((entry) => {
+      const [symbol = '', tickSize = '1', lotSize = '1', minNotional = '1', collar = '1'] =
+        entry.split(':');
+      return { symbol, tickSize, lotSize, minNotional, collarBps: Number(collar) };
+    }),
+  );
+
 export const envSchema = z
   .object({
     NODE_ENV: nodeEnv.default('development'),
@@ -219,6 +290,70 @@ export const envSchema = z
      * timing cannot explain.
      */
     RECONCILIATION_ALERT_AFTER_CYCLES: z.coerce.number().int().min(1).default(3),
+
+    // --- Phase S3: trading (ADR-0025, ADR-0032, ADR-0033) -------------------
+    /**
+     * Off by default, so a wallet deployment that has not configured an engine
+     * or a clearing address is unaffected. When off, no trading route is
+     * registered at all — refused by absence rather than by a check.
+     */
+    TRADING_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    /**
+     * The house CLEARING address (ADR-0025 §2). Never the treasury: the
+     * treasury's balance moves with every fee paid, and pooling them would make
+     * the clearing reserve check unable to tell customer money from fee float.
+     */
+    CLEARING_ADDRESS: z.string().default(''),
+    /** The signing key reference for the clearing address, created by DKG. */
+    CLEARING_KEY_REF: z.string().min(1).default('house:clearing'),
+    /** Markets on the DEFAULT cluster: SYMBOL:TICK:LOT:MIN_NOTIONAL:COLLAR_BPS. */
+    TRADING_MARKETS: tradingMarketList,
+    /** One engine per market (S1 rule 77): SYMBOL=URL,SYMBOL=URL. */
+    TRADING_ENGINE_URLS: keyValueList,
+    /**
+     * The gateway's Ed25519 seed for signing engine requests (ADR-0031), base64
+     * of 32 bytes. The ENGINE holds only the public half, which the API prints
+     * at boot so it need not be derived by hand.
+     *
+     *   openssl rand -base64 32
+     */
+    TRADING_ENGINE_CALLER_SEED: z.string().default(''),
+    TRADING_ENGINE_TIMEOUT_MS: z.coerce.number().int().positive().default(3_000),
+    /**
+     * MUST equal the engine's MATCHING_TOLERANCE_SECONDS (ADR-0031).
+     *
+     * It is what makes "the engine never saw this order" conclusive. A request
+     * the gateway gave up on can still be queued inside the engine and applied
+     * later — for as long as its signed timestamp stays inside this window.
+     * Only after it does the engine refuse that request forever, so only then
+     * may the sweeper release the hold of an order the engine reports unseen.
+     */
+    TRADING_ENGINE_TOLERANCE_SECONDS: z.coerce.number().int().positive().default(300),
+    /** Largest single order per market, base units: SYMBOL=QTY. Unlisted = refused. */
+    TRADING_MAX_ORDER_QTY: keyValueList,
+    /** Largest open notional per user per market, quote base units: SYMBOL=AMOUNT. */
+    TRADING_MAX_OPEN_NOTIONAL: keyValueList,
+    TRADING_MAX_OPEN_ORDERS: z.coerce.number().int().positive().default(50),
+    TRADING_ORDER_RATE_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+    TRADING_ORDER_RATE_MAX: z.coerce.number().int().positive().default(120),
+    TRADING_SWEEPER_ENABLED: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((value) => value === 'true'),
+    /** How long an order may sit in PENDING_ENGINE before the sweeper asks. */
+    TRADING_SWEEPER_AFTER_MS: z.coerce.number().int().positive().default(5_000),
+    TRADING_SWEEPER_INTERVAL_MS: z.coerce.number().int().positive().default(2_000),
+    /**
+     * After this many attempts an unresolved order is a dead letter, not a log
+     * line. It must cover the engine tolerance: attempts x interval shorter
+     * than TRADING_ENGINE_TOLERANCE_SECONDS dead-letters every stuck order
+     * before "never seen" can ever be proven — so the API refuses that
+     * combination at boot.
+     */
+    TRADING_SWEEPER_MAX_ATTEMPTS: z.coerce.number().int().positive().default(500),
 
     // --- Phase 3: risk policy (ADR-0010) ------------------------------------
     // Base units. Educational-project defaults, chosen so every rule is
@@ -637,6 +772,62 @@ export const envSchema = z
           path: [key],
           message: 'must be a non-negative integer in base units, as a string',
         });
+      }
+    }
+
+    // --- Trading (S3). Validated only when enabled, and then strictly. ---
+    if (env.TRADING_ENABLED) {
+      if (env.CLEARING_ADDRESS.trim() === '') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['CLEARING_ADDRESS'],
+          message: 'is required when TRADING_ENABLED is true',
+        });
+      } else if (env.CLEARING_ADDRESS.trim() === (env.TREASURY_ADDRESS ?? '').trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['CLEARING_ADDRESS'],
+          message:
+            'must not be the treasury: pooling them makes the clearing reserve check unable ' +
+            'to tell customer money from fee float (ADR-0025)',
+        });
+      }
+      if (env.TRADING_MARKETS.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['TRADING_MARKETS'],
+          message: 'must name at least one market when TRADING_ENABLED is true',
+        });
+      }
+      for (const market of env.TRADING_MARKETS) {
+        if (env.TRADING_ENGINE_URLS[market.symbol] === undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['TRADING_ENGINE_URLS'],
+            message: `has no engine for ${market.symbol}: one engine serves one market`,
+          });
+        }
+      }
+      if (!/^[A-Za-z0-9+/]{43}=$/.test(env.TRADING_ENGINE_CALLER_SEED.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['TRADING_ENGINE_CALLER_SEED'],
+          message: 'must be base64 of exactly 32 bytes when TRADING_ENABLED is true',
+        });
+      }
+      for (const [name, map] of [
+        ['TRADING_MAX_ORDER_QTY', env.TRADING_MAX_ORDER_QTY],
+        ['TRADING_MAX_OPEN_NOTIONAL', env.TRADING_MAX_OPEN_NOTIONAL],
+      ] as const) {
+        for (const [symbol, value] of Object.entries(map)) {
+          if (!/^[1-9]\d*$/.test(value)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: [name],
+              message: `${symbol} must be a positive integer in base units`,
+            });
+          }
+        }
       }
     }
 

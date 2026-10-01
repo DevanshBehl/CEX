@@ -371,13 +371,14 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
           COALESCE(SUM(CASE WHEN a.type = 'user_trading_available'
             THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
             ELSE 0 END), 0)::text AS available,
-          COALESCE(SUM(CASE WHEN a.type = 'user_order_locked'
+          -- Locked in the clearing tier: order holds AND pending deallocations.
+          COALESCE(SUM(CASE WHEN a.type IN ('user_order_locked', 'user_trading_locked')
             THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
             ELSE 0 END), 0)::text AS locked
         FROM ledger_accounts a
         LEFT JOIN ledger_entries e ON e.account_id = a.id
         WHERE a.owner_id = ${userId}::uuid
-          AND a.type IN ('user_trading_available', 'user_order_locked')
+          AND a.type IN ('user_trading_available', 'user_order_locked', 'user_trading_locked')
           AND a.asset LIKE ${`${cluster}:%`}
         GROUP BY a.asset
         ORDER BY a.asset
@@ -394,7 +395,7 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
       return exec(tx).$queryRaw<ClearingTotalsRow[]>`
         SELECT
           a.asset,
-          COALESCE(SUM(CASE WHEN a.type IN ('user_trading_available','user_order_locked')
+          COALESCE(SUM(CASE WHEN a.type IN ('user_trading_available','user_order_locked','user_trading_locked')
             THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
             ELSE 0 END), 0)::text AS "tradingLiabilities",
           COALESCE(SUM(CASE WHEN a.type = 'clearing_assets'
@@ -402,7 +403,7 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
             ELSE 0 END), 0)::text AS "clearingAssets"
         FROM ledger_accounts a
         LEFT JOIN ledger_entries e ON e.account_id = a.id
-        WHERE a.type IN ('user_trading_available','user_order_locked','clearing_assets')
+        WHERE a.type IN ('user_trading_available','user_order_locked','user_trading_locked','clearing_assets')
           AND a.asset LIKE ${`${cluster}:%`}
         GROUP BY a.asset
         ORDER BY a.asset

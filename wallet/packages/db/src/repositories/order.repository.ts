@@ -107,9 +107,24 @@ export interface OrderRepository {
    * claim does NOT transition the order: only the engine's journal can say what
    * happened to it, and the sweeper acts on that answer.
    */
-  claimPendingEngine(olderThan: Date, tx?: Executor): Promise<OrderRecord | null>;
+  claimPendingEngine(
+    olderThan: Date,
+    tx?: Executor,
+    options?: { readonly notAttemptedSince?: Date; readonly maxAttempts?: number },
+  ): Promise<OrderRecord | null>;
   listOpenForUser(userId: string, market: string, tx?: Executor): Promise<OrderRecord[]>;
+  /** A user's recent orders in any state, newest first. */
+  listForUser(
+    userId: string,
+    market: string | undefined,
+    limit: number,
+    tx?: Executor,
+  ): Promise<OrderRecord[]>;
   countOpenForUser(userId: string, market: string, tx?: Executor): Promise<number>;
+  /** Creation times of this user's orders since `since`, for the order-rate rule. */
+  listPlacementTimes(userId: string, since: Date, tx?: Executor): Promise<Date[]>;
+  /** Every live order in a market, for cancel-all. */
+  listOpenForMarket(market: string, tx?: Executor): Promise<OrderRecord[]>;
 }
 
 const OPEN_STATUSES: readonly OrderStatus[] = [
@@ -213,13 +228,27 @@ export function createOrderRepository(db: Executor): OrderRepository {
       return this.findById(input.orderId, e);
     },
 
-    async claimPendingEngine(olderThan, tx) {
+    async claimPendingEngine(olderThan, tx, options = {}) {
       const e = exec(tx);
+      // Least-recently-ATTEMPTED first, not oldest first. Oldest-first claims
+      // the same unresolvable order on every cycle and never reaches the ones
+      // behind it. `notAttemptedSince` is the per-order backoff; an order past
+      // `maxAttempts` is left for an operator rather than retried forever.
+      // No backoff filter at all when none is given, rather than a far-future
+      // sentinel: JS's maximum Date (year 275760) is outside what Prisma will
+      // bind as a timestamp parameter, so the sentinel made the query throw.
+      const backoff =
+        options.notAttemptedSince === undefined
+          ? Prisma.empty
+          : Prisma.sql`AND updated_at < ${options.notAttemptedSince}`;
+      const maxAttempts = options.maxAttempts ?? 2_147_483_647;
       const rows = await e.$queryRaw<Array<{ id: string }>>`
         SELECT id FROM orders
         WHERE status = 'PENDING_ENGINE'::"OrderStatus"
           AND created_at < ${olderThan}
-        ORDER BY created_at ASC
+          ${backoff}
+          AND sweep_attempts < ${maxAttempts}
+        ORDER BY updated_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
       `;
@@ -232,6 +261,31 @@ export function createOrderRepository(db: Executor): OrderRepository {
     async listOpenForUser(userId, market, tx) {
       const rows = await exec(tx).order.findMany({
         where: { userId, market, status: { in: [...OPEN_STATUSES] } },
+        orderBy: { createdAt: 'asc' },
+      });
+      return rows.map(toRecord);
+    },
+
+    async listForUser(userId, market, limit, tx) {
+      const rows = await exec(tx).order.findMany({
+        where: { userId, ...(market === undefined ? {} : { market }) },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+      });
+      return rows.map(toRecord);
+    },
+
+    async listPlacementTimes(userId, since, tx) {
+      const rows = await exec(tx).order.findMany({
+        where: { userId, createdAt: { gt: since } },
+        select: { createdAt: true },
+      });
+      return rows.map((row) => row.createdAt);
+    },
+
+    async listOpenForMarket(market, tx) {
+      const rows = await exec(tx).order.findMany({
+        where: { market, status: { in: [...OPEN_STATUSES] } },
         orderBy: { createdAt: 'asc' },
       });
       return rows.map(toRecord);

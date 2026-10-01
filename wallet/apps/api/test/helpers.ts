@@ -102,6 +102,21 @@ export interface HarnessOptions {
     readonly dailyLimit: string;
     readonly manualReviewAbove: string;
   }[];
+  /**
+   * Turn trading on (S3), with engines the test controls. Markets are defined
+   * here rather than read from the environment so the suite does not depend on
+   * a developer's `.env`, and the sweeper is left stopped so "what it did" is
+   * answerable by calling `runOnce()`.
+   */
+  trading?: {
+    readonly engines: ReadonlyMap<
+      string,
+      import('../src/services/trading/engine-client.js').EngineClient
+    >;
+    readonly markets: ApiConfig['trading']['markets'];
+    readonly clearingAddress: string;
+    readonly risk?: Partial<ApiConfig['trading']['risk']>;
+  };
 }
 
 export async function startHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -198,6 +213,29 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
       assetLimits: { ...config.risk.assetLimits, ...tokenAssetLimits },
       ...options.risk,
     },
+    trading: options.trading
+      ? {
+          ...config.trading,
+          enabled: true,
+          clearingAddress: options.trading.clearingAddress,
+          markets: options.trading.markets,
+          engineUrls: Object.fromEntries(
+            options.trading.markets.map((m) => [m.symbol, 'http://fake']),
+          ),
+          risk: {
+            maxOrderQty: Object.fromEntries(
+              options.trading.markets.map((m) => [m.symbol, '1000000000000000']),
+            ),
+            maxOpenNotional: Object.fromEntries(
+              options.trading.markets.map((m) => [m.symbol, '1000000000000000']),
+            ),
+            maxOpenOrdersPerMarket: 1_000,
+            orderRateWindowSeconds: 60,
+            orderRateMaxCount: 1_000,
+            ...options.trading.risk,
+          },
+        }
+      : config.trading,
     withdrawal: {
       ...config.withdrawal,
       ...(options.operatorUserIds === undefined
@@ -240,6 +278,7 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     // background and make "what happened after N cycles" unanswerable.
     startIndexer: false,
     startReconciliation: false,
+    ...(options.trading ? { tradingEngines: options.trading.engines, startSweeper: false } : {}),
   });
   await app.ready();
 
@@ -286,9 +325,21 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
           distinct: ['userId'],
         });
 
+        /*
+         * Orders protect a user too. An order is evidence of a hold that was
+         * posted, the application role has no DELETE on `orders`, and its
+         * history is append-only — the same property withdrawals have.
+         */
+        const withOrders = await db.order.findMany({
+          where: { userId: { in: createdUserIds } },
+          select: { userId: true },
+          distinct: ['userId'],
+        });
+
         const protectedIds = new Set([
           ...withHistory.map((row) => row.userId),
           ...withRoles.map((row) => row.userId),
+          ...withOrders.map((row) => row.userId),
         ]);
         const deletable = createdUserIds.filter((id) => !protectedIds.has(id));
 
@@ -609,5 +660,42 @@ export async function markDestinationKnown(
     destination,
     `history-${newId()}`,
     TEST_CHAIN,
+  );
+}
+
+/**
+ * Credit a user's CLEARING-tier balance, as a settled allocation would.
+ *
+ * Balanced, and in the shape ADR-0025 describes: the clearing address holds
+ * more and the trading tier owes more. A fixture that credited the trading
+ * balance alone would leave the clearing equation short and make every
+ * reconciliation assertion pass or fail for the wrong reason.
+ */
+export async function creditTrading(
+  harness: Harness,
+  userId: string,
+  asset: string,
+  amount: string,
+): Promise<void> {
+  const { createLedgerRepository, withTransaction, newId } = await import('@wallet/db');
+  const ledger = createLedgerRepository(harness.app.appDeps.db);
+  const accounts = [
+    { ownerId: null, asset, type: 'clearing_assets' as const },
+    { ownerId: userId, asset, type: 'user_trading_available' as const },
+  ];
+  await ledger.ensureAccounts(accounts);
+  await withTransaction(harness.app.appDeps.db, async (tx) =>
+    createLedgerRepository(tx).postTransaction(
+      {
+        kind: 'allocation',
+        referenceType: 'test-credit',
+        referenceId: newId(),
+        entries: [
+          { account: accounts[0]!, asset, amount, direction: 'debit' },
+          { account: accounts[1]!, asset, amount, direction: 'credit' },
+        ],
+      },
+      tx,
+    ),
   );
 }

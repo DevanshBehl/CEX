@@ -52,6 +52,21 @@ export const ACCOUNT_TYPES = [
    */
   'user_order_locked',
   /**
+   * Liability: what the platform owes a user, reserved against a pending
+   * DEALLOCATION — a movement out of the clearing tier (ADR-0032 addendum).
+   *
+   * The clearing tier's analogue of `user_custody_locked`, and needed for the
+   * same reason: while a transfer is in flight the coins are still at the
+   * SOURCE address, so the liability must stay locked in the SOURCE tier for
+   * both reconciliation equations to hold unchanged. A deallocation's source is
+   * the clearing address, so its lock belongs here.
+   *
+   * Deliberately NOT `user_order_locked`. That account must equal the sum of
+   * outstanding order holds, which is what reconciliation compares against the
+   * book; a deallocation parked in it would read as an order that does not rest.
+   */
+  'user_trading_locked',
+  /**
    * Asset: what the house CLEARING address controls on-chain.
    *
    * Deliberately not `chain_assets` with a null owner. The treasury pays network
@@ -99,6 +114,7 @@ export const ACCOUNT_CLASS: Readonly<
   user_custody_locked: 'liability',
   user_trading_available: 'liability',
   user_order_locked: 'liability',
+  user_trading_locked: 'liability',
   clearing_assets: 'asset',
   house_trading_fees: 'equity',
   chain_assets: 'asset',
@@ -121,6 +137,7 @@ export const NON_NEGATIVE_ACCOUNT_TYPES: ReadonlySet<AccountType> = new Set<Acco
   'user_custody_locked',
   'user_trading_available',
   'user_order_locked',
+  'user_trading_locked',
   'clearing_assets',
   'house_trading_fees',
   'chain_assets',
@@ -143,12 +160,14 @@ export const USER_LIABILITY_ACCOUNT_TYPES: ReadonlySet<AccountType> = new Set<Ac
   'user_custody_locked',
   'user_trading_available',
   'user_order_locked',
+  'user_trading_locked',
 ]);
 
 /** The clearing tier's user accounts. Reconciled in aggregate, not per owner. */
 export const TRADING_ACCOUNT_TYPES: ReadonlySet<AccountType> = new Set<AccountType>([
   'user_trading_available',
   'user_order_locked',
+  'user_trading_locked',
 ]);
 
 /** The vault tier's user accounts. Reconciled per owner against their address. */
@@ -237,6 +256,10 @@ export function userTradingAvailable(ownerId: string, asset: string): AccountRef
 
 export function userOrderLocked(ownerId: string, asset: string): AccountRef {
   return { ownerId, asset, type: 'user_order_locked' };
+}
+
+export function userTradingLocked(ownerId: string, asset: string): AccountRef {
+  return { ownerId, asset, type: 'user_trading_locked' };
 }
 
 /**

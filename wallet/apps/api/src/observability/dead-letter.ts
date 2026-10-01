@@ -28,7 +28,22 @@ import type { Logger } from '@wallet/logger';
 import { logSecurityEvent } from '@wallet/logger';
 import type { Counter, Gauge } from './metrics.js';
 
-export type JobQueue = 'withdrawal_sign' | 'withdrawal_broadcast' | 'withdrawal_expiry' | 'sweep';
+/**
+ * Every queue, declared ONCE. The operations route filters on this list; it
+ * used to keep its own copy under `satisfies readonly JobQueue[]`, which checks
+ * each entry but not that none is missing — so a new queue compiled and could
+ * not be filtered on.
+ */
+export const JOB_QUEUES = [
+  'withdrawal_sign',
+  'withdrawal_broadcast',
+  'withdrawal_expiry',
+  'sweep',
+  /** An order the sweeper could not resolve. Its hold is NEVER released on giving up. */
+  'order_pending_engine',
+] as const;
+
+export type JobQueue = (typeof JOB_QUEUES)[number];
 
 export interface DeadLetter {
   readonly id: string;

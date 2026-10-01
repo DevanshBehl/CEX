@@ -77,6 +77,9 @@ importers:
       '@wallet/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@wallet/orders':
+        specifier: workspace:*
+        version: link:../../packages/orders
       '@wallet/portfolio':
         specifier: workspace:*
         version: link:../../packages/portfolio

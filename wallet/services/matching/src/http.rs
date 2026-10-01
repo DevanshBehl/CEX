@@ -372,6 +372,10 @@ struct BookLevel {
 #[derive(Serialize)]
 struct BookResponse {
     seq: Seq,
+    /// Last trade, then mid, then null (ADR-0027). The gateway sizes a market
+    /// order's protection price from THIS, so it never reserves against a
+    /// reference the engine does not share.
+    reference_price: Option<Price>,
     bids: Vec<BookLevel>,
     asks: Vec<BookLevel>,
 }
@@ -397,6 +401,7 @@ async fn book(
     };
     Ok(Json(BookResponse {
         seq: state.service.last_seq().await,
+        reference_price: state.service.reference_price().await,
         bids: level(snapshot.bids()),
         asks: level(snapshot.asks()),
     }))
@@ -406,6 +411,14 @@ async fn book(
 struct HealthResponse {
     market: String,
     status: MarketStatus,
+    /// The structural constraints this engine enforces (ADR-0027), so the
+    /// gateway can refuse to route a market whose rules it does not share —
+    /// otherwise it accepts orders the engine rejects, and every one takes a
+    /// hold and then releases it (prompt_phase_s3.md rules 88-89).
+    tick_size: Price,
+    lot_size: Qty,
+    min_notional: u64,
+    collar_bps: u32,
     last_seq: Seq,
     published_watermark: Seq,
     replay_cache_size: usize,
@@ -413,9 +426,14 @@ struct HealthResponse {
 
 /// Requires no signature and reveals no order.
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    let market = state.service.market();
     Json(HealthResponse {
-        market: state.service.market().id.clone(),
+        market: market.id.clone(),
         status: state.service.status().await,
+        tick_size: market.tick_size,
+        lot_size: market.lot_size,
+        min_notional: market.min_notional,
+        collar_bps: market.collar_bps,
         last_seq: state.service.last_seq().await,
         published_watermark: state.service.published_watermark().await,
         replay_cache_size: state.replay.lock().await.len(),

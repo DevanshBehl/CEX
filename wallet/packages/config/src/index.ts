@@ -134,6 +134,36 @@ export interface ApiConfig {
     readonly intervalMs: number;
     readonly alertAfterCycles: number;
   };
+  /** Phase S3. Everything here is inert when `enabled` is false. */
+  readonly trading: {
+    readonly enabled: boolean;
+    readonly clearingAddress: string;
+    readonly clearingKeyRef: string;
+    readonly markets: ReadonlyArray<{
+      readonly symbol: string;
+      readonly tickSize: string;
+      readonly lotSize: string;
+      readonly minNotional: string;
+      readonly collarBps: number;
+    }>;
+    readonly engineUrls: Readonly<Record<string, string>>;
+    readonly engineCallerSeed: string;
+    readonly engineTimeoutMs: number;
+    readonly engineToleranceSeconds: number;
+    readonly risk: {
+      readonly maxOrderQty: Readonly<Record<string, string>>;
+      readonly maxOpenNotional: Readonly<Record<string, string>>;
+      readonly maxOpenOrdersPerMarket: number;
+      readonly orderRateWindowSeconds: number;
+      readonly orderRateMaxCount: number;
+    };
+    readonly sweeper: {
+      readonly enabled: boolean;
+      readonly afterMs: number;
+      readonly intervalMs: number;
+      readonly maxAttempts: number;
+    };
+  };
   readonly risk: {
     /**
      * Per-asset limits keyed by ledger asset key (ADR-0016, rule 127).
@@ -494,6 +524,29 @@ export function toApiConfig(env: Env): ApiConfig {
       enabled: env.RECONCILIATION_ENABLED,
       intervalMs: env.RECONCILIATION_INTERVAL_MS,
       alertAfterCycles: env.RECONCILIATION_ALERT_AFTER_CYCLES,
+    }),
+    trading: Object.freeze({
+      enabled: env.TRADING_ENABLED,
+      clearingAddress: env.CLEARING_ADDRESS.trim(),
+      clearingKeyRef: env.CLEARING_KEY_REF,
+      markets: Object.freeze(env.TRADING_MARKETS.map((m) => Object.freeze({ ...m }))),
+      engineUrls: Object.freeze({ ...env.TRADING_ENGINE_URLS }),
+      engineCallerSeed: env.TRADING_ENGINE_CALLER_SEED.trim(),
+      engineTimeoutMs: env.TRADING_ENGINE_TIMEOUT_MS,
+      engineToleranceSeconds: env.TRADING_ENGINE_TOLERANCE_SECONDS,
+      risk: Object.freeze({
+        maxOrderQty: Object.freeze({ ...env.TRADING_MAX_ORDER_QTY }),
+        maxOpenNotional: Object.freeze({ ...env.TRADING_MAX_OPEN_NOTIONAL }),
+        maxOpenOrdersPerMarket: env.TRADING_MAX_OPEN_ORDERS,
+        orderRateWindowSeconds: env.TRADING_ORDER_RATE_WINDOW_SECONDS,
+        orderRateMaxCount: env.TRADING_ORDER_RATE_MAX,
+      }),
+      sweeper: Object.freeze({
+        enabled: env.TRADING_SWEEPER_ENABLED,
+        afterMs: env.TRADING_SWEEPER_AFTER_MS,
+        intervalMs: env.TRADING_SWEEPER_INTERVAL_MS,
+        maxAttempts: env.TRADING_SWEEPER_MAX_ATTEMPTS,
+      }),
     }),
     risk: Object.freeze({
       assetLimits: Object.freeze(assetLimits),

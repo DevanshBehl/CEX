@@ -12,7 +12,14 @@ import {
   InsufficientFundsError,
   PolicyDeniedError,
 } from '@wallet/errors';
-import { postWithdrawalLock, postWithdrawalRelease, toAmount, toBaseUnits } from '@wallet/ledger';
+import {
+  postTradingLock,
+  postTradingRelease,
+  postWithdrawalLock,
+  postWithdrawalRelease,
+  toAmount,
+  toBaseUnits,
+} from '@wallet/ledger';
 import { logSecurityEvent, type Logger } from '@wallet/logger';
 import {
   evaluate,
@@ -21,7 +28,7 @@ import {
   type RiskPolicy,
   type DestinationCheck,
 } from '@wallet/risk';
-import type { WithdrawalStatus } from '@wallet/types';
+import { parseLedgerAssetKey, type WithdrawalStatus } from '@wallet/types';
 import type { WithdrawalValuation } from './withdrawal-valuation.js';
 
 export interface WithdrawalServiceDeps {
@@ -37,6 +44,27 @@ export interface WithdrawalServiceDeps {
    * engine is told nothing about value, which a USD-threshold policy reviews.
    */
   readonly valuation?: WithdrawalValuation;
+  /**
+   * House addresses that are not in the `addresses` table — the treasury and
+   * the clearing pool. An EXTERNAL withdrawal to one of them would move value
+   * into the house with no liability to match (the clearing pool would show a
+   * surplus that belongs to nobody), so they count as platform-owned.
+   */
+  readonly platformAddresses?: readonly string[];
+}
+
+export interface RequestInternalInput {
+  readonly userId: string;
+  readonly asset: string;
+  readonly amount: string;
+  readonly idempotencyKey: string;
+  readonly correlationId: string;
+  readonly purpose: 'allocation' | 'deallocation';
+  /**
+   * From CONFIGURATION, never from a client (prompt_phase_s3.md rule 74). The
+   * route that calls this has no destination field to pass through.
+   */
+  readonly destination: string;
 }
 
 export interface RequestWithdrawalInput {
@@ -50,6 +78,15 @@ export interface RequestWithdrawalInput {
 
 export interface WithdrawalService {
   request(input: RequestWithdrawalInput): Promise<WithdrawalRecord>;
+  /**
+   * Move funds between the vault and clearing tiers (ADR-0025).
+   *
+   * The same lifecycle as a withdrawal — ADR-0017: a movement whose destination
+   * lives inside the platform is a withdrawal, not a parallel machine — but it
+   * skips the withdrawal risk rules, which reason about value LEAVING. The
+   * destination rule would refuse every one of these as "internal".
+   */
+  requestInternal(input: RequestInternalInput): Promise<WithdrawalRecord>;
   get(userId: string, withdrawalId: string): Promise<WithdrawalRecord>;
   list(userId: string, limit: number): Promise<WithdrawalRecord[]>;
   listForReview(limit: number): Promise<WithdrawalRecord[]>;
@@ -90,29 +127,43 @@ export function createWithdrawalService(deps: WithdrawalServiceDeps): Withdrawal
     correlationId: string,
   ): Promise<WithdrawalRecord> {
     const amount = toAmount(withdrawal.amount);
+    // A deallocation spends the CLEARING tier; everything else the vault. The
+    // lock, the balance it is checked against and the account it parks in all
+    // follow the tier the funds are leaving.
+    const fromTrading = withdrawal.purpose === 'deallocation';
 
     // Ledger accounts are created BEFORE the serializable transaction — the
     // Phase 2 lesson (rules 61-62). `user_custody_locked` will not exist for most users
     // until their first withdrawal, so this is exactly the contended case.
-    await ledger.ensureAccounts([
-      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_custody_available' },
-      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_custody_locked' },
-    ]);
+    await ledger.ensureAccounts(
+      fromTrading
+        ? [
+            { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_trading_available' },
+            { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_trading_locked' },
+          ]
+        : [
+            { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_custody_available' },
+            { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_custody_locked' },
+          ],
+    );
 
     return withTransaction(deps.db, async (tx) => {
-      const balance = await createLedgerRepository(tx).getUserBalance(
-        withdrawal.userId,
-        withdrawal.asset,
-        tx,
-      );
+      const repository = createLedgerRepository(tx);
+      const available = fromTrading
+        ? BigInt(
+            (await repository.getUserTradingBalances(withdrawal.userId, parseLedgerAssetKey(withdrawal.asset).cluster, tx))
+              .find((b) => b.asset === withdrawal.asset)?.available ?? '0',
+          )
+        : BigInt((await repository.getUserBalance(withdrawal.userId, withdrawal.asset, tx)).available);
 
-      if (BigInt(balance.available) < amount) {
+      if (available < amount) {
         // Read inside the same serializable transaction that would post the
-        // lock, so a concurrent withdrawal cannot slip between the two.
+        // lock, so a concurrent withdrawal cannot slip between the two. No
+        // database constraint backs this up.
         throw new InsufficientFundsError();
       }
 
-      const posting = postWithdrawalLock({
+      const posting = (fromTrading ? postTradingLock : postWithdrawalLock)({
         withdrawalId: withdrawal.id,
         userId: withdrawal.userId,
         asset: withdrawal.asset,
@@ -186,8 +237,9 @@ export function createWithdrawalService(deps: WithdrawalServiceDeps): Withdrawal
         ? undefined
         : await deps.valuation(input.asset, amount, at).catch(() => null);
 
+    const houseOwned = (deps.platformAddresses ?? []).includes(input.destination);
     const destinationCheck: DestinationCheck = verdict.ok
-      ? { ok: true, isPlatformOwned: owned !== null }
+      ? { ok: true, isPlatformOwned: owned !== null || houseOwned }
       : { ok: false, reason: verdict.reason === 'not_signable' ? 'not_signable' : 'invalid' };
 
     return {
@@ -327,6 +379,61 @@ export function createWithdrawalService(deps: WithdrawalServiceDeps): Withdrawal
       }
     },
 
+    async requestInternal(input) {
+      const created = await withdrawals.create({
+        userId: input.userId,
+        chain: deps.chain,
+        asset: input.asset,
+        amount: input.amount,
+        destination: input.destination,
+        purpose: input.purpose,
+        idempotencyKey: input.idempotencyKey,
+        correlationId: input.correlationId,
+      });
+      if (created.outcome === 'existing') return created.withdrawal;
+      const withdrawal = created.withdrawal;
+
+      // Through RISK_EVALUATING, because the state machine has no shortcut and
+      // should not grow one. What is evaluated is recorded as the transition
+      // reason; the withdrawal rules do not run, for the reason on the method.
+      const evaluating = await withdrawals.transition({
+        withdrawalId: withdrawal.id,
+        from: 'REQUESTED',
+        to: 'RISK_EVALUATING',
+        correlationId: input.correlationId,
+      });
+      if (!evaluating) return withdrawal;
+      const approved = await withdrawals.transition({
+        withdrawalId: withdrawal.id,
+        from: 'RISK_EVALUATING',
+        to: 'APPROVED',
+        reason: `internal ${input.purpose}: destination from configuration`,
+        correlationId: input.correlationId,
+      });
+      if (!approved) return withdrawal;
+
+      logSecurityEvent(deps.logger, 'trading.allocation_requested', {
+        outcome: 'success',
+        userId: input.userId,
+        targetType: 'withdrawal',
+        targetId: withdrawal.id,
+        reason: input.purpose,
+      });
+
+      try {
+        return await lockFunds(approved, input.correlationId);
+      } catch (error) {
+        await withdrawals.transition({
+          withdrawalId: withdrawal.id,
+          from: 'APPROVED',
+          to: 'REJECTED',
+          reason: error instanceof InsufficientFundsError ? 'INSUFFICIENT_FUNDS' : 'lock_failed',
+          correlationId: input.correlationId,
+        });
+        throw error;
+      }
+    },
+
     async get(userId, withdrawalId) {
       const withdrawal = await withdrawals.findById(withdrawalId);
       // Another user's withdrawal is not found, never forbidden — a 403 would
@@ -405,9 +512,16 @@ export function createWithdrawalService(deps: WithdrawalServiceDeps): Withdrawal
   };
 }
 
-/** Release a lock back to the user (master-prompt rule 119). */
+/**
+ * Release a lock back to the user (master-prompt rule 119).
+ *
+ * The lock lives in the tier the funds are LEAVING: a deallocation locked the
+ * clearing tier, everything else the vault. Releasing into the wrong tier would
+ * balance and quietly move a user's money between them.
+ */
 export async function releaseLock(db: PrismaClient, withdrawal: WithdrawalRecord): Promise<string> {
-  const posting = postWithdrawalRelease({
+  const release = withdrawal.purpose === 'deallocation' ? postTradingRelease : postWithdrawalRelease;
+  const posting = release({
     withdrawalId: withdrawal.id,
     userId: withdrawal.userId,
     asset: withdrawal.asset,

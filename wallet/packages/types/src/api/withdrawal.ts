@@ -52,6 +52,11 @@ export const withdrawalSchema = z.object({
   networkFeeSymbol: z.string(),
   networkFeeDecimals: z.number().int().min(0).max(32),
   destination: z.string(),
+  /**
+   * `external` leaves the platform; `allocation` and `deallocation` move funds
+   * between the vault and clearing tiers (prompt_phase_s3.md §7).
+   */
+  purpose: z.enum(['external', 'allocation', 'deallocation']),
   status: withdrawalStatusSchema,
   /** True while the funds are reserved in `user_custody_locked`. */
   fundsLocked: z.boolean(),

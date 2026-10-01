@@ -9,7 +9,13 @@ import {
   type PrismaClient,
   type WithdrawalRecord,
 } from '@wallet/db';
-import { postWithdrawalSettlement, toAmount, toBaseUnits } from '@wallet/ledger';
+import {
+  postAllocation,
+  postDeallocation,
+  postWithdrawalSettlement,
+  toAmount,
+  toBaseUnits,
+} from '@wallet/ledger';
 import { logSecurityEvent, runWithContext, type Logger } from '@wallet/logger';
 import { isTerminal, parseLedgerAssetKey } from '@wallet/types';
 import type { DeadLetterQueue, JobQueue } from '../observability/dead-letter.js';
@@ -56,6 +62,15 @@ export interface WithdrawalWorkerDeps {
    * the transaction has two signers and needs two signing rounds.
    */
   readonly segregated?: SegregatedSource | undefined;
+  /**
+   * The house CLEARING address and its key (ADR-0025), when trading is on.
+   *
+   * A DEALLOCATION pays out of it: the funds sit in the omnibus clearing pool,
+   * not at the user's own address, so the user's key has nothing to sign for.
+   * Absent means no deallocation can be signed — and one is refused rather than
+   * being paid from somewhere else.
+   */
+  readonly clearing?: { readonly address: string; readonly keyRef: string } | undefined;
   readonly budgets: RetryBudgets;
   readonly batchSize: number;
   /**
@@ -340,9 +355,22 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
        * Without segregation both roles are the treasury and this resolves to
        * exactly the previous behaviour.
        */
-      const source = deps.segregated
-        ? await deps.segregated.resolve(claimed.userId)
-        : { address: deps.treasuryAddress, keyRef: deps.keyRefId };
+      /*
+       * A DEALLOCATION leaves from the CLEARING address, under the clearing
+       * key — the funds are an omnibus claim on that pool, not coins at the
+       * user's own address. Everything else leaves from where it always did.
+       */
+      let source: { address: string; keyRef: string };
+      if (claimed.purpose === 'deallocation') {
+        if (!deps.clearing) {
+          throw new Error('a deallocation needs a clearing address, and none is configured');
+        }
+        source = { address: deps.clearing.address, keyRef: deps.clearing.keyRef };
+      } else {
+        source = deps.segregated
+          ? await deps.segregated.resolve(claimed.userId)
+          : { address: deps.treasuryAddress, keyRef: deps.keyRefId };
+      }
 
       const unsigned = deps.assets.isToken(claimed.asset)
         ? await buildTokenWithdrawal(claimed, source.address, lease.address, state.nonce)
@@ -725,6 +753,7 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
 
     await createLedgerRepository(deps.db).ensureAccounts([
       { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_custody_locked' },
+      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_custody_available' },
       // The funds leave the USER's segregated address (ADR-0020)...
       { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'chain_assets' },
       // ...and the fee leaves the HOUSE's wallet, in the native asset. Two
@@ -733,16 +762,39 @@ export function createWithdrawalWorkers(deps: WithdrawalWorkerDeps): WithdrawalW
       { ownerId: null, asset: withdrawal.asset, type: 'chain_assets' },
       { ownerId: null, asset: feeAsset, type: 'chain_assets' },
       { ownerId: null, asset: feeAsset, type: 'house_fees' },
+      // The clearing tier, for internal movements (ADR-0025).
+      { ownerId: null, asset: withdrawal.asset, type: 'clearing_assets' },
+      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_trading_available' },
+      { ownerId: withdrawal.userId, asset: withdrawal.asset, type: 'user_trading_locked' },
     ]);
 
-    const posting = postWithdrawalSettlement({
+    /*
+     * What the movement WAS decides how it posts. An allocation's value never
+     * left the platform: it moved from the user's address into the clearing
+     * pool, and the liability moved tiers with it. Posting it as an ordinary
+     * settlement would discharge a liability that still exists.
+     */
+    const internal = {
       withdrawalId: withdrawal.id,
       userId: withdrawal.userId,
       asset: withdrawal.asset,
-      feeAsset,
       amount,
+      feeAsset,
       ...(networkFee > 0n ? { networkFee } : {}),
-    });
+    };
+    const posting =
+      withdrawal.purpose === 'allocation'
+        ? postAllocation(internal)
+        : withdrawal.purpose === 'deallocation'
+          ? postDeallocation(internal)
+          : postWithdrawalSettlement({
+              withdrawalId: withdrawal.id,
+              userId: withdrawal.userId,
+              asset: withdrawal.asset,
+              feeAsset,
+              amount,
+              ...(networkFee > 0n ? { networkFee } : {}),
+            });
 
     await withTransaction(deps.db, async (tx) => {
       const ledgerTransactionId = await createLedgerRepository(tx).postTransaction(

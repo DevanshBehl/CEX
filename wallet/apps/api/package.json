@@ -36,7 +36,8 @@
     "fastify-plugin": "5.0.1",
     "fastify-type-provider-zod": "4.0.2",
     "ioredis": "5.4.2",
-    "zod": "3.24.1"
+    "zod": "3.24.1",
+    "@wallet/orders": "workspace:*"
   },
   "devDependencies": {
     "@solana/web3.js": "1.98.0",

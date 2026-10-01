@@ -156,11 +156,22 @@ export function createClusterRuntime(deps: ClusterRuntimeDeps): ClusterRuntime {
       ]),
   );
 
+  /*
+   * The house addresses that are not rows in `addresses`. An external
+   * withdrawal to either would move value into the house with no liability to
+   * match it (ADR-0025).
+   */
+  const houseAddresses = [
+    config.withdrawal.treasuryAddress ?? '',
+    config.trading.enabled ? config.trading.clearingAddress : '',
+  ].filter((address) => address.trim() !== '');
+
   const withdrawals = createWithdrawalService({
     db,
     validator: createSolanaAddressValidator(),
     chain: chainId,
     logger,
+    platformAddresses: houseAddresses,
     valuation: createWithdrawalValuation({
       db,
       cluster,
@@ -212,6 +223,14 @@ export function createClusterRuntime(deps: ClusterRuntimeDeps): ClusterRuntime {
               }
               return { address: address.address, keyRef: userKeyRef(userId) };
             },
+          },
+        }
+      : {}),
+    ...(config.trading.enabled
+      ? {
+          clearing: {
+            address: config.trading.clearingAddress,
+            keyRef: config.trading.clearingKeyRef,
           },
         }
       : {}),

@@ -58,15 +58,6 @@ export interface WithdrawalControllers {
 export function createWithdrawalControllers(deps: WithdrawalControllerDeps): WithdrawalControllers {
   const decisions = createRiskDecisionRepository(deps.db);
 
-  /** Storage speaks cluster-qualified keys; the wire speaks bare assets. */
-  const wireAsset = (assetKey: string): string => {
-    try {
-      return parseLedgerAssetKey(assetKey).asset;
-    } catch {
-      return assetKey;
-    }
-  };
-
   const operators = createOperatorRepository(deps.db);
 
   /**
@@ -210,16 +201,31 @@ export function createWithdrawalControllers(deps: WithdrawalControllerDeps): Wit
   };
 
   function render(runtime: { readonly assets: AssetRegistry }, row: WithdrawalRecord): Withdrawal {
-    const { assets } = runtime;
-    return toWithdrawal(row, {
-      asset: wireAsset(row.asset),
-      symbol: assets.symbolOf(row.asset),
-      decimals: assets.decimalsOf(row.asset),
-      // The fee is the NATIVE asset's, whatever was withdrawn (ADR-0016).
-      feeSymbol: assets.symbolOf(assets.nativeKey),
-      feeDecimals: assets.decimalsOf(assets.nativeKey),
-    });
+    return renderWithdrawal(runtime.assets, row);
   }
+}
+
+/**
+ * A withdrawal as the wire shows it. Exported because an allocation IS a
+ * withdrawal (ADR-0017), and its response must not be a second rendering of the
+ * same row that could drift from this one.
+ */
+export function renderWithdrawal(assets: AssetRegistry, row: WithdrawalRecord): Withdrawal {
+  const wire = (assetKey: string): string => {
+    try {
+      return parseLedgerAssetKey(assetKey).asset;
+    } catch {
+      return assetKey;
+    }
+  };
+  return toWithdrawal(row, {
+    asset: wire(row.asset),
+    symbol: assets.symbolOf(row.asset),
+    decimals: assets.decimalsOf(row.asset),
+    // The fee is the NATIVE asset's, whatever was withdrawn (ADR-0016).
+    feeSymbol: assets.symbolOf(assets.nativeKey),
+    feeDecimals: assets.decimalsOf(assets.nativeKey),
+  });
 }
 
 /**
@@ -265,6 +271,7 @@ function toWithdrawal(row: WithdrawalRecord, display: AssetDisplay): Withdrawal 
     networkFeeSymbol: display.feeSymbol,
     networkFeeDecimals: display.feeDecimals,
     destination: row.destination,
+    purpose: row.purpose,
     status: row.status,
     fundsLocked: holdsLock(row.status),
     isTerminal: isTerminal(row.status),

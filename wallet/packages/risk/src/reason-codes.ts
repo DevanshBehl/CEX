@@ -48,6 +48,13 @@ export const REASON_CODES = [
   // --- clean passes, recorded so an approval says what was checked ---
   'WITHIN_ALL_LIMITS',
   'KNOWN_DESTINATION',
+
+  // --- pre-trade (ADR-0033). Appended; the list above is untouched. ---
+  'ORDER_SIZE_LIMIT',
+  'OPEN_ORDER_LIMIT',
+  'ORDER_RATE_LIMIT',
+  'EXPOSURE_LIMIT',
+  'WITHIN_ORDER_LIMITS',
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
@@ -61,6 +68,7 @@ export type ReasonCode = (typeof REASON_CODES)[number];
 export const INFORMATIONAL_CODES: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   'WITHIN_ALL_LIMITS',
   'KNOWN_DESTINATION',
+  'WITHIN_ORDER_LIMITS',
 ]);
 
 /**
@@ -99,4 +107,17 @@ export function toClientMessage(codes: readonly ReasonCode[]): string {
     return 'This withdrawal exceeds your current limits. Try a smaller amount or try again later.';
   }
   return 'This withdrawal was declined.';
+}
+
+/**
+ * What a TRADER is told when pre-trade risk refuses an order (ADR-0033).
+ *
+ * The same discipline as `toClientMessage`: every limit collapses into one
+ * sentence, so the endpoint cannot be used to binary-search a threshold.
+ */
+export function toOrderClientMessage(codes: readonly ReasonCode[]): string {
+  if (codes.includes('ACCOUNT_NOT_ACTIVE')) {
+    return 'This account cannot trade. Please contact support.';
+  }
+  return 'This order exceeds your current trading limits. Try a smaller order or try again later.';
 }

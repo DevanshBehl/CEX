@@ -500,3 +500,70 @@ describe('cluster configuration (ADR-0021)', () => {
     expect(config.chain.byCluster['mainnet-beta']).toBeUndefined();
   });
 });
+
+describe('trading (S3)', () => {
+  const trading = {
+    ...valid,
+    TRADING_ENABLED: 'true',
+    CLEARING_ADDRESS: 'C1earing1111111111111111111111111111111111',
+    TRADING_MARKETS: 'SOL-USDC:1000:1000000:1000000:1000',
+    TRADING_ENGINE_URLS: 'SOL-USDC=http://127.0.0.1:8080',
+    TRADING_ENGINE_CALLER_SEED: Buffer.alloc(32, 7).toString('base64'),
+    TRADING_MAX_ORDER_QTY: 'SOL-USDC=1000000000000',
+    TRADING_MAX_OPEN_NOTIONAL: 'SOL-USDC=1000000000000',
+  };
+
+  /** The issues a parse refused with, as one string to match against. */
+  function refusal(env: Record<string, string>): string {
+    try {
+      parseEnv(env);
+    } catch (error) {
+      if (error instanceof ConfigValidationError) {
+        return error.issues.map((i) => `${i.variable} ${i.problem}`).join('\n');
+      }
+      throw error;
+    }
+    throw new Error('expected the configuration to be refused');
+  }
+
+  it('is off by default, so a wallet deployment needs none of it', () => {
+    expect(parseEnv(valid).TRADING_ENABLED).toBe(false);
+  });
+
+  it('parses a complete trading configuration, including a URL with colons', () => {
+    const env = parseEnv(trading);
+    expect(env.TRADING_MARKETS).toEqual([
+      {
+        symbol: 'SOL-USDC',
+        tickSize: '1000',
+        lotSize: '1000000',
+        minNotional: '1000000',
+        collarBps: 1000,
+      },
+    ]);
+    expect(env.TRADING_ENGINE_URLS['SOL-USDC']).toBe('http://127.0.0.1:8080');
+  });
+
+  it('refuses an enabled deployment with no clearing address', () => {
+    expect(refusal({ ...trading, CLEARING_ADDRESS: '' })).toMatch(/CLEARING_ADDRESS/);
+  });
+
+  // ADR-0025: pooling them hides a reserve shortfall inside fee float.
+  it('refuses a clearing address equal to the treasury', () => {
+    expect(refusal({ ...trading, TREASURY_ADDRESS: trading.CLEARING_ADDRESS })).toMatch(
+      /must not be the treasury/,
+    );
+  });
+
+  it('refuses a market with no engine, because one engine serves one market', () => {
+    expect(refusal({ ...trading, TRADING_ENGINE_URLS: '' })).toMatch(/has no engine/);
+  });
+
+  it('refuses a malformed market or caller seed', () => {
+    expect(refusal({ ...trading, TRADING_MARKETS: 'sol-usdc:1:1:1:1' })).toMatch(/SYMBOL:TICK/);
+    expect(refusal({ ...trading, TRADING_MARKETS: 'SOL-USDC:0:1:1:1' })).toMatch(
+      /positive integer/,
+    );
+    expect(refusal({ ...trading, TRADING_ENGINE_CALLER_SEED: 'short' })).toMatch(/32 bytes/);
+  });
+});

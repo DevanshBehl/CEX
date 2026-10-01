@@ -92,6 +92,18 @@ export const SECURITY_EVENTS = [
   'reconciliation.negative_residual',
   /** Spot prices were appended. The COUNT only — never a price (rule 90). */
   'pricer.recorded',
+  // --- Phase S3: trading (ADR-0025, ADR-0033) ---
+  'trading.order_denied',
+  'trading.placement_ambiguous',
+  'trading.engine_refused',
+  'trading.cancel_unconfirmed',
+  'trading.market_disagrees',
+  'trading.market_verified',
+  'trading.engine_unreachable',
+  'trading.engine_caller_key',
+  'trading.sweeper_resolved',
+  'trading.sweeper_dead_letter',
+  'trading.allocation_requested',
 ] as const;
 
 export type SecurityEvent = (typeof SECURITY_EVENTS)[number];

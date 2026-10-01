@@ -13,6 +13,7 @@ export const LEDGER_ACCOUNT_TYPES = [
   'user_custody_locked',
   'user_trading_available',
   'user_order_locked',
+  'user_trading_locked',
   'clearing_assets',
   'house_trading_fees',
   'chain_assets',

@@ -13,10 +13,13 @@ import {
   postDeposit,
   postOrderHold,
   postOrderRelease,
+  postTradingLock,
+  postTradingRelease,
   postWithdrawalLock,
   projectAll,
   userOrderLocked,
   userTradingAvailable,
+  userTradingLocked,
   userCustodyAvailable,
   userCustodyLocked,
   type AccountRef,
@@ -43,13 +46,13 @@ function allocated(amount = 4n * ONE, deposit = 10n * ONE): Entry[] {
   return [
     ...postDeposit({ depositId: 'd1', userId: 'u1', asset: SOL, amount: deposit }).entries,
     ...postWithdrawalLock({ withdrawalId: 'a1', userId: 'u1', asset: SOL, amount }).entries,
-    ...postAllocation({ allocationId: 'a1', userId: 'u1', asset: SOL, amount }).entries,
+    ...postAllocation({ withdrawalId: 'a1', userId: 'u1', asset: SOL, amount }).entries,
   ];
 }
 
 describe('postAllocation', () => {
   it('is four balanced legs across both tiers', () => {
-    const tx = postAllocation({ allocationId: 'a1', userId: 'u1', asset: SOL, amount: ONE });
+    const tx = postAllocation({ withdrawalId: 'a1', userId: 'u1', asset: SOL, amount: ONE });
     expect(tx.entries).toHaveLength(4);
     expect(isBalanced(tx.entries)).toBe(true);
     expect(tx.kind).toBe('allocation');
@@ -82,7 +85,7 @@ describe('postAllocation', () => {
 
   it('refuses a non-positive amount', () => {
     expect(() =>
-      postAllocation({ allocationId: 'a1', userId: 'u1', asset: SOL, amount: 0n }),
+      postAllocation({ withdrawalId: 'a1', userId: 'u1', asset: SOL, amount: 0n }),
     ).toThrow(InvalidEntryError);
   });
 });
@@ -91,7 +94,9 @@ describe('postDeallocation', () => {
   it('is the exact inverse of an allocation', () => {
     const entries = [
       ...allocated(4n * ONE),
-      ...postDeallocation({ allocationId: 'a2', userId: 'u1', asset: SOL, amount: 4n * ONE })
+      ...postTradingLock({ withdrawalId: 'a2', userId: 'u1', asset: SOL, amount: 4n * ONE })
+        .entries,
+      ...postDeallocation({ withdrawalId: 'a2', userId: 'u1', asset: SOL, amount: 4n * ONE })
         .entries,
     ];
     expect(balance(entries, userTradingAvailable('u1', SOL))).toBe(0n);
@@ -210,7 +215,7 @@ describe('properties', () => {
               ...entries,
               ...postWithdrawalLock({ withdrawalId: id, userId: 'u1', asset: SOL, amount: value })
                 .entries,
-              ...postAllocation({ allocationId: id, userId: 'u1', asset: SOL, amount: value })
+              ...postAllocation({ withdrawalId: id, userId: 'u1', asset: SOL, amount: value })
                 .entries,
             ];
           } else if (kind === 'hold' && trading >= value) {
@@ -226,7 +231,9 @@ describe('properties', () => {
           } else if (kind === 'deallocate' && trading >= value) {
             entries = [
               ...entries,
-              ...postDeallocation({ allocationId: id, userId: 'u1', asset: SOL, amount: value })
+              ...postTradingLock({ withdrawalId: id, userId: 'u1', asset: SOL, amount: value })
+                .entries,
+              ...postDeallocation({ withdrawalId: id, userId: 'u1', asset: SOL, amount: value })
                 .entries,
             ];
           }
@@ -237,10 +244,66 @@ describe('properties', () => {
           balance(entries, userCustodyAvailable('u1', SOL)) +
           balance(entries, userCustodyLocked('u1', SOL)) +
           balance(entries, userTradingAvailable('u1', SOL)) +
-          balance(entries, userOrderLocked('u1', SOL));
+          balance(entries, userOrderLocked('u1', SOL)) +
+          balance(entries, userTradingLocked('u1', SOL));
         expect(total).toBe(20n * ONE);
       }),
       { numRuns: 300 },
     );
+  });
+});
+
+describe('the trading-tier lock (deallocation)', () => {
+  // While a deallocation is in flight the coins are still at the CLEARING
+  // address, so the liability must stay in the clearing tier. Moving it to the
+  // vault early would read as a vault shortfall and a clearing surplus.
+  it('keeps both tiers covered while a deallocation is in flight', () => {
+    const entries = [
+      ...allocated(4n * ONE),
+      ...postTradingLock({ withdrawalId: 'd1', userId: 'u1', asset: SOL, amount: 3n * ONE })
+        .entries,
+    ];
+    expect(balance(entries, userTradingAvailable('u1', SOL))).toBe(ONE);
+    expect(balance(entries, userTradingLocked('u1', SOL))).toBe(3n * ONE);
+    expect(checkAllInvariants(entries)).toEqual([]);
+  });
+
+  it('never parks a deallocation in the order-hold account', () => {
+    const entries = [
+      ...allocated(4n * ONE),
+      ...postTradingLock({ withdrawalId: 'd1', userId: 'u1', asset: SOL, amount: ONE }).entries,
+    ];
+    expect(balance(entries, userOrderLocked('u1', SOL))).toBe(0n);
+  });
+
+  it('a failed deallocation releases back to the trading balance exactly', () => {
+    const entries = [
+      ...allocated(4n * ONE),
+      ...postTradingLock({ withdrawalId: 'd1', userId: 'u1', asset: SOL, amount: ONE }).entries,
+      ...postTradingRelease({ withdrawalId: 'd1', userId: 'u1', asset: SOL, amount: ONE }).entries,
+    ];
+    expect(balance(entries, userTradingAvailable('u1', SOL))).toBe(4n * ONE);
+    expect(balance(entries, userTradingLocked('u1', SOL))).toBe(0n);
+  });
+});
+
+describe('internal movements carry the house network fee', () => {
+  it('charges the fee to house_fees in the native asset, not the user', () => {
+    const tx = postAllocation({
+      withdrawalId: 'a1',
+      userId: 'u1',
+      asset: SOL,
+      amount: ONE,
+      networkFee: 5_000n,
+      feeAsset: SOL,
+    });
+    expect(tx.entries).toHaveLength(6);
+    expect(isBalanced(tx.entries)).toBe(true);
+  });
+
+  it('refuses a fee with no fee asset rather than guessing one', () => {
+    expect(() =>
+      postAllocation({ withdrawalId: 'a1', userId: 'u1', asset: SOL, amount: ONE, networkFee: 1n }),
+    ).toThrow(InvalidEntryError);
   });
 });

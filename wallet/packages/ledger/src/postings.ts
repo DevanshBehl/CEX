@@ -8,9 +8,10 @@ import {
   userCustodyLocked,
   userOrderLocked,
   userTradingAvailable,
+  userTradingLocked,
 } from './accounts.js';
 import { isNegative, isZero, type Amount } from './amount.js';
-import { credit, debit, type LedgerTransaction } from './entries.js';
+import { credit, debit, type Entry, type LedgerTransaction } from './entries.js';
 import { InvalidEntryError } from './errors.js';
 import { buildTransaction } from './transaction-builder.js';
 
@@ -471,10 +472,36 @@ export function postOrderRelease(input: OrderHoldPosting): LedgerTransaction {
 }
 
 export interface AllocationPosting {
-  readonly allocationId: string;
+  /** The withdrawal row that carries this movement through its lifecycle. */
+  readonly withdrawalId: string;
   readonly userId: string;
   readonly asset: string;
   readonly amount: Amount;
+  /** The network fee the HOUSE paid, in the native asset. See `feeAsset`. */
+  readonly networkFee?: Amount;
+  /**
+   * The native asset the fee is denominated in — never the moved asset. Same
+   * reasoning as `WithdrawalSettlePosting.feeAsset`: moving USDC costs lamports.
+   */
+  readonly feeAsset?: string;
+}
+
+/** The house bears the network fee of an internal movement, as it does a withdrawal's. */
+function houseFeeLegs(input: AllocationPosting): Entry[] {
+  const fee = input.networkFee ?? 0n;
+  if (isNegative(fee)) {
+    throw new InvalidEntryError('allocation_fee_negative', { withdrawalId: input.withdrawalId });
+  }
+  if (isZero(fee)) return [];
+  if (input.feeAsset === undefined) {
+    throw new InvalidEntryError('allocation_fee_asset_missing', {
+      withdrawalId: input.withdrawalId,
+    });
+  }
+  return [
+    debit(houseFees(input.feeAsset), input.feeAsset, fee),
+    credit(houseChainAssets(input.feeAsset), input.feeAsset, fee),
+  ];
 }
 
 /**
@@ -488,49 +515,86 @@ export interface AllocationPosting {
  *   debit  clearing_assets        — the clearing address holds more
  *   credit user_trading_available — the trading tier now owes it
  *
- * Per-asset zero-sum holds: two debits and two credits of the same amount.
- *
- * The funds come out of `user_custody_locked` rather than `user_custody_available`
- * because an allocation runs on the withdrawal lifecycle, which locked them when
- * it was approved. That lock is also what covers the in-flight window: while the
- * transfer is unconfirmed the coins are still at the user's address and the
- * liability is still locked, so the vault's reconciliation equation holds
- * unchanged and clearing is simply not yet credited.
+ * The funds come out of `user_custody_locked` rather than
+ * `user_custody_available` because an allocation runs on the withdrawal
+ * lifecycle, which locked them when it was approved. That lock is also what
+ * covers the in-flight window: while the transfer is unconfirmed the coins are
+ * still at the user's address and the liability is still locked, so the vault's
+ * reconciliation equation holds unchanged and clearing is simply not yet
+ * credited.
  */
 export function postAllocation(input: AllocationPosting): LedgerTransaction {
-  requirePositive(input.amount, input.allocationId, 'allocation');
+  requirePositive(input.amount, input.withdrawalId, 'allocation');
 
   return buildTransaction({
     kind: 'allocation',
-    referenceType: 'allocation',
-    referenceId: input.allocationId,
+    referenceType: 'withdrawal',
+    referenceId: input.withdrawalId,
     entries: [
       debit(userCustodyLocked(input.userId, input.asset), input.asset, input.amount),
       credit(chainAssets(input.userId, input.asset), input.asset, input.amount),
       debit(clearingAssets(input.asset), input.asset, input.amount),
       credit(userTradingAvailable(input.userId, input.asset), input.asset, input.amount),
+      ...houseFeeLegs(input),
     ],
   });
 }
 
 /**
- * The exact inverse: clearing tier back to the vault tier.
+ * The inverse: clearing tier back to the vault tier.
  *
- * Paid from the clearing address with the clearing key — one signing round, not
- * the two a segregated withdrawal needs.
+ * Consumes `user_trading_locked`, where `postTradingLock` parked the funds when
+ * the deallocation was approved — the clearing-tier analogue of an allocation
+ * consuming `user_custody_locked`. Paid from the clearing address with the
+ * clearing key, one signing round.
  */
 export function postDeallocation(input: AllocationPosting): LedgerTransaction {
-  requirePositive(input.amount, input.allocationId, 'deallocation');
+  requirePositive(input.amount, input.withdrawalId, 'deallocation');
 
   return buildTransaction({
     kind: 'deallocation',
-    referenceType: 'allocation',
-    referenceId: input.allocationId,
+    referenceType: 'withdrawal',
+    referenceId: input.withdrawalId,
     entries: [
-      debit(userTradingAvailable(input.userId, input.asset), input.asset, input.amount),
+      debit(userTradingLocked(input.userId, input.asset), input.asset, input.amount),
       credit(clearingAssets(input.asset), input.asset, input.amount),
       debit(chainAssets(input.userId, input.asset), input.asset, input.amount),
       credit(userCustodyAvailable(input.userId, input.asset), input.asset, input.amount),
+      ...houseFeeLegs(input),
+    ],
+  });
+}
+
+/**
+ * Reserve clearing-tier funds against a pending deallocation.
+ *
+ * The same shape and the same guarantee as `postWithdrawalLock`, one tier over.
+ * The caller reads `user_trading_available` inside the same SERIALIZABLE
+ * transaction and refuses if it cannot cover — no database constraint does.
+ */
+export function postTradingLock(input: WithdrawalLockPosting): LedgerTransaction {
+  requirePositive(input.amount, input.withdrawalId, 'trading lock');
+  return buildTransaction({
+    kind: 'withdrawal_lock',
+    referenceType: 'withdrawal',
+    referenceId: input.withdrawalId,
+    entries: [
+      debit(userTradingAvailable(input.userId, input.asset), input.asset, input.amount),
+      credit(userTradingLocked(input.userId, input.asset), input.asset, input.amount),
+    ],
+  });
+}
+
+/** The exact inverse of `postTradingLock`, for a deallocation that failed. */
+export function postTradingRelease(input: WithdrawalLockPosting): LedgerTransaction {
+  requirePositive(input.amount, input.withdrawalId, 'trading release');
+  return buildTransaction({
+    kind: 'withdrawal_release',
+    referenceType: 'withdrawal',
+    referenceId: input.withdrawalId,
+    entries: [
+      debit(userTradingLocked(input.userId, input.asset), input.asset, input.amount),
+      credit(userTradingAvailable(input.userId, input.asset), input.asset, input.amount),
     ],
   });
 }

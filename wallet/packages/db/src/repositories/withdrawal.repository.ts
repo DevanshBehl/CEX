@@ -11,6 +11,11 @@ export interface WithdrawalRecord {
   amount: string;
   networkFee: string | null;
   destination: string;
+  /**
+   * What the movement is for (prompt_phase_s3.md rule 73). `allocation` and
+   * `deallocation` are internal: their destination came from configuration.
+   */
+  purpose: WithdrawalPurpose;
   status: WithdrawalStatus;
   idempotencyKey: string;
   signAttempts: number;
@@ -28,12 +33,16 @@ export interface WithdrawalRecord {
   settledAt: Date | null;
 }
 
+export type WithdrawalPurpose = 'external' | 'allocation' | 'deallocation';
+
 export interface CreateWithdrawalInput {
   readonly userId: string;
   readonly chain: string;
   readonly asset: string;
   readonly amount: string;
   readonly destination: string;
+  /** Defaults to `external`. Internal purposes MUST take their destination from configuration. */
+  readonly purpose?: WithdrawalPurpose;
   readonly idempotencyKey: string;
   readonly correlationId?: string | undefined;
 }
@@ -141,11 +150,12 @@ export function createWithdrawalRepository(db: Executor): WithdrawalRepository {
 
       const rows = await e.$queryRaw<Array<{ id: string }>>`
         INSERT INTO withdrawals (
-          id, user_id, chain, asset, amount, destination, status,
+          id, user_id, chain, asset, amount, destination, purpose, status,
           idempotency_key, correlation_id, created_at, updated_at
         ) VALUES (
           ${id}::uuid, ${input.userId}::uuid, ${input.chain}, ${input.asset},
           ${new Prisma.Decimal(input.amount)}, ${input.destination},
+          ${input.purpose ?? 'external'}::"WithdrawalPurpose",
           'REQUESTED'::"WithdrawalStatus", ${input.idempotencyKey},
           ${input.correlationId ?? null}, now(), now()
         )
@@ -329,6 +339,7 @@ function toRecord(row: {
   amount: Prisma.Decimal;
   networkFee: Prisma.Decimal | null;
   destination: string;
+  purpose: string;
   status: string;
   idempotencyKey: string;
   signAttempts: number;
@@ -348,6 +359,7 @@ function toRecord(row: {
   return {
     ...row,
     status: row.status as WithdrawalStatus,
+    purpose: row.purpose as WithdrawalPurpose,
     // toFixed(0), not toString(): Decimal.toString can emit exponential
     // notation for large values, which then fails to parse as an integer.
     amount: row.amount.toFixed(0),

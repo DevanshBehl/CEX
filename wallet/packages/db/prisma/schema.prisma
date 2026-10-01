@@ -340,6 +340,7 @@ enum LedgerAccountType {
   user_custody_locked
   user_trading_available
   user_order_locked
+  user_trading_locked
   clearing_assets
   house_trading_fees
   chain_assets
@@ -927,4 +928,26 @@ model OrderTransition {
 
   @@index([orderId, createdAt])
   @@map("order_transitions")
+}
+
+/// APPEND-ONLY. Every pre-trade risk decision (ADR-0033, prompt_phase_s3.md rule 119).
+///
+/// Keyed by (user, clientOrderId) rather than by order, because a DENIED order
+/// never gets an order row: risk runs before the order and its hold exist. A
+/// withdrawal's decision can reference its withdrawal; an order's cannot.
+model OrderRiskDecision {
+  id             String      @id @db.Uuid
+  userId         String      @map("user_id") @db.Uuid
+  clientOrderId  String      @map("client_order_id")
+  market         String
+  verdict        RiskVerdict
+  codes          String[]
+  evaluatedRules String[]    @map("evaluated_rules")
+  inputSnapshot  Json        @map("input_snapshot")
+  outcomes       Json
+  policyVersion  String      @map("policy_version")
+  createdAt      DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([userId, createdAt])
+  @@map("order_risk_decisions")
 }

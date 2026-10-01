@@ -73,6 +73,7 @@ export {
   type CreateWithdrawalResult,
   type RetryEdge,
   type TransitionInput,
+  type WithdrawalPurpose,
   type WithdrawalRecord,
   type WithdrawalRepository,
 } from './repositories/withdrawal.repository.js';
@@ -106,3 +107,8 @@ export {
   type OrderTransitionInput,
   type OrderTransitionPatch,
 } from './repositories/order.repository.js';
+export {
+  createOrderRiskDecisionRepository,
+  type OrderRiskDecisionRepository,
+  type RecordOrderRiskDecisionInput,
+} from './repositories/order-risk-decision.repository.js';

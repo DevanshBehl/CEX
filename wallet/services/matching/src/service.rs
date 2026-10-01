@@ -114,6 +114,13 @@ impl Service {
         self.runtime.lock().await.engine().book().clone()
     }
 
+    /// The price the collar is centred on (ADR-0027): last trade, then mid,
+    /// then nothing. The gateway needs the ENGINE's answer, not its own guess,
+    /// to size a market order's hold and protection price.
+    pub async fn reference_price(&self) -> Option<crate::types::Price> {
+        self.runtime.lock().await.engine().reference_price()
+    }
+
     /// Journal, fsync, match, publish, and only then return.
     ///
     /// A successful return means the events are in the stream. An
