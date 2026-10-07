@@ -176,6 +176,14 @@ jobs:
       - name: Migrations match the schema
         run: pnpm --filter @wallet/db run migrate:check
 
+      # The matching engine, for the suites that drive the REAL one: settlement
+      # from its actual stream, and the fan-out's book against its own. Locally
+      # they skip when it is not built; here `CI` makes a missing binary a
+      # failure, because a job that is green for having skipped them proves
+      # nothing about the engine and the gateway agreeing.
+      - name: Build the matching engine
+        run: cargo build --release --manifest-path services/matching/Cargo.toml
+
       # Serial: the suites share one database, and running them concurrently
       # makes one suite's fixtures another's mystery failure.
       - run: pnpm test:integration
@@ -467,6 +475,9 @@ jobs:
       - run: pnpm build
       - run: pnpm --filter @wallet/db exec prisma migrate deploy
       - run: pnpm --filter @wallet/web exec playwright install --with-deps chromium
+      # The trading journey runs against the real engine: Playwright starts it.
+      - name: Build the matching engine
+        run: cargo build --release --manifest-path services/matching/Cargo.toml
       - run: pnpm test:e2e
         env:
           NEXT_PUBLIC_API_URL: http://localhost:4000

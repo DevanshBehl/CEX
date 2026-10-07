@@ -19,7 +19,7 @@ The first product is complete and verified end to end on Solana devnet:
 | Product                          | Status                                           | Where                            |
 | -------------------------------- | ------------------------------------------------ | -------------------------------- |
 | Custodial wallet (Atlas Wallet)  | **Implemented** — localnet + devnet verified     | [`wallet/`](wallet)              |
-| Spot exchange                    | **In progress** — orders match, trades settle into the ledger, and there is a live order book, tape and trading screen. Not verified end to end in a browser yet. See [the roadmap](#roadmap-building-the-spot-exchange) | [`wallet/`](wallet)              |
+| Spot exchange                    | **In progress** — orders match, trades settle into the ledger, and there is a live order book, tape and trading screen. See [the roadmap](#roadmap-building-the-spot-exchange) | [`wallet/`](wallet)              |
 | Derivatives (perps, futures, options) | Planned, after spot                          | —                                |
 
 ---
@@ -563,10 +563,11 @@ node scripts/verify-boundaries.mjs
 
 | Suite                        | Count | What it proves                                                                  |
 | ---------------------------- | ----: | ------------------------------------------------------------------------------- |
-| TypeScript unit              |   501 | ledger, risk engine, auth, config, Solana encoding, the MPC client contract     |
-| Integration (PostgreSQL)     |   224 | role grants, append-only triggers, deferred balance checks, full withdrawal flows |
-| End-to-end (Playwright)      |    35 | auth, deposit, withdraw, network switching, portfolio in a real browser         |
+| TypeScript unit              |   797 | ledger, risk engine, auth, config, Solana encoding, order validation, the book reducer, the socket client |
+| Integration (PostgreSQL)     |   398 | role grants, append-only triggers, deferred balance checks, withdrawal flows, settlement, market data, the socket |
+| End-to-end (Playwright)      |    43 | auth, deposit, withdraw, network switching, portfolio, and two users trading against the real engine |
 | Rust (`services/mpc`)        |   124 | DKG over real sockets, forged-share rejection, coordinator state holds no secret, threshold signing, nonce reuse refusal |
+| Rust (`services/matching`)   |    96 | determinism, replay, property tests over generated order streams, level changes rebuild the book, real-Redis egress |
 
 The integration tests use a real PostgreSQL because what they check (grants,
 triggers, deferred constraints, rollback) are properties of Postgres itself.
@@ -710,11 +711,12 @@ entry, open orders, history and fills, and transfers between wallet and trading.
 
 **What that does not mean:**
 
-- **The trading screen has not been driven end to end in a browser.** Its logic
-  is unit-tested and every API it calls is integration-tested, including against
-  the real engine, but the Playwright journey S5 calls for — allocate, trade,
-  see the fill, deallocate, against a validator — is not written. Treat the
-  screen as unverified until it is.
+- **The on-chain leg of trading has not been driven end to end.** A Playwright
+  journey runs two users trading in a real browser against the real engine: the
+  book, the tape, the fill and both balances. Its trading balances are credited
+  in the ledger by a test-only script, because a real allocation needs a
+  validator and a signer that can actually sign. Allocate and deallocate are
+  covered against a fake chain, not a real one.
 - **The liquidity is synthetic.** With the demo market maker on, every price on
   the screen was put there by a program quoting around a number it was given —
   by default, one it made up. The screen says so. The maker is off by default,
@@ -728,7 +730,8 @@ entry, open orders, history and fills, and transfers between wallet and trading.
 - **There is no halt beyond a market's status flag**, no kill switch and no
   surveillance. That is S6.
 - **Reconciliation runs and alerts; it is not published.** Proof-of-reserves is
-  S6. Check 1 has still never been exercised against a real chain in a test.
+  S6. The token balance read behind check 1 is proven on a real validator; the
+  whole check, end to end against one, is not.
 - **A halted settlement worker stops that market's trades from settling until a
   person intervenes.** It stops at an event it cannot settle rather than skip it.
   That is the correct failure, and it [needs a
@@ -796,9 +799,8 @@ entry, open orders, history and fills, and transfers between wallet and trading.
 - [x] **WebSocket feeds:** level-2 order-book snapshots with sequenced deltas,
       a public trade tape, and private order/fill updates per user.
 - [x] **OHLCV candles and 24 h tickers**, in PostgreSQL.
-- [ ] **Trading screen** in `apps/web`: order book, depth chart, price chart,
+- [x] **Trading screen** in `apps/web`: order book, depth chart, price chart,
       order entry, open orders, fills and history, in the Atlas design system.
-      _Built; not yet verified end to end in a browser._
 
 ### Phase S6 — Operations, surveillance and hardening
 

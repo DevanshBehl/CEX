@@ -187,12 +187,53 @@ export function createSolanaAdapter(options: SolanaAdapterOptions): ChainAdapter
       };
     },
 
+    /**
+     * What an address holds of an asset: lamports for SOL, base units for an
+     * SPL token.
+     *
+     * A TOKEN balance is the sum over every token account of that mint the
+     * address owns — the associated account, and any other, because a sender
+     * may have created one. An owner with no account for the mint holds zero;
+     * that is a fact about the chain, not a failure to read it.
+     *
+     * Until S5 this refused every token (ADR-0008 was written when the
+     * platform held only SOL). Reconciliation catches a read it cannot make and
+     * reports it as inconclusive, so for every token — which is every quote
+     * asset the exchange trades — the vault check and clearing check 1
+     * (ADR-0035) could never be anything but inconclusive, and never alerted.
+     */
     async getBalance(address: Address, asset: string): Promise<string> {
-      nativeAmountKey(asset);
-      const lamports = await rpc.call('getBalance', (connection) =>
-        connection.getBalance(toPublicKey(address), options.commitment),
+      const parsed = parseLedgerAssetKey(asset);
+      if (parsed.cluster !== options.cluster) {
+        throw new ChainError(
+          `asset ${asset} belongs to ${parsed.cluster}; this adapter serves ${options.cluster}`,
+        );
+      }
+      const owner = toPublicKey(address);
+      if (parsed.asset === NATIVE_ASSET) {
+        const lamports = await rpc.call('getBalance', (connection) =>
+          connection.getBalance(owner, options.commitment),
+        );
+        return BigInt(lamports).toString();
+      }
+
+      // Not a mint address: fail loudly. Zero here would be read as a shortfall.
+      const mint = toPublicKey(parsed.asset);
+      const accounts = await rpc.call('getParsedTokenAccountsByOwner', (connection) =>
+        connection.getParsedTokenAccountsByOwner(owner, { mint }, options.commitment),
       );
-      return BigInt(lamports).toString();
+      let total = 0n;
+      for (const { account } of accounts.value) {
+        // A decimal STRING from the RPC. `uiAmount` beside it is a float.
+        const amount = (
+          account.data as { parsed?: { info?: { tokenAmount?: { amount?: unknown } } } }
+        ).parsed?.info?.tokenAmount?.amount;
+        if (typeof amount !== 'string' || !/^\d+$/.test(amount)) {
+          throw new ChainError(`unreadable token account for ${asset}`);
+        }
+        total += BigInt(amount);
+      }
+      return total.toString();
     },
 
     async getConfirmation(reference: TxReference): Promise<Confirmation> {

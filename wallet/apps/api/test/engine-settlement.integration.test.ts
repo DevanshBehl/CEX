@@ -89,6 +89,8 @@ function freePort(): Promise<number> {
 }
 
 const skip = (why: string): void => {
+  // In CI a skip would be a green job that proved nothing. Fail instead.
+  if (process.env.CI) throw new Error(`${why} — and CI must not skip the real-engine tests`);
   // eslint-disable-next-line no-console
   console.warn(`\n  ${why} — skipping the real-engine settlement test.\n`);
 };

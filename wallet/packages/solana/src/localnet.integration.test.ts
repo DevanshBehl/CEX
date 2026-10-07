@@ -448,6 +448,74 @@ function signMessage(message: Uint8Array, keypair: Keypair): Uint8Array {
  * transaction is handed to the parser directly. Only a real RPC can say whether
  * `getSignaturesForAddress(owner)` returns anything, and the answer is no.
  */
+/**
+ * Reconciliation's read of a token balance, on a real chain (ADR-0035 check 1).
+ *
+ * `getBalance` refused every token until S5, so the clearing reserve check was
+ * permanently inconclusive for every quote asset the exchange trades. This is
+ * the read that check makes, against the real token program: what an address
+ * holds of a mint, exactly, and zero — not an error — when it holds none.
+ */
+describe('reading a token balance on a real validator', () => {
+  it('sums every token account an owner has for a mint, and reads none as zero', async () => {
+    if (!available) return;
+    const payer = Keypair.generate();
+    const owner = Keypair.generate();
+    const stranger = Keypair.generate();
+    const airdrop = await connection.requestAirdrop(payer.publicKey, 2 * LAMPORTS_PER_SOL);
+    await connection.confirmTransaction(airdrop, 'confirmed');
+
+    const mint = Keypair.generate();
+    const mintRent = await connection.getMinimumBalanceForRentExemption(MINT_LENGTH);
+    await sendAndConfirm(
+      new Transaction().add(
+        SystemProgram.createAccount({
+          fromPubkey: payer.publicKey,
+          newAccountPubkey: mint.publicKey,
+          lamports: mintRent,
+          space: MINT_LENGTH,
+          programId: TOKEN_PROGRAM_ID,
+        }),
+        initializeMintInstruction(mint.publicKey, payer.publicKey, 6),
+      ),
+      [payer, mint],
+    );
+    const ata = new PublicKey(
+      deriveAssociatedTokenAddress(owner.publicKey.toBase58(), mint.publicKey.toBase58()),
+    );
+    // More than 2^53, so a balance that passed through a float would show.
+    const minted = 9_007_199_254_740_993n;
+    await sendAndConfirm(
+      new Transaction().add(
+        createAtaInstruction(payer.publicKey, owner.publicKey, mint.publicKey),
+        mintToInstruction(mint.publicKey, ata, payer.publicKey, minted),
+      ),
+      [payer],
+    );
+    await waitForFinality();
+
+    const asset = `localnet:${mint.publicKey.toBase58()}`;
+    expect(await adapter().getBalance(owner.publicKey.toBase58(), asset)).toBe(minted.toString());
+    // No token account for this mint: zero, as a fact, not a refusal.
+    expect(await adapter().getBalance(stranger.publicKey.toBase58(), asset)).toBe('0');
+
+    // More arrives: the read follows the chain.
+    await sendAndConfirm(
+      new Transaction().add(mintToInstruction(mint.publicKey, ata, payer.publicKey, 7n)),
+      [payer],
+    );
+    await waitForFinality();
+    expect(await adapter().getBalance(owner.publicKey.toBase58(), asset)).toBe(
+      (minted + 7n).toString(),
+    );
+
+    // Another cluster's key is still refused rather than answered from this one.
+    await expect(
+      adapter().getBalance(owner.publicKey.toBase58(), `devnet:${mint.publicKey.toBase58()}`),
+    ).rejects.toThrow(/belongs to devnet/);
+  });
+});
+
 describe('a token transfer is discoverable only at the token account', () => {
   it('shows a TRANSFER at the token account and not at the owner', async () => {
     if (!available) return;
