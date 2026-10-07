@@ -37,6 +37,33 @@ beforeAll(async () => {
   await db.$connect();
   user = newId();
   await db.user.create({ data: { id: user } });
+  // A trading balance to hold against. Since ADR-0034 §7 the database refuses
+  // a hold the balance cannot cover, so this suite funds its user the way an
+  // allocation would — clearing asset in, trading liability out.
+  await withTransaction(db, (tx) =>
+    createLedgerRepository(tx).postTransaction(
+      {
+        kind: 'allocation',
+        referenceType: 'test',
+        referenceId: user,
+        entries: [
+          {
+            account: { ownerId: null, asset: ASSET, type: 'clearing_assets' },
+            asset: ASSET,
+            amount: '1000000000',
+            direction: 'debit',
+          },
+          {
+            account: { ownerId: user, asset: ASSET, type: 'user_trading_available' },
+            asset: ASSET,
+            amount: '1000000000',
+            direction: 'credit',
+          },
+        ],
+      },
+      tx,
+    ),
+  );
 });
 
 afterAll(async () => {

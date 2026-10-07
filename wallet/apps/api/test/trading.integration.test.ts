@@ -439,7 +439,12 @@ describe('what an order can never do', () => {
       `SELECT o.id, o.status::text AS status,
               (SELECT count(*) FROM ledger_transactions t
                  WHERE t.kind = 'order_release' AND t.reference_id = o.id::text) AS released
-         FROM orders o`,
+         FROM orders o
+        WHERE o.market = $1`,
+      // This suite's orders only. The database outlives every suite, and
+      // others deliberately build states no gateway produces — a second
+      // release against a pending order, to prove the index refuses it.
+      `${TEST_CLUSTER}:${MARKET}`,
     );
     for (const row of rows) {
       const holding = ['PENDING_ENGINE', 'OPEN', 'PARTIALLY_FILLED', 'PENDING_CANCEL'].includes(

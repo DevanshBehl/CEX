@@ -227,6 +227,24 @@ export interface WalletMetrics {
   readonly queueDepth: Gauge;
   /** labels: queue */
   readonly deadLettered: Counter;
+  /** labels: market, outcome (applied | duplicate | halted) */
+  readonly settlementEvents: Counter;
+  /** Engine timestamp to settlement commit. labels: market */
+  readonly settlementLatency: Histogram;
+  /**
+   * Sequences between the engine and the settled offset. labels: market.
+   * THE settlement health signal: a worker that is up and not advancing is
+   * worse than one that is down, because nothing alerts on "up".
+   */
+  readonly settlementLag: Gauge;
+  /** labels: market */
+  readonly settlementHalts: Counter;
+  /** labels: market */
+  readonly fillsSettled: Counter;
+  /** Quote base units. labels: asset */
+  readonly feesAccrued: Counter;
+  /** 1 = clean, 0 = drifting, -1 = inconclusive. labels: check, subject */
+  readonly reconciliationCheck: Gauge;
 }
 
 export function createWalletMetrics(registry: Metrics = createMetrics()): WalletMetrics {
@@ -246,6 +264,31 @@ export function createWalletMetrics(registry: Metrics = createMetrics()): Wallet
     deadLettered: registry.counter(
       'wallet_dead_lettered_total',
       'Jobs moved to the dead-letter queue, by queue.',
+    ),
+    settlementEvents: registry.counter(
+      'settlement_events_total',
+      'Engine events processed by settlement, by market and outcome.',
+    ),
+    settlementLatency: registry.histogram(
+      'settlement_latency_seconds',
+      'Engine timestamp to settlement commit, by market.',
+    ),
+    settlementLag: registry.gauge(
+      'settlement_offset_lag_sequences',
+      'Engine sequences not yet settled, by market.',
+    ),
+    settlementHalts: registry.counter(
+      'settlement_halts_total',
+      'Settlement workers halted at an unsettleable event, by market.',
+    ),
+    fillsSettled: registry.counter('settlement_fills_total', 'Fills settled, by market.'),
+    feesAccrued: registry.counter(
+      'settlement_fees_accrued_base_units_total',
+      'Trading fees credited to house_trading_fees, by quote asset.',
+    ),
+    reconciliationCheck: registry.gauge(
+      'reconciliation_check_result',
+      'Last result of each clearing-tier check: 1 clean, 0 drift, -1 inconclusive.',
     ),
   };
 }

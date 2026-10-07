@@ -69,6 +69,15 @@ S1 carries the fields and computes nothing:
   rate. It is not derivable from anything else in the event, and omitting it is
   the exact failure `prompt_phase_s1.md` rule 15 describes.
 - `Fill` carries the fee fields, unpopulated.
+
+  _Annotated 2026-10-01 ([ADR-0034](./0034-settlement-pipeline.md) §9): the
+  engine's `maker_fee` / `taker_fee` stay `None` permanently. The engine never sees
+  a user's tier and cannot compute a fee. Fees are computed at settlement and
+  recorded on the `fills` row, with the rate in basis points and the amount. They
+  are never written back onto the event. "Trailing 30-day volume" is a per-UTC-day
+  snapshot of the 30 days before that day, and volume is summed across markets
+  only because every market shares one quote asset._
+
 - `computeHold` includes the **worst-case** taker fee for a buy — tier 0, the
   most expensive rate — because the hold is taken before the tier is known and a
   hold that is too small is an unfillable order.

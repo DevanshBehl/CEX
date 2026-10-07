@@ -559,6 +559,37 @@ describe('trading (S3)', () => {
     expect(refusal({ ...trading, TRADING_ENGINE_URLS: '' })).toMatch(/has no engine/);
   });
 
+  // ADR-0034 §§5, 9.
+  it('defaults settlement off, and parses start keys exactly', () => {
+    expect(parseEnv(trading).TRADING_SETTLEMENT_ENABLED).toBe(false);
+    const env = parseEnv({
+      ...trading,
+      TRADING_SETTLEMENT_ENABLED: 'true',
+      TRADING_SETTLEMENT_START: 'SOL-USDC=12:3',
+    });
+    expect(env.TRADING_SETTLEMENT_START['SOL-USDC']).toBe('12:3');
+  });
+
+  it('refuses settlement without trading, and a malformed or unknown start key', () => {
+    expect(refusal({ ...valid, TRADING_SETTLEMENT_ENABLED: 'true' })).toMatch(
+      /requires TRADING_ENABLED/,
+    );
+    expect(refusal({ ...trading, TRADING_SETTLEMENT_START: 'SOL-USDC=12' })).toMatch(/SEQ:IDX/);
+    expect(refusal({ ...trading, TRADING_SETTLEMENT_START: 'BTC-USDC=0:0' })).toMatch(
+      /not in TRADING_MARKETS/,
+    );
+  });
+
+  it('refuses two quote assets while settlement is on: tier volume would not add up', () => {
+    const two = {
+      ...trading,
+      TRADING_MARKETS: 'SOL-USDC:1000:1000000:1000000:1000,SOL-USDT:1000:1000000:1000000:1000',
+      TRADING_ENGINE_URLS: 'SOL-USDC=http://127.0.0.1:8080,SOL-USDT=http://127.0.0.1:8081',
+      TRADING_SETTLEMENT_ENABLED: 'true',
+    };
+    expect(refusal(two)).toMatch(/one quote asset/);
+  });
+
   it('refuses a malformed market or caller seed', () => {
     expect(refusal({ ...trading, TRADING_MARKETS: 'sol-usdc:1:1:1:1' })).toMatch(/SYMBOL:TICK/);
     expect(refusal({ ...trading, TRADING_MARKETS: 'SOL-USDC:0:1:1:1' })).toMatch(

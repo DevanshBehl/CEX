@@ -139,3 +139,59 @@ describe('scheduled reconciliation (rules 140, 144)', () => {
     expect(clearTimer).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('clearing-tier findings (ADR-0035)', () => {
+  const clearing = (
+    status: 'clean' | 'drift' | 'inconclusive',
+    negativeTradingAccounts = 0,
+  ): ReconciliationReport => ({
+    ...report('0'),
+    clearing: {
+      runAt: new Date().toISOString(),
+      negativeTradingAccounts,
+      findings: [{ check: 'reserve', subject: 'devnet:USDC', status, detail: {} }],
+    },
+  });
+
+  function worker(next: () => ReconciliationReport) {
+    const logs = createCapturingLogger('trace');
+    const w = createReconciliationWorker({
+      run: async () => next(),
+      logger: logs.logger,
+      consecutiveCyclesBeforeAlert: 3,
+      intervalMs: 1000,
+    });
+    const alerts = (event: string) =>
+      logs
+        .text()
+        .split('\n')
+        .filter((line) => line.includes(`"${event}"`)).length;
+    return { w, alerts };
+  }
+
+  it('alerts on a clearing drift only after its streak', async () => {
+    const { w, alerts } = worker(() => clearing('drift'));
+    await w.runOnce();
+    await w.runOnce();
+    expect(alerts('reconciliation.clearing_drift_persisted')).toBe(0);
+    await w.runOnce();
+    expect(alerts('reconciliation.clearing_drift_persisted')).toBe(1);
+    expect(w.streak('reserve:devnet:USDC')).toBe(3);
+  });
+
+  it('an inconclusive reading neither extends nor resets a streak', async () => {
+    const sequence = ['drift', 'drift', 'inconclusive', 'drift'] as const;
+    let i = 0;
+    const { w, alerts } = worker(() => clearing(sequence[i++]!));
+    for (const _ of sequence) await w.runOnce();
+    expect(w.streak('reserve:devnet:USDC')).toBe(3);
+    expect(alerts('reconciliation.clearing_drift_persisted')).toBe(1);
+  });
+
+  // Rule 97: not a timing artefact, so no streak.
+  it('alerts on a negative trading balance at the FIRST reading', async () => {
+    const { w, alerts } = worker(() => clearing('clean', 1));
+    await w.runOnce();
+    expect(alerts('reconciliation.negative_trading_balance')).toBe(1);
+  });
+});

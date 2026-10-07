@@ -176,6 +176,51 @@ pub fn fill_id(seq: Seq, index: usize) -> String {
     format!("{seq}:{index}")
 }
 
+/// Each event's `idx`: its position within its command's event list, from 0
+/// (ADR-0034 §1).
+///
+/// `(seq, idx)` is the EVENT KEY a settlement consumer records its position
+/// by. It is not a fill id — `fill_id` counts fills only, and an amend emits
+/// `Cancelled` before the replacement's fills — so the two are never derived
+/// from each other.
+///
+/// `events` must start at a sequence boundary, which every caller guarantees:
+/// a command's events are published together, and re-emission pages end only
+/// at sequence boundaries (`take_whole_sequences`).
+pub fn event_indices(events: &[Event]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(events.len());
+    let mut previous: Option<Seq> = None;
+    let mut idx: u32 = 0;
+    for event in events {
+        let seq = event.seq();
+        idx = if previous == Some(seq) { idx + 1 } else { 0 };
+        previous = Some(seq);
+        out.push(idx);
+    }
+    out
+}
+
+/// Take at least `limit` events — more if needed to finish the sequence the
+/// limit fell inside.
+///
+/// A page that ended partway through a sequence would hand a consumer that
+/// assigns `idx` by position a sequence with its tail missing; the NEXT page
+/// would then start mid-sequence and every key in it would be wrong. A page
+/// may therefore exceed `limit`, by at most one command's events.
+pub fn take_whole_sequences<'a, I>(events: I, limit: usize) -> Vec<Event>
+where
+    I: IntoIterator<Item = &'a Event>,
+{
+    let mut out: Vec<Event> = Vec::new();
+    for event in events {
+        if out.len() >= limit && out.last().map(Event::seq) != Some(event.seq()) {
+            break;
+        }
+        out.push(event.clone());
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     Accepted {

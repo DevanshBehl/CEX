@@ -379,6 +379,7 @@ enum LedgerTransactionKind {
   deallocation
   order_hold
   order_release
+  trade_settle
   adjustment
 }
 
@@ -397,6 +398,7 @@ model LedgerTransaction {
   entries LedgerEntry[]
   deposit Deposit?
   heldFor Order[]       @relation("OrderHold")
+  settled Fill?         @relation("FillSettlement")
 
   @@index([referenceType, referenceId])
   @@index([kind, createdAt])
@@ -950,4 +952,97 @@ model OrderRiskDecision {
 
   @@index([userId, createdAt])
   @@map("order_risk_decisions")
+}
+
+/// APPEND-ONLY. One row per settled fill (ADR-0034 §3).
+///
+/// The row and its `trade_settle` ledger transaction are written in ONE
+/// database transaction, so one exists exactly when the other does. The fill is
+/// inserted first, `ON CONFLICT (fill_id) DO NOTHING`: zero rows back means the
+/// fill was already settled and nothing further is posted — idempotency decided
+/// by a constraint, never by a read.
+///
+/// Rates and amounts are recorded here, not on the engine's event, so a
+/// settlement is auditable years later without recomputing a tier.
+model Fill {
+  id     String @id @db.Uuid
+  /// The engine's `seq:k` (k counts FILLS). The ledger reference.
+  fillId String @unique @map("fill_id")
+  market String
+  /// The event key `(seq, idx)` (k counts EVENTS). Never derived from fillId.
+  seq    BigInt
+  idx    Int
+
+  takerOrderId String    @map("taker_order_id") @db.Uuid
+  makerOrderId String    @map("maker_order_id") @db.Uuid
+  takerUserId  String    @map("taker_user_id") @db.Uuid
+  makerUserId  String    @map("maker_user_id") @db.Uuid
+  takerSide    OrderSide @map("taker_side")
+
+  baseAsset  String  @map("base_asset")
+  quoteAsset String  @map("quote_asset")
+  /// Scaled price (ADR-0026) and base units.
+  price      Decimal @db.Decimal(38, 0)
+  qty        Decimal @db.Decimal(38, 0)
+  /// floor(price × qty / PRICE_SCALE), used for both legs.
+  notional   Decimal @db.Decimal(38, 0)
+
+  takerFeeBps Int     @map("taker_fee_bps")
+  makerFeeBps Int     @map("maker_fee_bps")
+  takerFee    Decimal @map("taker_fee") @db.Decimal(38, 0)
+  makerFee    Decimal @map("maker_fee") @db.Decimal(38, 0)
+
+  /// The command's signed timestamp, journaled with it. Fee tiers key on its
+  /// UTC day; settlement never reads a clock to price a fill.
+  engineTimestamp DateTime @map("engine_timestamp") @db.Timestamptz(3)
+
+  ledgerTransactionId String            @unique @map("ledger_transaction_id") @db.Uuid
+  settlement          LedgerTransaction @relation("FillSettlement", fields: [ledgerTransactionId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fills_ledger_transaction_fkey")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@unique([market, seq, idx])
+  @@index([takerOrderId])
+  @@index([makerOrderId])
+  @@index([takerUserId, quoteAsset, engineTimestamp])
+  @@index([makerUserId, quoteAsset, engineTimestamp])
+  @@map("fills")
+}
+
+/// The settlement worker's position, one row per (consumer, market) (ADR-0034 §5).
+///
+/// The last FULLY APPLIED event key. Advanced in the same database transaction
+/// as the work it records, so it can never be ahead of the ledger. Never read
+/// from Redis: a Redis id does not survive the stream being recreated.
+model EngineOffset {
+  consumer String
+  market   String
+  seq      BigInt
+  idx      Int
+
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@id([consumer, market])
+  @@map("engine_offsets")
+}
+
+/// APPEND-ONLY. A user's fee tier for one UTC day (ADR-0034 §9).
+///
+/// Written once — `ON CONFLICT DO NOTHING` — the first time any market's
+/// worker needs it, from fills in the 30 days before that day, and never
+/// recomputed. A fee therefore depends only on recorded data, whichever
+/// market's worker got there first.
+model FeeTierSnapshot {
+  userId     String   @map("user_id") @db.Uuid
+  quoteAsset String   @map("quote_asset")
+  day        DateTime @db.Date
+  /// Quote volume over [day − 30d, day), both sides of every fill counted.
+  volume     Decimal  @db.Decimal(38, 0)
+  tier       Int
+  makerBps   Int      @map("maker_bps")
+  takerBps   Int      @map("taker_bps")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@id([userId, quoteAsset, day])
+  @@map("fee_tier_snapshots")
 }

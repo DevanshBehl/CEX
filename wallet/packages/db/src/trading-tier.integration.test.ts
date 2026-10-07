@@ -115,24 +115,38 @@ describe('the two tiers, as the database sees them', () => {
   });
 
   /**
-   * Documents a property of the database that the design depends on NOT having.
+   * Inverted in S4, as its S3 version asked to be (ADR-0034 §7).
    *
-   * An overdrawn hold is BALANCED — a debit and a credit of the same amount — so
-   * the deferred trigger accepts it and the trading balance goes negative. No
-   * constraint refuses it. The sufficient-funds check therefore has to be the
-   * SERIALIZABLE read-then-post in the service that takes the hold, exactly as
-   * `lockFunds` is for withdrawals. If this test ever starts failing because the
-   * commit is refused, a non-negative constraint has been added — good — and
-   * this test should be inverted rather than deleted.
+   * An overdrawn hold is BALANCED — a debit and a credit of the same amount —
+   * so the per-asset trigger accepts it. Until S4 nothing else did refuse it,
+   * and the trading balance went negative. A deferred trigger now refuses to
+   * commit any transaction that leaves a user trading account below zero. The
+   * service's SERIALIZABLE read-then-post is still the primary check; this is
+   * what turns a bug in it into a refused commit.
    */
-  it('does NOT refuse an overdrawn hold, so the service must', async () => {
+  it('refuses an overdrawn hold at commit', async () => {
     const other = newId();
     const entries = [
       entry(other, 'user_trading_available', '500', 'debit'),
       entry(other, 'user_order_locked', '500', 'credit'),
     ];
-    await post('order_hold', entries);
+    await expect(post('order_hold', entries)).rejects.toThrow(/would leave trading account/);
     const balances = await ledger.getUserTradingBalances(other, CLUSTER);
-    expect(balances.find((b) => b.asset === ASSET)?.available).toBe('-500');
+    expect(balances.find((b) => b.asset === ASSET)?.available ?? '0').toBe('0');
+  });
+
+  it('judges the FINAL state, so funding and a hold in one transaction commit', async () => {
+    const other = newId();
+    // The hold's debit is checked against the balance at COMMIT, which
+    // includes the credit that funds it — whatever order the entries were
+    // inserted in.
+    await post('allocation', [
+      entry(null, 'clearing_assets', '500', 'debit'),
+      entry(other, 'user_trading_available', '500', 'credit'),
+      entry(other, 'user_trading_available', '500', 'debit'),
+      entry(other, 'user_order_locked', '500', 'credit'),
+    ]);
+    const balances = await ledger.getUserTradingBalances(other, CLUSTER);
+    expect(balances.find((b) => b.asset === ASSET)?.locked).toBe('500');
   });
 });

@@ -101,6 +101,23 @@ export interface OrderRepository {
    */
   transition(input: OrderTransitionInput, tx?: Executor): Promise<OrderRecord | null>;
   /**
+   * Record fill progress WITHOUT a status change, guarded on the status.
+   *
+   * For exactly one case (ADR-0034 §6): a partial fill on a `PENDING_CANCEL`
+   * order. Moving it to `PARTIALLY_FILLED` would forget that a cancel is in
+   * flight, and the `Cancelled` that follows could then not be recorded from
+   * the state it actually left. `filled_qty` only ever grows.
+   *
+   * Returns null when the order is not in `status`, or the quantity would not
+   * grow.
+   */
+  recordFill(
+    orderId: string,
+    status: OrderStatus,
+    filledQty: string,
+    tx?: Executor,
+  ): Promise<OrderRecord | null>;
+  /**
    * Claim the oldest order stuck in PENDING_ENGINE, for the sweeper.
    *
    * `FOR UPDATE SKIP LOCKED`, so concurrent sweepers take different rows. The
@@ -226,6 +243,18 @@ export function createOrderRepository(db: Executor): OrderRepository {
                 ${input.reason ?? null}, ${input.correlationId ?? null}, now())
       `;
       return this.findById(input.orderId, e);
+    },
+
+    async recordFill(orderId, status, filledQty, tx) {
+      const e = exec(tx);
+      const updated = await e.$executeRaw`
+        UPDATE orders
+           SET filled_qty = ${new Prisma.Decimal(filledQty)}, updated_at = now()
+         WHERE id = ${orderId}::uuid
+           AND status = ${status}::"OrderStatus"
+           AND filled_qty < ${new Prisma.Decimal(filledQty)}
+      `;
+      return updated === 0 ? null : this.findById(orderId, e);
     },
 
     async claimPendingEngine(olderThan, tx, options = {}) {

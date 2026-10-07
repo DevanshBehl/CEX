@@ -2,6 +2,7 @@ import type { ChainReader } from '@wallet/blockchain';
 import { createLedgerRepository, type PrismaClient } from '@wallet/db';
 import { logSecurityEvent, type Logger } from '@wallet/logger';
 import { IN_FLIGHT_WITHDRAWAL_STATUSES, type Cluster } from '@wallet/types';
+import type { ClearingReport } from './clearing-reconciliation.service.js';
 
 export interface AssetReconciliation {
   readonly asset: string;
@@ -69,6 +70,8 @@ export interface ReconciliationReport {
   readonly divergedUsers: number;
   /** Withdrawals that have left the ledger but not yet settled. */
   readonly withdrawalsInFlight: number;
+  /** The clearing tier (ADR-0035). Present when trading is enabled. */
+  readonly clearing?: ClearingReport;
 }
 
 export interface ReconciliationDeps {

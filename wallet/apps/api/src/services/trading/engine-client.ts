@@ -91,6 +91,14 @@ export interface EngineBook {
   readonly bestAsk: bigint | null;
 }
 
+/** Full depth at one moment, for reconciliation check 3 (ADR-0035). */
+export interface EngineDepth {
+  /** The sequence this book reflects. Compared only once settlement reaches it. */
+  readonly seq: bigint;
+  readonly bids: ReadonlyArray<{ readonly price: bigint; readonly qty: bigint }>;
+  readonly asks: ReadonlyArray<{ readonly price: bigint; readonly qty: bigint }>;
+}
+
 export interface PlaceCommand {
   readonly orderId: string;
   readonly side: EngineSide;
@@ -116,7 +124,14 @@ export interface EngineClient {
   }): Promise<EngineResult>;
   lookup(clientOrderId: string): Promise<LookupResult>;
   events(afterSeq: bigint, limit: number): Promise<readonly EngineEvent[] | null>;
+  /**
+   * The same events UNDECODED, for settlement's strict decoder. The tolerant
+   * `events` drops shapes it does not know; settlement must halt on them
+   * instead (prompt_phase_s4.md rule 103d).
+   */
+  rawEvents(afterSeq: bigint, limit: number): Promise<readonly unknown[] | null>;
   book(): Promise<EngineBook | null>;
+  depth(): Promise<EngineDepth | null>;
   health(): Promise<EngineHealth | null>;
 }
 
@@ -407,6 +422,28 @@ export function createHttpEngineClient(options: HttpEngineClientOptions): Engine
       return (body.events ?? []).map(decodeEvent).filter((e): e is EngineEvent => e !== null);
     },
 
+    async rawEvents(afterSeq, limit) {
+      const reply = await call(
+        'GET',
+        `/v1/events?after=${afterSeq.toString()}&limit=${String(limit)}`,
+        undefined,
+      );
+      if ('failure' in reply || reply.status !== 200) return null;
+      const body = reply.json as { events?: unknown };
+      return Array.isArray(body.events) ? body.events : null;
+    },
+    async depth() {
+      const reply = await call('GET', '/v1/book', undefined);
+      if ('failure' in reply || reply.status !== 200) return null;
+      const body = reply.json as {
+        seq?: unknown;
+        bids?: Array<{ price: unknown; qty: unknown }>;
+        asks?: Array<{ price: unknown; qty: unknown }>;
+      };
+      const levels = (side: Array<{ price: unknown; qty: unknown }> | undefined) =>
+        (side ?? []).map((level) => ({ price: big(level.price), qty: big(level.qty) }));
+      return { seq: big(body.seq ?? 0), bids: levels(body.bids), asks: levels(body.asks) };
+    },
     async book() {
       const reply = await call('GET', '/v1/book', undefined);
       if ('failure' in reply || reply.status !== 200) return null;

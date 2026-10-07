@@ -37,6 +37,7 @@ export const LEDGER_TRANSACTION_KINDS = [
   'deallocation',
   'order_hold',
   'order_release',
+  'trade_settle',
   'adjustment',
 ] as const;
 

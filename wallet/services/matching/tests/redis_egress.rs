@@ -13,7 +13,7 @@ use common::{market, place, request};
 use wallet_matching::config::Config;
 use wallet_matching::egress::{EventSink, RedisSink};
 use wallet_matching::service::Service;
-use wallet_matching::types::{Side, TimeInForce};
+use wallet_matching::types::{event_indices, Event, Side, TimeInForce};
 
 fn redis_url() -> Option<String> {
     std::env::var("MATCHING_TEST_REDIS_URL")
@@ -109,6 +109,74 @@ async fn every_event_reaches_the_stream_carrying_its_engine_sequence() {
     // A consumer tracks position by ENGINE sequence, never by Redis id.
     let seqs: Vec<u64> = published.iter().map(|(seq, _)| *seq).collect();
     assert_eq!(seqs, vec![1, 2, 3, 4, 5]);
+}
+
+/// Every entry carries `idx`, and `(seq, idx)` on the stream is exactly what a
+/// consumer recovering through `GET /v1/events` derives by position (ADR-0034
+/// §1). A crossing order makes one sequence emit several events.
+#[tokio::test]
+async fn every_entry_carries_its_event_key() {
+    let url = require_redis!();
+    let stream = "test:events:keys";
+    reset(&url, stream).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config(dir.path(), stream);
+    let sink = RedisSink::connect(&url, 100_000).await.expect("connect");
+    let service = Service::recover(&config, EventSink::Redis(Box::new(sink)))
+        .await
+        .expect("recover");
+
+    for (id, side) in [("s-1", Side::Sell), ("s-2", Side::Sell), ("b-1", Side::Buy)] {
+        let qty = if side == Side::Buy {
+            2_000_000
+        } else {
+            1_000_000
+        };
+        service
+            .submit(
+                1_700_000_000_000,
+                place(
+                    id,
+                    request(id, side, Some(9_000_000), qty, TimeInForce::GTC),
+                ),
+            )
+            .await
+            .expect("submit");
+    }
+
+    let client = redis::Client::open(url.as_str()).expect("client");
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("connect");
+    let entries: Vec<(String, Vec<(String, String)>)> = redis::cmd("XRANGE")
+        .arg(stream)
+        .arg("-")
+        .arg("+")
+        .query_async(&mut conn)
+        .await
+        .expect("xrange");
+    let on_stream: Vec<(u64, u32)> = entries
+        .into_iter()
+        .map(|(_, fields)| {
+            let map: std::collections::HashMap<_, _> = fields.into_iter().collect();
+            (
+                map["seq"].parse().expect("seq"),
+                map["idx"].parse().expect("idx"),
+            )
+        })
+        .collect();
+    // Sells rest (one event each); the buy fills twice and is accepted.
+    assert_eq!(on_stream, vec![(1, 0), (2, 0), (3, 0), (3, 1), (3, 2)]);
+
+    let reemitted = service.events_since(0, 1_000).await.expect("events");
+    let derived: Vec<(u64, u32)> = reemitted
+        .iter()
+        .map(Event::seq)
+        .zip(event_indices(&reemitted))
+        .collect();
+    assert_eq!(derived, on_stream);
 }
 
 /// Publication order is sequence order, which is what hand-over-hand locking in

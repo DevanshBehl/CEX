@@ -1,6 +1,8 @@
 import { logSecurityEvent, runWithContext, type Logger } from '@wallet/logger';
 import { randomUUID } from 'node:crypto';
+import type { ClearingReport } from '../services/clearing-reconciliation.service.js';
 import type { ReconciliationReport } from '../services/reconciliation.service.js';
+import type { WalletMetrics } from '../observability/metrics.js';
 
 /**
  * Reconciliation on a schedule (master-prompt rule 172, prompt_phase4.md
@@ -28,6 +30,7 @@ export interface ReconciliationWorkerDeps {
   readonly logger: Logger;
   /** How many consecutive drifting cycles before it is an alert. */
   readonly consecutiveCyclesBeforeAlert: number;
+  readonly metrics?: WalletMetrics;
   readonly intervalMs: number;
   /** Injectable for tests; defaults to the real timer. */
   readonly setTimer?: typeof setInterval;
@@ -38,13 +41,60 @@ export interface ReconciliationWorker {
   runOnce(): Promise<ReconciliationReport>;
   start(): void;
   stop(): void;
-  /** Consecutive drifting cycles per asset. Exposed for tests and operators. */
+  /**
+   * Consecutive drifting cycles per asset — or per `check:subject` for the
+   * clearing tier. Exposed for tests and operators.
+   */
   streak(asset: string): number;
 }
 
 export function createReconciliationWorker(deps: ReconciliationWorkerDeps): ReconciliationWorker {
   const streaks = new Map<string, number>();
   let timer: ReturnType<typeof setInterval> | undefined;
+
+  /**
+   * The clearing tier (ADR-0035): the same streak rule, one counter per
+   * (check, subject). An INCONCLUSIVE reading — an unreadable chain, a book
+   * read ahead of settlement — neither extends nor resets a streak: it is a
+   * reading that did not happen, not evidence either way.
+   */
+  function clearing(report: ClearingReport): void {
+    for (const finding of report.findings) {
+      const key = `${finding.check}:${finding.subject}`;
+      deps.metrics?.reconciliationCheck.set(
+        finding.status === 'clean' ? 1 : finding.status === 'drift' ? 0 : -1,
+        { check: finding.check, subject: finding.subject },
+      );
+      if (finding.status === 'inconclusive') continue;
+      const streak = finding.status === 'drift' ? (streaks.get(key) ?? 0) + 1 : 0;
+      if (streak > 0) streaks.set(key, streak);
+      else streaks.delete(key);
+      if (streak === deps.consecutiveCyclesBeforeAlert) {
+        logSecurityEvent(
+          deps.logger,
+          finding.check === 'book' || finding.check === 'order_locks'
+            ? 'reconciliation.book_mismatch_persisted'
+            : 'reconciliation.clearing_drift_persisted',
+          {
+            outcome: 'failure',
+            count: streak,
+            targetType: finding.check,
+            targetId: finding.subject,
+          },
+        );
+      }
+    }
+
+    // NOT a streak (rule 97). Nothing legitimate produces a negative trading
+    // balance and the database refuses to commit one, so the first reading is
+    // already proof — of a bypassed or broken constraint.
+    if (report.negativeTradingAccounts > 0) {
+      logSecurityEvent(deps.logger, 'reconciliation.negative_trading_balance', {
+        outcome: 'failure',
+        count: report.negativeTradingAccounts,
+      });
+    }
+  }
 
   return {
     async runOnce() {
@@ -73,6 +123,7 @@ export function createReconciliationWorker(deps: ReconciliationWorkerDeps): Reco
           }
         }
 
+        if (report.clearing) clearing(report.clearing);
         return report;
       });
     },

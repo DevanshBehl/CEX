@@ -19,7 +19,7 @@ The first product is complete and verified end to end on Solana devnet:
 | Product                          | Status                                           | Where                            |
 | -------------------------------- | ------------------------------------------------ | -------------------------------- |
 | Custodial wallet (Atlas Wallet)  | **Implemented** — localnet + devnet verified     | [`wallet/`](wallet)              |
-| Spot exchange                    | **Next** — see [the roadmap](#roadmap-building-the-spot-exchange) | —                                |
+| Spot exchange                    | **In progress** — orders match and **trades settle into the ledger**; no market data or trading UI yet. See [the roadmap](#roadmap-building-the-spot-exchange) | [`wallet/`](wallet)              |
 | Derivatives (perps, futures, options) | Planned, after spot                          | —                                |
 
 ---
@@ -614,6 +614,18 @@ triggers, deferred constraints, rollback) are properties of Postgres itself.
 | [0021](wallet/docs/adr/0021-cluster-dimension.md) | The cluster belongs in the ledger asset key |
 | [0022](wallet/docs/adr/0022-valuation-and-prices.md) | Portfolio valuation, and where a price comes from |
 | [0023](wallet/docs/adr/0023-frost-dkg.md) | FROST-Ed25519 distributed key generation — no trusted dealer |
+| [0024](wallet/docs/adr/0024-value-based-review.md) | What a person reviews, and what code approves |
+| [0025](wallet/docs/adr/0025-clob-and-two-tier-clearing.md) | A central limit order book, and two tiers of custody |
+| [0026](wallet/docs/adr/0026-fixed-point-price-and-quantity.md) | Fixed-point price and quantity |
+| [0027](wallet/docs/adr/0027-market-definitions.md) | Market definitions, ticks and collars |
+| [0028](wallet/docs/adr/0028-engine-durability-and-replay.md) | Engine durability and replay |
+| [0029](wallet/docs/adr/0029-maker-taker-fee-schedule.md) | Maker/taker fees, and the asset they are charged in |
+| [0030](wallet/docs/adr/0030-engine-transport-and-backpressure.md) | Engine transport, backpressure and re-emission |
+| [0031](wallet/docs/adr/0031-engine-authentication-and-replay.md) | Engine authentication, and the replay window |
+| [0032](wallet/docs/adr/0032-trading-tier-accounts.md) | The trading tier in the chart of accounts |
+| [0033](wallet/docs/adr/0033-pre-trade-risk-and-step-up.md) | Pre-trade risk, and what a trader must prove |
+| [0034](wallet/docs/adr/0034-settlement-pipeline.md) | The settlement pipeline: one writer, an event key, halt-don't-skip |
+| [0035](wallet/docs/adr/0035-clearing-tier-reconciliation.md) | Reconciling the clearing tier, and what each check cannot see |
 
 ### Runbooks
 
@@ -628,9 +640,12 @@ triggers, deferred constraints, rollback) are properties of Postgres itself.
 | [A withdrawal is stuck](wallet/docs/runbooks/stuck-withdrawal.md) | A withdrawal is not progressing |
 | [The ambiguous broadcast](wallet/docs/runbooks/ambiguous-broadcast.md) | It's unknown whether a transaction landed |
 | [A deposit is missing](wallet/docs/runbooks/missing-deposit.md) | A user reports a deposit that isn't credited |
-| [Reconciliation drift](wallet/docs/runbooks/reconciliation-drift.md) | Ledger and chain disagree |
+| [Reconciliation drift](wallet/docs/runbooks/reconciliation-drift.md) | Ledger and chain disagree — vault tier, and each clearing-tier alert |
 | [A stuck sweep](wallet/docs/runbooks/stuck-sweep.md) | A sweep is not progressing |
 | [Rotating SESSION_SECRET](wallet/docs/runbooks/session-secret-rotation.md) | Revoking all sessions |
+| [The matching engine cannot reach Redis](wallet/docs/runbooks/matching-egress-unavailable.md) | Order placement returns `503 egress_unconfirmed` |
+| [A corrupt matching journal](wallet/docs/runbooks/corrupt-matching-journal.md) | The engine refuses to start, or replay disagrees |
+| [A settlement worker has halted](wallet/docs/runbooks/settlement-halted.md) | A market's fills have stopped moving money |
 
 Also: the [threat model](wallet/docs/security/threat-model.md) and
 [dependency exceptions](wallet/docs/security/dependency-exceptions.md).
@@ -652,7 +667,7 @@ flowchart LR
         w["Custody · deposits · withdrawals"]
         l["Double-entry ledger"]
     end
-    subgraph spot["Next — Spot exchange"]
+    subgraph spot["In progress — Spot exchange"]
         acct["Trading accounts<br/>+ order holds"]
         oms["Order service<br/>pre-trade risk"]
         me["Matching engine<br/>Rust · price-time priority"]
@@ -665,6 +680,43 @@ flowchart LR
     me --> settle --> l
     me --> md
 ```
+
+### Where the spot exchange stands
+
+Phases S1 to S4 are built, in [`wallet/`](wallet). The lists below are the
+original plan; where the design moved, ADRs 0025 to 0035 say how and why.
+
+**Trades now move money.** A signed-in user with a trading balance can place,
+amend and cancel orders through the gateway. The Rust engine matches them. Each
+fill then becomes one balanced `trade_settle` ledger transaction — the buyer's
+and seller's legs plus both fees — applied **exactly once** however many times
+the engine's event is delivered, in the same database transaction as the
+settlement worker's position. What an order held and did not spend (a market
+buy's collar headroom, the unused part of the worst-case fee) comes back in one
+release when the order is finished. Three reconciliation checks and one alarm
+watch the clearing tier, and one of them compares the books with the chain.
+
+**What that does not mean:**
+
+- **Nobody can see the book.** There is no market data, no WebSocket feed and no
+  trading screen. Orders are placed through the API. That is S5.
+- **There is no market maker.** A book on devnet is empty unless someone fills
+  it by hand.
+- **There is no halt beyond a market's status flag**, no kill switch and no
+  surveillance. That is S6.
+- **Reconciliation runs and alerts; it is not published.** Proof-of-reserves is
+  S6.
+- **A halted settlement worker stops that market's trades from settling until a
+  person intervenes.** It stops at an event it cannot settle rather than skip it.
+  That is the correct failure, and it [needs a
+  person](wallet/docs/runbooks/settlement-halted.md).
+- **Settlement is off by default** (`TRADING_SETTLEMENT_ENABLED=false`), and
+  will not start on a market without being told where to begin.
+- **Fee tiers are fixed per user per UTC day**, from the 30 days before it, and
+  every market must share one quote asset
+  ([ADR-0034 §9](wallet/docs/adr/0034-settlement-pipeline.md)).
+- **None of it is audited.** A completed checklist is not a claim that this is
+  safe to run with real funds. It is not.
 
 ### Phase S1 — Ledger and account model for trading
 
@@ -706,12 +758,15 @@ flowchart LR
 
 ### Phase S4 — Settlement and fees
 
-- [ ] **Trades settle into the ledger** as balanced multi-leg transactions:
-      buyer and seller asset legs plus maker/taker fee legs, released from the
-      order holds in the same database transaction.
-- [ ] **Maker/taker fee schedule** with volume tiers.
-- [ ] **Reconciliation:** the engine's open-order holds versus ledger
-      `user_order_hold` balances, alerting on drift, like wallet reconciliation.
+- [x] **Trades settle into the ledger** as balanced multi-leg transactions:
+      buyer and seller asset legs plus maker/taker fee legs, consumed from the
+      order holds in the same database transaction, exactly once per fill.
+- [x] **Maker/taker fee schedule** with volume tiers, charged in the quote
+      asset and recorded, rate and amount, on every fill.
+- [x] **Reconciliation:** the clearing address against the chain, the clearing
+      equation against accrued fees, and the engine's book against ledger
+      `user_order_locked` balances, alerting on drift, like wallet
+      reconciliation.
 
 ### Phase S5 — Market data and trading UI
 

@@ -96,6 +96,12 @@ import {
   type PendingEngineSweeper,
 } from './workers/pending-engine-sweeper.js';
 import { logSecurityEvent } from '@wallet/logger';
+import { createClearingReconciliationService } from './services/clearing-reconciliation.service.js';
+import {
+  createRedisEventSource,
+  type SettlementEventSource,
+} from './services/settlement/source.js';
+import { createSettlementWorker, type SettlementWorker } from './services/settlement/worker.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -117,6 +123,11 @@ declare module 'fastify' {
       readonly orders: OrderService;
       readonly markets: MarketRegistry;
       readonly sweeper: PendingEngineSweeper;
+      /**
+       * One worker per market, keyed by symbol. Empty when settlement is off.
+       * Tests drive `runOnce()` by hand (ADR-0034).
+       */
+      readonly settlement: ReadonlyMap<string, SettlementWorker>;
     } | null;
     shutdown: () => Promise<void>;
   }
@@ -160,6 +171,13 @@ export interface BuildServerOptions {
    */
   readonly tradingEngines?: ReadonlyMap<string, EngineClient>;
   readonly startSweeper?: boolean;
+  /**
+   * Event sources keyed by market symbol, so a test can deliver exactly the
+   * events it wants — twice, out of order, with a gap — instead of whatever a
+   * stream happens to hold. Production reads the engine's Redis stream.
+   */
+  readonly settlementSources?: ReadonlyMap<string, SettlementEventSource>;
+  readonly startSettlement?: boolean;
 }
 
 /**
@@ -469,6 +487,9 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     });
   }
 
+  // Assigned in the trading block below, when trading is enabled (ADR-0035).
+  let clearingReconciliation: ReturnType<typeof createClearingReconciliationService> | null = null;
+
   const reconciliationWorker = createReconciliationWorker({
     // Every served cluster, one after another. A drift streak is counted
     // across the whole run, because an operator wants one alert saying
@@ -481,8 +502,10 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
         ...reports[0]!,
         assets: reports.flatMap((report) => report.assets),
         healthy: reports.every((report) => report.healthy),
+        ...(clearingReconciliation ? { clearing: await clearingReconciliation.run() } : {}),
       };
     },
+    metrics,
     logger,
     consecutiveCyclesBeforeAlert: config.reconciliation.alertAfterCycles,
     intervalMs: config.reconciliation.intervalMs,
@@ -589,7 +612,67 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
       engineToleranceSeconds: config.trading.engineToleranceSeconds,
     });
 
-    trading = { orders, markets, sweeper };
+    /*
+     * SETTLEMENT (ADR-0034). One worker per market — each market is its own
+     * stream and its own offset, so a halt in one stops only that one.
+     *
+     * Each worker gets its OWN Redis connection: XREADGROUP blocks, and a
+     * blocked shared connection would stall the rate limiter behind it.
+     *
+     * `init()` is awaited here, so a market with neither a stored offset nor a
+     * configured start key stops the boot rather than settling from a guess.
+     */
+    const settlement = new Map<string, SettlementWorker>();
+    if (config.trading.settlement.enabled) {
+      for (const entry of markets.entries) {
+        const source =
+          options.settlementSources?.get(entry.symbol) ??
+          createRedisEventSource({
+            redis: redis.duplicate(),
+            stream:
+              config.trading.settlement.streams[entry.symbol] ?? `orders:events:${entry.market.id}`,
+            group: 'settlement',
+            consumer: config.trading.settlement.consumer,
+          });
+        const worker = createSettlementWorker({
+          db,
+          logger,
+          metrics,
+          market: {
+            id: entry.market.id,
+            symbol: entry.symbol,
+            baseAsset: entry.market.baseAsset,
+            quoteAsset: entry.market.quoteAsset,
+          },
+          source,
+          reemitter: {
+            eventsAfter: (afterSeq, limit) => entry.engine.rawEvents(afterSeq, limit),
+            lastSeq: async () => (await entry.engine.health())?.lastSeq ?? null,
+          },
+          consumer: 'settlement',
+          ...(config.trading.settlement.start[entry.symbol]
+            ? { startKey: config.trading.settlement.start[entry.symbol] }
+            : {}),
+          batchSize: config.trading.settlement.batchSize,
+          blockMs: config.trading.settlement.blockMs,
+        });
+        await worker.init();
+        settlement.set(entry.symbol, worker);
+      }
+    }
+
+    clearingReconciliation = createClearingReconciliationService({
+      db,
+      reader: runtime.adapter,
+      cluster: runtime.cluster,
+      clearingAddress: config.trading.clearingAddress,
+      nativeAsset: runtime.assets.nativeKey,
+      reserve: BigInt(config.trading.clearingReserve),
+      markets: markets.entries,
+      consumer: 'settlement',
+    });
+
+    trading = { orders, markets, sweeper, settlement };
     tradingControllers = createTradingControllers({
       db,
       cluster: runtime.cluster,
@@ -883,6 +966,11 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     trading.sweeper.start();
   }
 
+  // Settlement runs whenever it is enabled; tests drive `runOnce()` instead.
+  if (trading && (options.startSettlement ?? true)) {
+    for (const worker of trading.settlement.values()) worker.start();
+  }
+
   // Tests call `runOnce()` by hand so a valuation is a fixed number rather
   // than whatever the market did during the assertion.
   if ((options.startPricer ?? config.prices.source !== 'none') && config.prices.source !== 'none') {
@@ -926,6 +1014,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     // closes.
     if (withdrawalTimer) clearTimeout(withdrawalTimer);
     trading?.sweeper.stop();
+    await Promise.all([...(trading?.settlement.values() ?? [])].map((worker) => worker.stop()));
     pricer.stop();
     reconciliationWorker.stop();
     await Promise.all([...clusters.values()].map(async (runtime) => runtime.indexer.stop()));

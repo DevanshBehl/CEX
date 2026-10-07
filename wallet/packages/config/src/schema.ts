@@ -355,6 +355,40 @@ export const envSchema = z
      */
     TRADING_SWEEPER_MAX_ATTEMPTS: z.coerce.number().int().positive().default(500),
 
+    // --- Phase S4: settlement (ADR-0034) and clearing reconciliation (ADR-0035) ---
+    /**
+     * Off by default. With trading on and settlement off, fills match and move
+     * no money — S3's behaviour. Turning it on requires TRADING_SETTLEMENT_START
+     * for every market that has no stored offset; the API refuses to boot
+     * otherwise rather than guess where settlement begins.
+     */
+    TRADING_SETTLEMENT_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    /**
+     * SYMBOL=SEQ:IDX — the last event key to treat as ALREADY applied, used
+     * only when a market has no row in engine_offsets. `0:0` settles the whole
+     * journal, including every S3-era fill (their holds are still held). Never
+     * defaulted (ADR-0034 §5).
+     */
+    TRADING_SETTLEMENT_START: keyValueList,
+    /** SYMBOL=STREAM, overriding the engine's default `orders:events:<market id>`. */
+    TRADING_SETTLEMENT_STREAMS: keyValueList,
+    /** This process's name in each stream's `settlement` consumer group. */
+    TRADING_SETTLEMENT_CONSUMER: z.string().min(1).default('settlement-1'),
+    TRADING_SETTLEMENT_BATCH_SIZE: z.coerce.number().int().positive().default(100),
+    TRADING_SETTLEMENT_BLOCK_MS: z.coerce.number().int().positive().default(1_000),
+    /**
+     * Base units of the NATIVE asset the house parks at the clearing address
+     * (rent, dust). Check 1 expects exactly this much more on-chain than the
+     * ledger's clearing_assets (ADR-0035).
+     */
+    TRADING_CLEARING_RESERVE: z
+      .string()
+      .regex(/^\d+$/, 'must be a non-negative integer in base units')
+      .default('0'),
+
     // --- Phase 3: risk policy (ADR-0010) ------------------------------------
     // Base units. Educational-project defaults, chosen so every rule is
     // reachable in testing rather than to model a real institution's appetite.
@@ -775,6 +809,14 @@ export const envSchema = z
       }
     }
 
+    if (env.TRADING_SETTLEMENT_ENABLED && !env.TRADING_ENABLED) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['TRADING_SETTLEMENT_ENABLED'],
+        message: 'requires TRADING_ENABLED: there is nothing to settle without a gateway',
+      });
+    }
+
     // --- Trading (S3). Validated only when enabled, and then strictly. ---
     if (env.TRADING_ENABLED) {
       if (env.CLEARING_ADDRESS.trim() === '') {
@@ -805,6 +847,39 @@ export const envSchema = z
             code: z.ZodIssueCode.custom,
             path: ['TRADING_ENGINE_URLS'],
             message: `has no engine for ${market.symbol}: one engine serves one market`,
+          });
+        }
+      }
+      // ADR-0034 §9: tier volume is summed across markets, which is only
+      // meaningful in ONE quote asset. A second quote asset needs a decision
+      // about valuation, not a configuration change.
+      // Guarded: this refinement runs even when a field failed its own parse.
+      const markets = Array.isArray(env.TRADING_MARKETS) ? env.TRADING_MARKETS : [];
+      const quotes = new Set(markets.map((m) => String(m.symbol).split('-')[1]));
+      if (env.TRADING_SETTLEMENT_ENABLED && quotes.size > 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['TRADING_MARKETS'],
+          message:
+            'must all share one quote asset while settlement is enabled: fee tiers sum ' +
+            'quote volume across markets (ADR-0034 §9)',
+        });
+      }
+      const known = new Set(markets.map((m) => m.symbol));
+      const starts =
+        typeof env.TRADING_SETTLEMENT_START === 'object' ? env.TRADING_SETTLEMENT_START : {};
+      for (const [symbol, value] of Object.entries(starts)) {
+        if (!known.has(symbol)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['TRADING_SETTLEMENT_START'],
+            message: `names ${symbol}, which is not in TRADING_MARKETS`,
+          });
+        } else if (!/^\d+:\d+$/.test(value)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['TRADING_SETTLEMENT_START'],
+            message: `${symbol} must be SEQ:IDX, the last event key already applied`,
           });
         }
       }

@@ -104,6 +104,19 @@ export const SECURITY_EVENTS = [
   'trading.sweeper_resolved',
   'trading.sweeper_dead_letter',
   'trading.allocation_requested',
+  // --- Phase S4: settlement and clearing reconciliation (ADR-0034, ADR-0035) ---
+  /** A market's settlement stopped at an event it cannot settle. Its KEY only. */
+  'settlement.halted',
+  /** A gap, a missing stream or a trimmed one was recovered through re-emission. */
+  'settlement.recovered',
+  /** A worker refused to start with neither an offset nor a configured start. */
+  'settlement.start_refused',
+  /** Clearing reserve or clearing equation drift that persisted for a streak. */
+  'reconciliation.clearing_drift_persisted',
+  /** A user trading balance below zero. Alerts on the FIRST reading. */
+  'reconciliation.negative_trading_balance',
+  /** Holds disagree with the engine's book, persisted for a streak. */
+  'reconciliation.book_mismatch_persisted',
 ] as const;
 
 export type SecurityEvent = (typeof SECURITY_EVENTS)[number];

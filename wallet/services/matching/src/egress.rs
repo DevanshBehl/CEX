@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::{MatchingError, Result};
-use crate::types::{Event, Seq};
+use crate::types::{event_indices, take_whole_sequences, Event, Seq};
 
 /// Where events go. A closed set rather than a trait object: there are exactly
 /// two, and an enum keeps the dispatch visible.
@@ -100,12 +100,13 @@ impl RedisSink {
     }
 
     async fn publish_inner(&mut self, stream: &str, events: &[Event]) -> Result<()> {
-        for event in events {
+        for (event, idx) in events.iter().zip(event_indices(events)) {
             let payload =
                 serde_json::to_string(event).map_err(|e| MatchingError::Egress(e.to_string()))?;
             // The engine sequence is a FIELD, so a consumer tracks position by
             // it and never by a Redis id — a Redis id does not survive the
-            // stream being recreated.
+            // stream being recreated. `idx` makes `(seq, idx)` a key for ONE
+            // event, which a per-event settlement offset needs (ADR-0034 §1).
             let _: String = redis::cmd("XADD")
                 .arg(stream)
                 .arg("MAXLEN")
@@ -114,6 +115,8 @@ impl RedisSink {
                 .arg("*")
                 .arg("seq")
                 .arg(event.seq())
+                .arg("idx")
+                .arg(idx)
                 .arg("event")
                 .arg(payload)
                 .query_async(&mut self.connection)
@@ -172,7 +175,15 @@ impl EventRing {
     pub fn record(&mut self, events: &[Event]) {
         for event in events {
             if self.events.len() == self.capacity {
-                self.events.pop_front();
+                // Evict WHOLE sequences. Evicting one event at a time can leave
+                // the ring holding a sequence with its head missing, which
+                // `since` would serve as if it were complete — and a consumer
+                // assigning `idx` by position would mis-key all of it.
+                if let Some(evicted) = self.events.pop_front() {
+                    while self.events.front().map(Event::seq) == Some(evicted.seq()) {
+                        self.events.pop_front();
+                    }
+                }
             }
             self.events.push_back(event.clone());
         }
@@ -186,17 +197,16 @@ impl EventRing {
     /// far and the caller must fall back to a journal replay.
     pub fn since(&self, seq: Seq, limit: usize) -> Option<Vec<Event>> {
         match self.oldest_seq() {
-            Some(oldest) if oldest <= seq + 1 => Some(
-                self.events
-                    .iter()
-                    .filter(|event| event.seq() > seq)
-                    .take(limit)
-                    .cloned()
-                    .collect(),
-            ),
-            // Empty ring: nothing has been published, so "nothing after seq" is
-            // an honest answer rather than a gap.
-            None => Some(Vec::new()),
+            Some(oldest) if oldest <= seq + 1 => Some(take_whole_sequences(
+                self.events.iter().filter(|event| event.seq() > seq),
+                limit,
+            )),
+            // Empty ring: NOT proof that nothing happened. The ring starts
+            // empty on every boot while the journal may hold everything ever
+            // matched, and answering "nothing after seq" then would hide every
+            // fill from a consumer recovering a wiped stream. The journal
+            // answers instead.
+            None => None,
             Some(_) => None,
         }
     }
@@ -279,9 +289,14 @@ pub struct Egress {
 impl Egress {
     /// Publish, then advance the watermark. In that order: a watermark that led
     /// the stream would skip an event on recovery.
+    ///
+    /// The ring is NOT recorded here. It is a cache of the JOURNAL — every
+    /// command that happened — and is recorded once per command by the caller
+    /// whether or not this succeeds. Recording only what published left a 503'd
+    /// command out of re-emission entirely, though it had happened and may have
+    /// matched.
     pub async fn publish(&mut self, seq: Seq, events: &[Event]) -> Result<()> {
         self.sink.publish(&self.stream, events).await?;
-        self.ring.record(events);
         self.watermark.advance_to(seq)?;
         Ok(())
     }

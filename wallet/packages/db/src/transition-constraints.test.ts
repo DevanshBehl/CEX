@@ -11,7 +11,9 @@ import { afterEach, describe, expect, it } from 'vitest';
  */
 const SCRIPT = resolve(__dirname, '../scripts/check-transition-constraints.mjs');
 const MIGRATIONS = resolve(__dirname, '../prisma/migrations');
-const ORDERS = '20260922110000_orders/migration.sql';
+// The LATEST migration defining `order_transition_is_legal()`: the check reads
+// only that one, so tampering with an earlier definition proves nothing.
+const ORDERS = '20261001110000_settlement/migration.sql';
 
 let dir: string | undefined;
 afterEach(() => {

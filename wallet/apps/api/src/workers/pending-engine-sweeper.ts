@@ -101,7 +101,11 @@ export function createPendingEngineSweeper(deps: PendingEngineSweeperDeps): Pend
     if (lookup.outcome === 'seen') {
       // Derive the outcome from what the engine EMITTED for that sequence, not
       // from the fact that it saw the order: it may have rejected it.
-      const events = await entry.engine.events(lookup.seq - 1n, 1_000);
+      // Re-emission pages end only at sequence boundaries (ADR-0034 §1), so
+      // the page's first sequence — this one — is whole however many events
+      // it has: a taker sweeping a deep book is not resolved from a truncated
+      // list (prompt_phase_s4.md rule 103e).
+      const events = await entry.engine.events(lookup.seq - 1n, 1);
       if (events === null) return 'deferred';
       const forSeq = events.filter((event) => event.seq === lookup.seq);
       const after = await deps.orders.resolvePending(order, forSeq, correlationId);

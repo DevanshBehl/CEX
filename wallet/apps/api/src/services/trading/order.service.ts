@@ -14,7 +14,7 @@ import {
   PolicyDeniedError,
   ValidationError,
 } from '@wallet/errors';
-import { postOrderHold, postOrderRelease } from '@wallet/ledger';
+import { postOrderHold } from '@wallet/ledger';
 import { logSecurityEvent, type Logger } from '@wallet/logger';
 import { collarBand, computeHold, validateOrder } from '@wallet/orders';
 import { evaluateOrder, toOrderClientMessage, type OrderRiskPolicy } from '@wallet/risk';
@@ -31,6 +31,7 @@ import {
 import type { EngineEvent, EngineResult } from './engine-client.js';
 import type { MarketEntry, MarketRegistry } from './markets.js';
 import { postLedger } from './ledger-post.js';
+import { releaseOutstanding } from '../settlement/holds.js';
 
 /**
  * The order gateway (prompt_phase_s3.md §§11-15).
@@ -142,9 +143,12 @@ export function createOrderService(deps: OrderServiceDeps): OrderService {
    * unique index on `order_release` is the backstop if two paths ever race from
    * different states — an order is released exactly once.
    *
-   * The amount is the whole hold. That is correct ONLY because this is called
-   * for orders the engine reports it never filled; S4 replaces it with the
-   * outstanding hold once fills consume.
+   * The amount is the order's OUTSTANDING hold, through the one release
+   * function every path shares (ADR-0034 §2) — and this path asserts that it
+   * equals the whole hold. Every caller acts on an engine response that proves
+   * the order never filled; the assertion is what proves the response was read
+   * right. If a fill has been settled against it, the commit is refused rather
+   * than a consumed hold released twice.
    */
   async function finalizeUnfilled(
     order: OrderRecord,
@@ -168,17 +172,41 @@ export function createOrderService(deps: OrderServiceDeps): OrderService {
       if (!moved) {
         return (await createOrderRepository(tx).findById(order.id, tx)) ?? order;
       }
-      await postLedger(
-        tx,
-        postOrderRelease({
-          orderId: order.id,
-          userId: order.userId,
-          asset: order.holdAsset,
-          amount: BigInt(order.holdAmount),
-        }),
-      );
+      await releaseOutstanding(tx, moved, { requireUnfilled: true });
       return moved;
     });
+  }
+
+  /**
+   * Move a resting order to PENDING_CANCEL, and do not lose to a fill.
+   *
+   * The settlement worker moves orders too (OPEN -> PARTIALLY_FILLED), so the
+   * guarded transition can lose a race it could never lose in S3. A lost race
+   * re-reads and tries again from the status it finds; only a TERMINAL status
+   * ends the request without reaching the engine. If contention outlasts the
+   * retries, the order is returned as it stands and the caller still sends the
+   * cancel: the engine's `Cancelled` can be recorded from OPEN or
+   * PARTIALLY_FILLED directly (prompt_phase_s4.md rule 103c).
+   */
+  async function toPendingCancel(
+    start: OrderRecord,
+    reason: string,
+    correlationId: string,
+  ): Promise<OrderRecord> {
+    let order = start;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (order.status !== 'OPEN' && order.status !== 'PARTIALLY_FILLED') return order;
+      const moved = await orders.transition({
+        orderId: order.id,
+        from: order.status,
+        to: 'PENDING_CANCEL',
+        reason,
+        correlationId,
+      });
+      if (moved) return moved;
+      order = (await orders.findById(order.id)) ?? order;
+    }
+    return order;
   }
 
   function touches(event: EngineEvent, orderId: string): boolean {
@@ -548,18 +576,8 @@ export function createOrderService(deps: OrderServiceDeps): OrderService {
       // OPEN / PARTIALLY_FILLED move to PENDING_CANCEL. An order already in
       // PENDING_CANCEL is re-sent: that is how an ambiguous cancel is retried,
       // and a cancel of an order the engine no longer has changes nothing.
-      let current = order;
-      if (order.status === 'OPEN' || order.status === 'PARTIALLY_FILLED') {
-        current =
-          (await orders.transition({
-            orderId,
-            from: order.status,
-            to: 'PENDING_CANCEL',
-            reason: 'cancel_requested',
-            correlationId,
-          })) ?? (await this.get(userId, orderId));
-        if (current.status !== 'PENDING_CANCEL') return current;
-      }
+      const current = await toPendingCancel(order, 'cancel_requested', correlationId);
+      if (isTerminalOrder(current.status)) return current;
 
       const result = await entry.engine.cancel(orderId, now().getTime());
       if (result.kind !== 'ok') {
@@ -580,7 +598,9 @@ export function createOrderService(deps: OrderServiceDeps): OrderService {
         cancelled.remainingQty === BigInt(current.qty)
       ) {
         // Cancelled at full quantity: never filled, so the whole hold returns.
-        return finalizeUnfilled(current, 'PENDING_CANCEL', 'CANCELLED', 'cancelled', correlationId);
+        // From whatever status it was left in: PENDING_CANCEL normally, OPEN
+        // if contention kept it from getting there (ADR-0034 §6).
+        return finalizeUnfilled(current, current.status, 'CANCELLED', 'cancelled', correlationId);
       }
       // Cancelled after fills, or `Rejected{UnknownOrder}` because it already
       // filled. Either way a fill touched this hold, and releasing it now would
@@ -657,13 +677,7 @@ export function createOrderService(deps: OrderServiceDeps): OrderService {
       });
       if (!created.created) return created.order;
 
-      const pendingOld = await orders.transition({
-        orderId: old.id,
-        from: old.status,
-        to: 'PENDING_CANCEL',
-        reason: 'amend_requested',
-        correlationId: input.correlationId,
-      });
+      const pendingOld = await toPendingCancel(old, 'amend_requested', input.correlationId);
 
       const result = await entry.engine.amend({
         orderId: old.id,
@@ -689,14 +703,14 @@ export function createOrderService(deps: OrderServiceDeps): OrderService {
         (e) => e.kind === 'cancelled' && e.orderId === old.id,
       );
       if (
-        pendingOld &&
+        !isTerminalOrder(pendingOld.status) &&
         oldCancelled &&
         oldCancelled.kind === 'cancelled' &&
         oldCancelled.remainingQty === BigInt(old.qty)
       ) {
         await finalizeUnfilled(
           pendingOld,
-          'PENDING_CANCEL',
+          pendingOld.status,
           'CANCELLED',
           'amended',
           input.correlationId,

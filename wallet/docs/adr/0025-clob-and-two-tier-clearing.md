@@ -42,6 +42,13 @@ check is the SERIALIZABLE read-then-post in the service that takes the hold, as
 `lockFunds` is for withdrawals, which makes hold-first the only defence rather
 than the earlier of two._
 
+_Superseded in part 2026-10-01 by [ADR-0034](./0034-settlement-pipeline.md) §7:
+from S4, a deferred constraint trigger refuses to commit a transaction that leaves
+a user's `user_trading_available`, `user_order_locked` or `user_trading_locked`
+balance negative. The SERIALIZABLE read-then-post is still the primary check; the
+trigger makes its failure a refused commit rather than a negative balance.
+Custody-tier accounts are unchanged._
+
 ## Decision
 
 **Custody is two tiers, and the boundary between them is an on-chain transfer.**

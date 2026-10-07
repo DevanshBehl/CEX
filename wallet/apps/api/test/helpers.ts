@@ -116,6 +116,18 @@ export interface HarnessOptions {
     readonly markets: ApiConfig['trading']['markets'];
     readonly clearingAddress: string;
     readonly risk?: Partial<ApiConfig['trading']['risk']>;
+    /**
+     * Turn settlement on (S4), reading from sources the test controls — so it
+     * can deliver an event twice, out of order, or not at all. Workers are
+     * left stopped; the test calls `runOnce()`.
+     */
+    readonly settlement?: {
+      readonly sources: ReadonlyMap<
+        string,
+        import('../src/services/settlement/source.js').SettlementEventSource
+      >;
+      readonly start?: ApiConfig['trading']['settlement']['start'];
+    };
   };
 }
 
@@ -234,6 +246,11 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
             orderRateMaxCount: 1_000,
             ...options.trading.risk,
           },
+          settlement: {
+            ...config.trading.settlement,
+            enabled: options.trading.settlement !== undefined,
+            start: options.trading.settlement?.start ?? {},
+          },
         }
       : config.trading,
     withdrawal: {
@@ -279,6 +296,9 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     startIndexer: false,
     startReconciliation: false,
     ...(options.trading ? { tradingEngines: options.trading.engines, startSweeper: false } : {}),
+    ...(options.trading?.settlement
+      ? { settlementSources: options.trading.settlement.sources, startSettlement: false }
+      : {}),
   });
   await app.ready();
 

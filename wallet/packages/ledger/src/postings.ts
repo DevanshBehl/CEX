@@ -4,6 +4,7 @@ import {
   houseChainAssets,
   houseFees,
   houseRent,
+  houseTradingFees,
   userCustodyAvailable,
   userCustodyLocked,
   userOrderLocked,
@@ -596,5 +597,95 @@ export function postTradingRelease(input: WithdrawalLockPosting): LedgerTransact
       debit(userTradingLocked(input.userId, input.asset), input.asset, input.amount),
       credit(userTradingAvailable(input.userId, input.asset), input.asset, input.amount),
     ],
+  });
+}
+
+// ---------------------------------------------------------------------------
+// S4 — settlement (ADR-0034)
+// ---------------------------------------------------------------------------
+
+export interface TradeSettlementPosting {
+  /** The engine's fill id, `seq:k`. The reference — never an order id. */
+  readonly fillId: string;
+  readonly buyerId: string;
+  readonly sellerId: string;
+  readonly baseAsset: string;
+  readonly quoteAsset: string;
+  /** Base units traded. */
+  readonly qty: Amount;
+  /**
+   * `floor(price × qty / PRICE_SCALE)`, computed ONCE by the caller and used
+   * for both legs (ADR-0026). Both sides settle for this identical integer.
+   */
+  readonly notional: Amount;
+  /** Quote units, already floored. */
+  readonly buyerFee: Amount;
+  readonly sellerFee: Amount;
+}
+
+/**
+ * Settle one fill: one ledger transaction, two independently balanced legs.
+ *
+ *   quote  debit  user_order_locked[buyer]        notional + buyer_fee
+ *          credit user_trading_available[seller]  notional − seller_fee
+ *          credit house_trading_fees              buyer_fee + seller_fee
+ *   base   debit  user_order_locked[seller]       qty
+ *          credit user_trading_available[buyer]   qty
+ *
+ * Both sides CONSUME their hold; neither releases. Whatever a hold reserved
+ * beyond this fill stays reserved until the order is terminal, when one
+ * `order_release` returns it (ADR-0034 §6).
+ *
+ * A zero-valued leg is omitted rather than posted, because the ledger refuses
+ * zero entries: a small fill can floor its fee to nothing, and a tiny one its
+ * whole notional. Omitting a leg never unbalances an asset, because every
+ * amount appears on both sides of its own asset.
+ *
+ * This builds entries only. Whether each hold can cover what it consumes is the
+ * caller's check, inside the transaction that posts this — and a database
+ * trigger refuses to commit a negative trading balance as a backstop.
+ */
+export function postTradeSettlement(input: TradeSettlementPosting): LedgerTransaction {
+  requirePositive(input.qty, input.fillId, 'trade quantity');
+  for (const [name, value] of [
+    ['notional', input.notional],
+    ['buyer fee', input.buyerFee],
+    ['seller fee', input.sellerFee],
+  ] as const) {
+    if (isNegative(value)) {
+      throw new InvalidEntryError(`trade_${name.replace(' ', '_')}_negative`, {
+        reference: input.fillId,
+      });
+    }
+  }
+  if (input.sellerFee > input.notional) {
+    // The seller would be charged more than they received. A fee is a fraction
+    // of the notional, so this is an arithmetic bug, never a market outcome.
+    throw new InvalidEntryError('trade_seller_fee_exceeds_notional', { reference: input.fillId });
+  }
+  if (input.baseAsset === input.quoteAsset) {
+    throw new InvalidEntryError('trade_assets_identical', { reference: input.fillId });
+  }
+
+  const { quoteAsset: quote, baseAsset: base } = input;
+  const buyerPays = input.notional + input.buyerFee;
+  const sellerReceives = input.notional - input.sellerFee;
+  const fees = input.buyerFee + input.sellerFee;
+
+  const entries: Entry[] = [];
+  const add = (entry: Entry): void => {
+    if (!isZero(entry.amount)) entries.push(entry);
+  };
+  add(debit(userOrderLocked(input.buyerId, quote), quote, buyerPays));
+  add(credit(userTradingAvailable(input.sellerId, quote), quote, sellerReceives));
+  add(credit(houseTradingFees(quote), quote, fees));
+  add(debit(userOrderLocked(input.sellerId, base), base, input.qty));
+  add(credit(userTradingAvailable(input.buyerId, base), base, input.qty));
+
+  return buildTransaction({
+    kind: 'trade_settle',
+    referenceType: 'fill',
+    referenceId: input.fillId,
+    entries,
   });
 }

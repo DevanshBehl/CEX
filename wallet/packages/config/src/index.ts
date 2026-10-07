@@ -163,6 +163,19 @@ export interface ApiConfig {
       readonly intervalMs: number;
       readonly maxAttempts: number;
     };
+    /** ADR-0034. */
+    readonly settlement: {
+      readonly enabled: boolean;
+      /** SYMBOL -> last key already applied, used only with no stored offset. */
+      readonly start: Readonly<Record<string, { readonly seq: bigint; readonly idx: number }>>;
+      /** SYMBOL -> stream name, where it differs from the engine's default. */
+      readonly streams: Readonly<Record<string, string>>;
+      readonly consumer: string;
+      readonly batchSize: number;
+      readonly blockMs: number;
+    };
+    /** Native base units parked at the clearing address by the house (ADR-0035). */
+    readonly clearingReserve: string;
   };
   readonly risk: {
     /**
@@ -547,6 +560,22 @@ export function toApiConfig(env: Env): ApiConfig {
         intervalMs: env.TRADING_SWEEPER_INTERVAL_MS,
         maxAttempts: env.TRADING_SWEEPER_MAX_ATTEMPTS,
       }),
+      settlement: Object.freeze({
+        enabled: env.TRADING_SETTLEMENT_ENABLED,
+        start: Object.freeze(
+          Object.fromEntries(
+            Object.entries(env.TRADING_SETTLEMENT_START).map(([symbol, value]) => {
+              const [seq, idx] = value.split(':');
+              return [symbol, Object.freeze({ seq: BigInt(seq ?? '0'), idx: Number(idx ?? '0') })];
+            }),
+          ),
+        ),
+        streams: Object.freeze({ ...env.TRADING_SETTLEMENT_STREAMS }),
+        consumer: env.TRADING_SETTLEMENT_CONSUMER,
+        batchSize: env.TRADING_SETTLEMENT_BATCH_SIZE,
+        blockMs: env.TRADING_SETTLEMENT_BLOCK_MS,
+      }),
+      clearingReserve: env.TRADING_CLEARING_RESERVE,
     }),
     risk: Object.freeze({
       assetLimits: Object.freeze(assetLimits),

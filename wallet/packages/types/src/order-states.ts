@@ -36,8 +36,12 @@ export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
 export const ORDER_TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatus[]>> = {
   PENDING_ENGINE: ['OPEN', 'PARTIALLY_FILLED', 'FILLED', 'REJECTED', 'EXPIRED', 'FAILED'],
-  OPEN: ['PARTIALLY_FILLED', 'FILLED', 'PENDING_CANCEL', 'EXPIRED'],
-  PARTIALLY_FILLED: ['FILLED', 'PENDING_CANCEL', 'EXPIRED'],
+  // `→ CANCELLED` directly (ADR-0034 §6): a `Cancelled` is a fact about the
+  // book. The gateway can lose the race to move an order to PENDING_CANCEL
+  // before the engine cancels it, and refusing to record what the engine did
+  // would only halt settlement for the market.
+  OPEN: ['PARTIALLY_FILLED', 'FILLED', 'PENDING_CANCEL', 'CANCELLED', 'EXPIRED'],
+  PARTIALLY_FILLED: ['FILLED', 'PENDING_CANCEL', 'CANCELLED', 'EXPIRED'],
   // A cancel races a fill, and the fill wins. Modelled, not treated as an error.
   PENDING_CANCEL: ['CANCELLED', 'FILLED', 'PARTIALLY_FILLED'],
 

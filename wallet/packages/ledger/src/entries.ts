@@ -52,17 +52,17 @@ export const TRANSACTION_KINDS = [
   /** Phase 4 — sweeps and fee accounting. */
   'sweep',
   'fee',
-  /**
-   * S3 — the trading tier (ADR-0025, ADR-0032).
-   *
-   * `trade_settle` is deliberately ABSENT until S4 adds the posting function
-   * that produces it. A kind with no producer is a kind somebody will invent a
-   * producer for.
-   */
+  /** S3 — the trading tier (ADR-0025, ADR-0032). */
   'allocation',
   'deallocation',
   'order_hold',
   'order_release',
+  /**
+   * S4 — one fill, settled (ADR-0034 §3). Produced ONLY by
+   * `postTradeSettlement`, and referenced by FILL id, never order id: a
+   * partially filled order settles several times.
+   */
+  'trade_settle',
   /** Operational correction. Always paired with an audit record. */
   'adjustment',
 ] as const;

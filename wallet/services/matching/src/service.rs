@@ -22,7 +22,7 @@ use crate::error::{MatchingError, Result};
 use crate::journal;
 use crate::lookup::{LookupIndex, LookupOutcome};
 use crate::runtime::{journal_path, Runtime};
-use crate::types::{Command, Event, MarketConfig, Seq};
+use crate::types::{take_whole_sequences, Command, Event, MarketConfig, Seq};
 
 pub struct Service {
     runtime: Mutex<Runtime>,
@@ -159,6 +159,33 @@ impl Service {
         }
 
         let mut egress = egress_guard;
+        // Re-emission must serve this command even if publishing it fails: it
+        // is journaled, so it happened, and it may have matched.
+        egress.ring.record(&events);
+
+        // A command whose publish failed (a 503) left the watermark behind it.
+        // Publishing THIS one now would advance the watermark past it, and its
+        // events — or the tail of them, if the failure came partway — would
+        // never reach the stream: nothing republishes below the watermark. So
+        // the gap goes first, in sequence order. A consumer sees duplicates of
+        // any events that did get through, and drops them by event key.
+        let confirmed = egress.watermark.value();
+        if confirmed + 1 < seq {
+            let gap: Vec<Event> = self
+                .events_from(&egress, confirmed)?
+                .into_iter()
+                .filter(|event| event.seq() < seq)
+                .collect();
+            if !gap.is_empty() {
+                tracing::warn!(
+                    from_seq = confirmed,
+                    to_seq = seq - 1,
+                    "republishing events an earlier publish did not confirm"
+                );
+                egress.publish(seq - 1, &gap).await?;
+            }
+        }
+
         egress.publish(seq, &events).await?;
         Ok(Submitted { seq, events })
     }
@@ -172,6 +199,15 @@ impl Service {
     ///
     /// Never takes the runtime lock: re-emission is a read and must not disturb
     /// the live engine.
+    /// Every event after `seq`, from the ring when it reaches back that far
+    /// and the journal otherwise. For a caller already holding the egress lock.
+    fn events_from(&self, egress: &Egress, seq: Seq) -> Result<Vec<Event>> {
+        match egress.ring.since(seq, usize::MAX) {
+            Some(events) => Ok(events),
+            None => self.replay_events_after(seq, usize::MAX),
+        }
+    }
+
     pub async fn events_since(&self, seq: Seq, limit: usize) -> Result<Vec<Event>> {
         if let Some(events) = self.egress.lock().await.ring.since(seq, limit) {
             return Ok(events);
@@ -187,17 +223,27 @@ impl Service {
     fn replay_events_after(&self, seq: Seq, limit: usize) -> Result<Vec<Event>> {
         let path = journal_path(&self.data_dir);
         let (_, events) = Runtime::replay_from_scratch(self.market.clone(), path)?;
-        Ok(events
-            .into_iter()
-            .filter(|event| event.seq() > seq)
-            .take(limit)
-            .collect())
+        // Pages end at sequence boundaries, exactly as the ring's do — a
+        // consumer cannot tell which path served it and must not need to.
+        Ok(take_whole_sequences(
+            events.iter().filter(|event| event.seq() > seq),
+            limit,
+        ))
     }
 
     /// Force the watermark to disk. Called on shutdown, so a clean stop does
     /// not republish on the next boot.
     pub async fn flush_watermark(&self) -> Result<()> {
         self.egress.lock().await.watermark.flush()
+    }
+
+    /// For tests: what an in-memory sink has published, in order. `None` for a
+    /// real sink, whose contents are read from Redis instead.
+    pub async fn memory_published(&self) -> Option<Vec<Event>> {
+        match &self.egress.lock().await.sink {
+            EventSink::Memory(sink) => Some(sink.published().to_vec()),
+            EventSink::Redis(_) => None,
+        }
     }
 
     /// For tests: how many records the journal holds.

@@ -112,3 +112,13 @@ export {
   type OrderRiskDecisionRepository,
   type RecordOrderRiskDecisionInput,
 } from './repositories/order-risk-decision.repository.js';
+export {
+  compareKeys,
+  createSettlementRepository,
+  type EventKey,
+  type FeeTierSnapshotRecord,
+  type HeldLevel,
+  type InsertFillInput,
+  type InsertFillResult,
+  type SettlementRepository,
+} from './repositories/settlement.repository.js';

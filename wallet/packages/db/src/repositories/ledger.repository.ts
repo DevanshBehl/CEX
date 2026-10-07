@@ -21,8 +21,11 @@ export type EntryDirection = 'debit' | 'credit';
 
 export interface ClearingTotalsRow {
   readonly asset: string;
+  /** user_trading_available + user_order_locked + user_trading_locked. */
   readonly tradingLiabilities: string;
   readonly clearingAssets: string;
+  /** Accrued fee equity: the slack in the clearing equation (ADR-0035 check 2). */
+  readonly houseTradingFees: string;
 }
 
 export interface AccountRefInput {
@@ -400,10 +403,14 @@ export function createLedgerRepository(db: Executor): LedgerRepository {
             ELSE 0 END), 0)::text AS "tradingLiabilities",
           COALESCE(SUM(CASE WHEN a.type = 'clearing_assets'
             THEN (CASE WHEN e.direction = 'debit' THEN e.amount ELSE -e.amount END)
-            ELSE 0 END), 0)::text AS "clearingAssets"
+            ELSE 0 END), 0)::text AS "clearingAssets",
+          COALESCE(SUM(CASE WHEN a.type = 'house_trading_fees'
+            THEN (CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
+            ELSE 0 END), 0)::text AS "houseTradingFees"
         FROM ledger_accounts a
         LEFT JOIN ledger_entries e ON e.account_id = a.id
-        WHERE a.type IN ('user_trading_available','user_order_locked','user_trading_locked','clearing_assets')
+        WHERE a.type IN ('user_trading_available','user_order_locked','user_trading_locked',
+                         'clearing_assets','house_trading_fees')
           AND a.asset LIKE ${`${cluster}:%`}
         GROUP BY a.asset
         ORDER BY a.asset

@@ -46,6 +46,15 @@ describe('the order state machine', () => {
     expect(canOrderTransition('PENDING_CANCEL', 'CANCELLED')).toBe(true);
   });
 
+  // ADR-0034 §6: the engine's `Cancelled` is recorded even when the gateway's
+  // own `→ PENDING_CANCEL` transition lost a race with a fill.
+  it('records an engine cancel of a resting order that never reached PENDING_CANCEL', () => {
+    expect(canOrderTransition('OPEN', 'CANCELLED')).toBe(true);
+    expect(canOrderTransition('PARTIALLY_FILLED', 'CANCELLED')).toBe(true);
+    // An order the engine has not confirmed cannot have been cancelled by it.
+    expect(canOrderTransition('PENDING_ENGINE', 'CANCELLED')).toBe(false);
+  });
+
   // A 503 is ambiguous: the order may already have matched, so the sweeper
   // must be able to move it straight to a filled state once the lookup says so.
   it('lets PENDING_ENGINE resolve to any outcome the engine can report', () => {

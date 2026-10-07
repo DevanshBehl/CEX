@@ -15,7 +15,13 @@ import { createLogger } from '@wallet/logger';
 import { createPrismaClient } from '@wallet/db';
 import { createSolanaAdapter, NATIVE_DECIMALS, solanaChainId } from '@wallet/solana';
 import type { Cluster } from '@wallet/types';
+import {
+  createClearingReconciliationService,
+  type ClearingReport,
+} from '../services/clearing-reconciliation.service.js';
 import { createReconciliationService } from '../services/reconciliation.service.js';
+import { createHttpEngineClient, engineKeyFromSeed } from '../services/trading/engine-client.js';
+import { createMarketRegistry } from '../services/trading/markets.js';
 
 const config = loadApiConfigOrExit();
 const logger = createLogger({ level: config.shared.logLevel });
@@ -69,6 +75,43 @@ async function main(): Promise<void> {
 
   const report = await reconciliation.run();
 
+  /*
+   * The clearing tier (ADR-0035), when this deployment trades on this cluster.
+   * The scheduled worker alerts on these checks by name only; this is where a
+   * person reads the numbers behind an alert.
+   */
+  let clearing: ClearingReport | null = null;
+  if (config.trading.enabled && cluster === config.chain.defaultCluster) {
+    const key = engineKeyFromSeed(config.trading.engineCallerSeed);
+    const markets = createMarketRegistry({
+      cluster,
+      assets: chain.assets,
+      markets: config.trading.markets,
+      engines: new Map(
+        config.trading.markets.map((market) => [
+          market.symbol,
+          createHttpEngineClient({
+            market: market.symbol,
+            baseUrl: config.trading.engineUrls[market.symbol] ?? '',
+            key,
+            timeoutMs: config.trading.engineTimeoutMs,
+          }),
+        ]),
+      ),
+      logger,
+    });
+    clearing = await createClearingReconciliationService({
+      db,
+      reader: adapter,
+      cluster,
+      clearingAddress: config.trading.clearingAddress,
+      nativeAsset: chain.assets.nativeKey,
+      reserve: BigInt(config.trading.clearingReserve),
+      markets: markets.entries,
+      consumer: 'settlement',
+    }).run();
+  }
+
   // Written to stdout for a human, not through the structured logger: the
   // logger's allowlist deliberately excludes amounts, and this report is
   // nothing but amounts.
@@ -89,15 +132,36 @@ async function main(): Promise<void> {
     out.write(`\n    ${asset.explanation}\n`);
   }
 
+  // One reading. The scheduled worker alerts on a STREAK of these, because an
+  // allocation in flight makes a single drifting reading normal — except a
+  // negative trading balance, which nothing legitimate produces.
+  let clearingClean = true;
+  if (clearing) {
+    out.write(`\n${'-'.repeat(72)}\n  Clearing tier (ADR-0035)\n`);
+    for (const finding of clearing.findings) {
+      if (finding.status === 'drift') clearingClean = false;
+      out.write(`\n  ${finding.check.padEnd(12)} ${finding.subject}  ${finding.status}\n`);
+      for (const [name, value] of Object.entries(finding.detail)) {
+        out.write(`    ${name.padEnd(24)} ${value.padStart(24)}\n`);
+      }
+    }
+    if (clearing.negativeTradingAccounts > 0) clearingClean = false;
+    out.write(
+      `\n  negative trading balances  ${String(clearing.negativeTradingAccounts)}` +
+        `${clearing.negativeTradingAccounts > 0 ? '  <- ALERT ON THE FIRST READING' : ''}\n`,
+    );
+  }
+
+  const healthy = report.healthy && clearingClean;
   out.write(`\n${'-'.repeat(72)}\n`);
   out.write(
-    report.healthy
+    healthy
       ? '  RECONCILED\n\n'
       : '  DRIFT DETECTED — see docs/runbooks/reconciliation-drift.md\n\n',
   );
 
   await db.$disconnect();
-  process.exit(report.healthy ? 0 : 1);
+  process.exit(healthy ? 0 : 1);
 }
 
 main().catch((error: unknown) => {
