@@ -19,6 +19,39 @@ export const marketSymbolSchema = z
   .string()
   .regex(/^[A-Z0-9]+-[A-Z0-9]+$/, 'market must be BASE-QUOTE in uppercase');
 
+/**
+ * The 24-hour ticker (ADR-0036 §7). Defined here, beside the market it
+ * describes, because a market view carries one.
+ */
+export const tickerSchema = z
+  .object({
+    market: marketSymbolSchema,
+    /** The most recent trade EVER, or null for a market that never traded. */
+    lastPrice: priceSchema.nullable(),
+    lastTradeTime: z.string().datetime().nullable(),
+    /** Null when nothing traded in the window. Never zero: zero is a price. */
+    open24h: priceSchema.nullable(),
+    high24h: priceSchema.nullable(),
+    low24h: priceSchema.nullable(),
+    baseVolume24h: baseUnitsSchema,
+    quoteVolume24h: baseUnitsSchema,
+  })
+  .strict();
+export type TickerView = z.infer<typeof tickerSchema>;
+
+/**
+ * Whether fills in this market are reaching the ledger — coarse, on purpose.
+ *
+ *   live      settlement is applying events as they arrive
+ *   delayed   it is behind the engine; fills will settle, later
+ *   halted    it stopped at an event it could not settle and needs a person
+ *   disabled  this deployment does not settle: fills move no balance
+ *
+ * The halted event and its reason are for operators only.
+ */
+export const SETTLEMENT_STATES = ['live', 'delayed', 'halted', 'disabled'] as const;
+export type SettlementState = (typeof SETTLEMENT_STATES)[number];
+
 export const marketSchema = z.object({
   symbol: marketSymbolSchema,
   baseAsset: assetSchema,
@@ -33,6 +66,9 @@ export const marketSchema = z.object({
   minNotional: baseUnitsSchema,
   collarBps: z.number().int().positive(),
   status: z.enum(MARKET_STATUSES),
+  settlement: z.enum(SETTLEMENT_STATES),
+  /** Null when this deployment records no market data. */
+  ticker: tickerSchema.nullable(),
 });
 export type MarketView = z.infer<typeof marketSchema>;
 
@@ -111,7 +147,19 @@ export type OrderView = z.infer<typeof orderSchema>;
 export const orderResponseSchema = z.object({ order: orderSchema });
 export type OrderResponse = z.infer<typeof orderResponseSchema>;
 
-export const listOrdersResponseSchema = z.object({ orders: z.array(orderSchema) });
+export const listOrdersResponseSchema = z.object({
+  orders: z.array(orderSchema),
+  /** Pass as `before` for the next page. Null when this was the last. */
+  nextBefore: z.string().nullable(),
+});
+
+export const listOrdersQuerySchema = z.object({
+  market: marketSymbolSchema.optional(),
+  /** `open` is what rests or is in flight; `all` is the history. */
+  status: z.enum(['open', 'all']).default('all'),
+  limit: z.coerce.number().int().min(1).max(200).default(100),
+  before: z.string().max(128).optional(),
+});
 export type ListOrdersResponse = z.infer<typeof listOrdersResponseSchema>;
 
 export const cancelAllResponseSchema = z.object({

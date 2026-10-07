@@ -11,7 +11,7 @@ use crate::engine::Engine;
 use crate::error::Result;
 use crate::journal::{self, Journal};
 use crate::snapshot::{self, Snapshot};
-use crate::types::{Command, Event, MarketConfig, SequencedCommand};
+use crate::types::{Command, Event, LevelChange, MarketConfig, SequenceOutput, SequencedCommand};
 
 pub struct Runtime {
     engine: Engine,
@@ -52,6 +52,9 @@ impl Runtime {
         for command in replayed.commands {
             let _ = engine.apply(command);
         }
+        // Recovery touched every level it replayed. None of that belongs to
+        // the first live command.
+        let _ = engine.take_level_changes();
 
         Ok(Self {
             engine,
@@ -79,6 +82,15 @@ impl Runtime {
     /// The journal write happens BEFORE `apply`, so an event this returns is
     /// always backed by a durable command.
     pub fn submit(&mut self, timestamp_ms: i64, command: Command) -> Result<Vec<Event>> {
+        Ok(self.submit_with_levels(timestamp_ms, command)?.0)
+    }
+
+    /// `submit`, and the levels the command left changed (ADR-0036 §1).
+    pub fn submit_with_levels(
+        &mut self,
+        timestamp_ms: i64,
+        command: Command,
+    ) -> Result<(Vec<Event>, Vec<LevelChange>)> {
         let sequenced = SequencedCommand {
             seq: self.next_seq(),
             timestamp_ms,
@@ -87,11 +99,12 @@ impl Runtime {
         self.journal.append(&sequenced)?;
         let seq = sequenced.seq;
         let events = self.engine.apply(sequenced);
+        let levels = self.engine.take_level_changes();
 
         if seq.saturating_sub(self.last_snapshot_seq) >= self.snapshot_every_n {
             self.write_snapshot()?;
         }
-        Ok(events)
+        Ok((events, levels))
     }
 
     pub fn write_snapshot(&mut self) -> Result<()> {
@@ -120,5 +133,29 @@ impl Runtime {
             events.extend(engine.apply(command));
         }
         Ok((engine, events))
+    }
+
+    /// The same replay, kept per command, with each command's level changes.
+    ///
+    /// What republishing needs: the engine is deterministic, so the levels a
+    /// replayed command changes are the levels it changed the first time.
+    pub fn replay_with_levels(
+        market: MarketConfig,
+        journal_file: impl AsRef<Path>,
+    ) -> Result<Vec<SequenceOutput>> {
+        let replayed = journal::replay(journal_file, 0, false)?;
+        let mut engine = Engine::new(market);
+        let mut out = Vec::with_capacity(replayed.commands.len());
+        for command in replayed.commands {
+            let seq = command.seq;
+            let events = engine.apply(command);
+            let levels = engine.take_level_changes();
+            out.push(SequenceOutput {
+                seq,
+                events,
+                levels,
+            });
+        }
+        Ok(out)
     }
 }

@@ -5,11 +5,11 @@
 //! execution order total and therefore reproducible, which is what every
 //! property in this crate depends on.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{OrderId, Price, Qty, Seq, Side, StpMode};
+use crate::types::{LevelChange, OrderId, Price, Qty, Seq, Side, StpMode};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestingOrder {
@@ -176,6 +176,24 @@ impl Ladder {
     }
 }
 
+/// The levels touched since they were last asked for (ADR-0036 §1).
+///
+/// Bookkeeping ABOUT the book, not part of it. It is never serialised, so the
+/// snapshot format is untouched, and it never takes part in equality: two
+/// books holding the same orders are the same book whichever was asked last.
+/// `true` sorts bids after asks, and prices ascend within a side — a fixed
+/// order, because what is reported from this set reaches a consumer.
+#[derive(Debug, Clone, Default)]
+struct Touched(BTreeSet<(bool, Price)>);
+
+impl PartialEq for Touched {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Touched {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderBook {
     bids: Ladder,
@@ -187,6 +205,8 @@ pub struct OrderBook {
     /// where output depends on it is a determinism bug.
     orders: HashMap<OrderId, RestingOrder>,
     last_trade_price: Option<Price>,
+    #[serde(skip)]
+    touched: Touched,
 }
 
 impl Default for OrderBook {
@@ -202,7 +222,36 @@ impl OrderBook {
             asks: Ladder::new(Side::Sell),
             orders: HashMap::new(),
             last_trade_price: None,
+            touched: Touched::default(),
         }
+    }
+
+    fn touch(&mut self, side: Side, price: Price) {
+        self.touched.0.insert((side == Side::Buy, price));
+    }
+
+    /// Every level whose quantity may have changed since the last call, with
+    /// its quantity NOW. Clears the record.
+    ///
+    /// Read from the ladders themselves rather than accumulated alongside
+    /// them: the reported quantity is the book's own total, so there is no
+    /// second tally that could drift from the first.
+    pub fn take_level_changes(&mut self) -> Vec<LevelChange> {
+        let touched = std::mem::take(&mut self.touched.0);
+        touched
+            .into_iter()
+            .map(|(is_buy, price)| {
+                let side = if is_buy { Side::Buy } else { Side::Sell };
+                LevelChange {
+                    side,
+                    price,
+                    qty: self
+                        .ladder_for(side)
+                        .level(price)
+                        .map_or(0, Level::total_qty),
+                }
+            })
+            .collect()
     }
 
     pub fn bids(&self) -> &Ladder {
@@ -269,6 +318,7 @@ impl OrderBook {
         let id = order.order_id.clone();
         self.orders.insert(id.clone(), order);
         self.ladder(side).push_back(price, id, qty);
+        self.touch(side, price);
         debug_assert!(self.invariants_hold());
     }
 
@@ -329,6 +379,7 @@ impl OrderBook {
         // `reduce` may drop the level outright, in which case `pop_front`
         // below is a no-op — which is correct, since the queue went with it.
         self.ladder(side).reduce(price, qty);
+        self.touch(side, price);
         if remaining == 0 {
             self.orders.remove(&id);
             self.ladder(side).pop_front(price);
@@ -343,6 +394,7 @@ impl OrderBook {
     pub fn remove(&mut self, order_id: &str) -> Option<RestingOrder> {
         let order = self.orders.remove(order_id)?;
         self.ladder(order.side).forget(order.price, order.remaining);
+        self.touch(order.side, order.price);
         debug_assert!(self.invariants_hold());
         Some(order)
     }

@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { canOrderTransition, type OrderStatus } from '@wallet/types';
-import type { Executor } from '../transaction.js';
+import { userChanges } from '../change-bus.js';
+import { afterCommit, type Executor } from '../transaction.js';
 import { newId } from '../ids.js';
 
 /**
@@ -137,6 +138,27 @@ export interface OrderRepository {
     limit: number,
     tx?: Executor,
   ): Promise<OrderRecord[]>;
+  /**
+   * One page of a user's orders, newest first, with a cursor — so a history
+   * can be read to its end rather than silently stopping at the newest N.
+   */
+  pageForUser(
+    userId: string,
+    options: {
+      readonly market?: string;
+      readonly limit: number;
+      readonly openOnly?: boolean;
+      readonly before?: { readonly createdAt: Date; readonly id: string };
+    },
+    tx?: Executor,
+  ): Promise<OrderRecord[]>;
+  /** A user's orders touched at or after `since`, oldest change first. */
+  listChangedSince(
+    userId: string,
+    since: Date,
+    limit: number,
+    tx?: Executor,
+  ): Promise<OrderRecord[]>;
   countOpenForUser(userId: string, market: string, tx?: Executor): Promise<number>;
   /** Creation times of this user's orders since `since`, for the order-rate rule. */
   listPlacementTimes(userId: string, since: Date, tx?: Executor): Promise<Date[]>;
@@ -199,6 +221,7 @@ export function createOrderRepository(db: Executor): OrderRepository {
       `;
 
       const created = await e.order.findUniqueOrThrow({ where: { id } });
+      afterCommit(e, () => userChanges.publish([input.userId]));
       return { outcome: 'created', order: toRecord(created), holdLedgerTransactionId };
     },
 
@@ -242,7 +265,11 @@ export function createOrderRepository(db: Executor): OrderRepository {
                 ${input.from}::"OrderStatus", ${input.to}::"OrderStatus",
                 ${input.reason ?? null}, ${input.correlationId ?? null}, now())
       `;
-      return this.findById(input.orderId, e);
+      const moved = await this.findById(input.orderId, e);
+      // THE one place a transition is written, so the one place its owner is
+      // told — whoever made it: gateway, settlement or sweeper (ADR-0037 §7).
+      if (moved) afterCommit(e, () => userChanges.publish([moved.userId]));
+      return moved;
     },
 
     async recordFill(orderId, status, filledQty, tx) {
@@ -254,7 +281,10 @@ export function createOrderRepository(db: Executor): OrderRepository {
            AND status = ${status}::"OrderStatus"
            AND filled_qty < ${new Prisma.Decimal(filledQty)}
       `;
-      return updated === 0 ? null : this.findById(orderId, e);
+      if (updated === 0) return null;
+      const patched = await this.findById(orderId, e);
+      if (patched) afterCommit(e, () => userChanges.publish([patched.userId]));
+      return patched;
     },
 
     async claimPendingEngine(olderThan, tx, options = {}) {
@@ -299,6 +329,37 @@ export function createOrderRepository(db: Executor): OrderRepository {
       const rows = await exec(tx).order.findMany({
         where: { userId, ...(market === undefined ? {} : { market }) },
         orderBy: { createdAt: 'desc' },
+        take: limit,
+      });
+      return rows.map(toRecord);
+    },
+
+    async pageForUser(userId, options, tx) {
+      const before = options.before;
+      const rows = await exec(tx).order.findMany({
+        where: {
+          userId,
+          ...(options.market === undefined ? {} : { market: options.market }),
+          ...(options.openOnly ? { status: { in: [...OPEN_STATUSES] } } : {}),
+          ...(before
+            ? {
+                OR: [
+                  { createdAt: { lt: before.createdAt } },
+                  { createdAt: before.createdAt, id: { lt: before.id } },
+                ],
+              }
+            : {}),
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: options.limit,
+      });
+      return rows.map(toRecord);
+    },
+
+    async listChangedSince(userId, since, limit, tx) {
+      const rows = await exec(tx).order.findMany({
+        where: { userId, updatedAt: { gte: since } },
+        orderBy: { updatedAt: 'asc' },
         take: limit,
       });
       return rows.map(toRecord);

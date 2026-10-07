@@ -19,14 +19,22 @@
 //! is sequence order. Matching stays concurrent with publishing; publishing
 //! stays serial with itself.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::{MatchingError, Result};
-use crate::types::{event_indices, take_whole_sequences, Event, Seq};
+use crate::types::{event_indices, take_whole_sequences, Event, LevelChange, Seq};
+
+/// Level changes by the sequence that produced them (ADR-0036 §1).
+///
+/// A sequence ABSENT from the map has unknown level changes, which is not the
+/// same as none: its stream entry carries no `levels` field, and a consumer
+/// reads that as "take a new snapshot". A sequence that changed nothing is
+/// present with an empty list.
+pub type LevelsBySeq = BTreeMap<Seq, Vec<LevelChange>>;
 
 /// Where events go. A closed set rather than a trait object: there are exactly
 /// two, and an enum keeps the dispatch visible.
@@ -41,10 +49,15 @@ pub enum EventSink {
 }
 
 impl EventSink {
-    pub async fn publish(&mut self, stream: &str, events: &[Event]) -> Result<()> {
+    pub async fn publish(
+        &mut self,
+        stream: &str,
+        events: &[Event],
+        levels: &LevelsBySeq,
+    ) -> Result<()> {
         match self {
-            EventSink::Redis(sink) => sink.publish(stream, events).await,
-            EventSink::Memory(sink) => sink.publish(events),
+            EventSink::Redis(sink) => sink.publish(stream, events, levels).await,
+            EventSink::Memory(sink) => sink.publish(events, levels),
         }
     }
 
@@ -93,21 +106,42 @@ impl RedisSink {
         })
     }
 
-    async fn publish(&mut self, stream: &str, events: &[Event]) -> Result<()> {
-        tokio::time::timeout(self.timeout, self.publish_inner(stream, events))
+    async fn publish(
+        &mut self,
+        stream: &str,
+        events: &[Event],
+        levels: &LevelsBySeq,
+    ) -> Result<()> {
+        tokio::time::timeout(self.timeout, self.publish_inner(stream, events, levels))
             .await
             .map_err(|_| MatchingError::Egress("publish timed out".into()))?
     }
 
-    async fn publish_inner(&mut self, stream: &str, events: &[Event]) -> Result<()> {
-        for (event, idx) in events.iter().zip(event_indices(events)) {
+    async fn publish_inner(
+        &mut self,
+        stream: &str,
+        events: &[Event],
+        levels: &LevelsBySeq,
+    ) -> Result<()> {
+        for (position, (event, idx)) in events.iter().zip(event_indices(events)).enumerate() {
             let payload =
                 serde_json::to_string(event).map_err(|e| MatchingError::Egress(e.to_string()))?;
+            // On the LAST entry of each sequence, so a consumer applies the
+            // levels only once it has seen every event of that sequence.
+            let last_of_seq = events.get(position + 1).map(Event::seq) != Some(event.seq());
+            let level_payload = match levels.get(&event.seq()) {
+                Some(changes) if last_of_seq => Some(
+                    serde_json::to_string(changes)
+                        .map_err(|e| MatchingError::Egress(e.to_string()))?,
+                ),
+                _ => None,
+            };
             // The engine sequence is a FIELD, so a consumer tracks position by
             // it and never by a Redis id — a Redis id does not survive the
             // stream being recreated. `idx` makes `(seq, idx)` a key for ONE
             // event, which a per-event settlement offset needs (ADR-0034 §1).
-            let _: String = redis::cmd("XADD")
+            let mut command = redis::cmd("XADD");
+            command
                 .arg(stream)
                 .arg("MAXLEN")
                 .arg("~")
@@ -118,7 +152,13 @@ impl RedisSink {
                 .arg("idx")
                 .arg(idx)
                 .arg("event")
-                .arg(payload)
+                .arg(payload);
+            // Additive, like `idx` was: settlement reads `seq`, `idx` and
+            // `event` and ignores the rest.
+            if let Some(level_payload) = level_payload {
+                command.arg("levels").arg(level_payload);
+            }
+            let _: String = command
                 .query_async(&mut self.connection)
                 .await
                 .map_err(|e| MatchingError::Egress(e.to_string()))?;
@@ -130,6 +170,7 @@ impl RedisSink {
 #[derive(Default)]
 pub struct MemorySink {
     published: Vec<Event>,
+    published_levels: Vec<(Seq, Vec<LevelChange>)>,
     fail_next: usize,
 }
 
@@ -147,12 +188,27 @@ impl MemorySink {
         &self.published
     }
 
-    fn publish(&mut self, events: &[Event]) -> Result<()> {
+    /// The `levels` field of each sequence's last entry, in publication order.
+    pub fn published_levels(&self) -> &[(Seq, Vec<LevelChange>)] {
+        &self.published_levels
+    }
+
+    fn publish(&mut self, events: &[Event], levels: &LevelsBySeq) -> Result<()> {
         if self.fail_next > 0 {
             self.fail_next -= 1;
             return Err(MatchingError::Egress("injected failure".into()));
         }
         self.published.extend_from_slice(events);
+        let mut previous = None;
+        for seq in events.iter().map(Event::seq) {
+            if previous == Some(seq) {
+                continue;
+            }
+            previous = Some(seq);
+            if let Some(changes) = levels.get(&seq) {
+                self.published_levels.push((seq, changes.clone()));
+            }
+        }
         Ok(())
     }
 }
@@ -161,6 +217,9 @@ impl MemorySink {
 /// behind is served without touching disk (prompt_phase_s2.md §9).
 pub struct EventRing {
     events: VecDeque<Event>,
+    /// Level changes for the sequences `events` still holds, so a command
+    /// republished from the ring carries them as it did the first time.
+    levels: LevelsBySeq,
     capacity: usize,
 }
 
@@ -168,8 +227,29 @@ impl EventRing {
     pub fn new(capacity: usize) -> Self {
         Self {
             events: VecDeque::new(),
+            levels: LevelsBySeq::new(),
             capacity,
         }
+    }
+
+    /// Record one command's events together with the levels it changed.
+    pub fn record_with_levels(&mut self, events: &[Event], levels: &[LevelChange]) {
+        self.record(events);
+        if let Some(seq) = events.first().map(Event::seq) {
+            self.levels.insert(seq, levels.to_vec());
+        }
+        // Nothing older than the oldest event still held.
+        if let Some(oldest) = self.oldest_seq() {
+            self.levels = self.levels.split_off(&oldest);
+        }
+    }
+
+    /// The recorded level changes for every sequence after `seq`.
+    pub fn levels_since(&self, seq: Seq) -> LevelsBySeq {
+        self.levels
+            .range(seq + 1..)
+            .map(|(seq, changes)| (*seq, changes.clone()))
+            .collect()
     }
 
     pub fn record(&mut self, events: &[Event]) {
@@ -295,8 +375,13 @@ impl Egress {
     /// whether or not this succeeds. Recording only what published left a 503'd
     /// command out of re-emission entirely, though it had happened and may have
     /// matched.
-    pub async fn publish(&mut self, seq: Seq, events: &[Event]) -> Result<()> {
-        self.sink.publish(&self.stream, events).await?;
+    pub async fn publish(
+        &mut self,
+        seq: Seq,
+        events: &[Event],
+        levels: &LevelsBySeq,
+    ) -> Result<()> {
+        self.sink.publish(&self.stream, events, levels).await?;
         self.watermark.advance_to(seq)?;
         Ok(())
     }

@@ -77,7 +77,7 @@ const singles: Arena[] = [];
 /** Two markets sharing one quote asset, so tier volume crosses them. */
 const pairs: Array<{ sol: Arena; alt: Arena }> = [];
 
-const SINGLE_MARKETS = 32;
+const SINGLE_MARKETS = 36;
 const RULES = { tickSize: '1000', lotSize: '1000000', minNotional: '1000', collarBps: 5_000 };
 
 beforeAll(async () => {
@@ -755,6 +755,86 @@ describe('one writer of fill-driven state', () => {
     expect((await orderOf(maker.id)).status).toBe('CANCELLED');
     expect(await released(maker.id)).toEqual([600_000_000n]);
     expect((await balance(seller.userId, a.base)).locked).toBe(0n);
+  });
+
+  // Found by driving the REAL engine with a generated flow (S5): until
+  // settlement applies an IOC's command, the gateway shows it OPEN, and its
+  // owner can cancel an order the engine has already expired.
+  it('an IOC that partly filled, cancelled before settlement reached it, ends EXPIRED with its remainder back', async () => {
+    const a = market();
+    const seller = await trader(a);
+    const buyer = await trader(a);
+    await sell(a, seller, { qty: '400000000' });
+    await settle(a);
+    // Fills 0.4 and expires the other 0.6, in one engine command.
+    const taker = await buy(a, buyer, { timeInForce: 'IOC' });
+    expect(taker.status).toBe('OPEN');
+
+    // The book has nothing of it left: Rejected{UnknownOrder}.
+    expect(await cancel(buyer, taker.id)).toBe('PENDING_CANCEL');
+
+    await settle(a);
+    expect(worker(a).status().halted).toBeNull();
+    const order = await orderOf(taker.id);
+    expect(order.status).toBe('EXPIRED');
+    expect(order.filledQty).toBe('400000000');
+    expect(await transitions(taker.id)).toContain('PENDING_CANCEL->EXPIRED');
+    // Held for a whole SOL; consumed 0.4 of it at the taker rate.
+    const consumed = 60_000_000n + 120_000n;
+    expect(await released(taker.id)).toEqual([BUY_HOLD - consumed]);
+    expect(await balance(buyer.userId, a.quote)).toEqual({
+      available: FUNDS.quote - consumed,
+      locked: 0n,
+    });
+  });
+
+  // The amend path shares `toPendingCancel` with cancel, and S5 puts an amend
+  // button on a live book (prompt_phase_s5.md rule 192).
+  it('an amend whose first guarded transition loses to a fill still replaces the order', async () => {
+    const a = market();
+    const seller = await trader(a);
+    const buyer = await trader(a);
+    const old = await sell(a, seller);
+    await settle(a);
+    await buy(a, buyer, { qty: '400000000' });
+
+    const orders = h.app.trading!.orders;
+    const read = orders.get.bind(orders);
+    orders.get = async (userId, orderId) => {
+      const stale = await read(userId, orderId);
+      await settle(a);
+      return stale;
+    };
+    let replacement;
+    try {
+      replacement = await orders.amend({
+        userId: seller.userId,
+        orderId: old.id,
+        clientOrderId: `settle-${RUN}-amend-race`,
+        price: '151000000',
+        qty: '600000000',
+        correlationId: 'test',
+      });
+    } finally {
+      orders.get = read;
+    }
+
+    // It did not stop at the lost race: it retried from PARTIALLY_FILLED.
+    expect(await transitions(old.id)).toContain('PARTIALLY_FILLED->PENDING_CANCEL');
+    await settle(a);
+
+    // The old order: cancelled once, with exactly what the fill left.
+    expect((await orderOf(old.id)).status).toBe('CANCELLED');
+    expect(await released(old.id)).toEqual([600_000_000n]);
+    // The replacement: a new order, resting, with its own hold.
+    expect((await orderOf(replacement.id)).status).toBe('OPEN');
+    expect(await balance(seller.userId, a.base)).toEqual({
+      available: FUNDS.base - 400_000_000n - 600_000_000n,
+      locked: 600_000_000n,
+    });
+    expect(await a.engine.depth()).toMatchObject({
+      asks: [{ price: 151_000_000n, qty: 600_000_000n }],
+    });
   });
 
   it('a full-quantity cancel seen by the gateway AND the worker posts one release', async () => {

@@ -43,7 +43,14 @@ export const ORDER_TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatu
   OPEN: ['PARTIALLY_FILLED', 'FILLED', 'PENDING_CANCEL', 'CANCELLED', 'EXPIRED'],
   PARTIALLY_FILLED: ['FILLED', 'PENDING_CANCEL', 'CANCELLED', 'EXPIRED'],
   // A cancel races a fill, and the fill wins. Modelled, not treated as an error.
-  PENDING_CANCEL: ['CANCELLED', 'FILLED', 'PARTIALLY_FILLED'],
+  //
+  // `→ EXPIRED` (ADR-0034 §6, amended in S5): an IOC that filled in part has
+  // ALREADY expired in the engine, in the same command — but until settlement
+  // applies that command the gateway shows it OPEN, and its owner can press
+  // cancel. The cancel finds nothing in the book and leaves the order
+  // PENDING_CANCEL; the `Expired` then arrives. It is a fact about the book,
+  // exactly as `Cancelled` is, and refusing to record it halted the market.
+  PENDING_CANCEL: ['CANCELLED', 'FILLED', 'PARTIALLY_FILLED', 'EXPIRED'],
 
   // Terminal.
   FILLED: [],

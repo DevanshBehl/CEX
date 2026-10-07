@@ -1046,3 +1046,63 @@ model FeeTierSnapshot {
   @@id([userId, quoteAsset, day])
   @@map("fee_tier_snapshots")
 }
+
+/// APPEND-ONLY. The public trade tape (ADR-0036 §4).
+///
+/// Written from the engine's STREAM by the market-data consumer — never from
+/// `fills`, and never waiting on settlement. It has no order id and no user id:
+/// a query that cannot return one is safer than a serializer that is supposed
+/// to drop one.
+model Trade {
+  market    String
+  seq       BigInt
+  /// `k` in the engine's fill id `seq:k`: the fill's index among its
+  /// sequence's FILLS. Order within a candle bucket is (seq, fill_index).
+  fillIndex Int    @map("fill_index")
+
+  /// Scaled price (ADR-0026) and base units.
+  price    Decimal @db.Decimal(38, 0)
+  qty      Decimal @db.Decimal(38, 0)
+  /// floor(price × qty / PRICE_SCALE): the same integer both legs settle at.
+  quoteQty Decimal @map("quote_qty") @db.Decimal(38, 0)
+
+  takerSide OrderSide @map("taker_side")
+
+  /// The command's signed time. NOT monotonic in sequence order.
+  engineTimestamp DateTime @map("engine_timestamp") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@id([market, seq, fillIndex])
+  @@index([market, engineTimestamp])
+  @@map("trades")
+}
+
+/// DERIVED, and so mutable: a one-minute candle is a pure function of the
+/// trades in its bucket, recomputed whenever one lands there (ADR-0036 §6).
+/// A rebuild from `trades` reproduces every row exactly.
+model Candle {
+  market      String
+  /// UTC minute.
+  bucketStart DateTime @map("bucket_start") @db.Timestamptz(3)
+
+  open  Decimal @db.Decimal(38, 0)
+  high  Decimal @db.Decimal(38, 0)
+  low   Decimal @db.Decimal(38, 0)
+  close Decimal @db.Decimal(38, 0)
+
+  /// The (seq, fill_index) of the trades `open` and `close` came from. Wider
+  /// intervals are aggregated from these rows, and need them to pick the same
+  /// open and close a direct computation from trades would.
+  openSeq    BigInt @map("open_seq")
+  openIndex  Int    @map("open_index")
+  closeSeq   BigInt @map("close_seq")
+  closeIndex Int    @map("close_index")
+
+  baseVolume  Decimal @map("base_volume") @db.Decimal(38, 0)
+  quoteVolume Decimal @map("quote_volume") @db.Decimal(38, 0)
+  tradeCount  Int     @map("trade_count")
+
+  @@id([market, bucketStart])
+  @@map("candles")
+}

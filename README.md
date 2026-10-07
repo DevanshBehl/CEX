@@ -19,7 +19,7 @@ The first product is complete and verified end to end on Solana devnet:
 | Product                          | Status                                           | Where                            |
 | -------------------------------- | ------------------------------------------------ | -------------------------------- |
 | Custodial wallet (Atlas Wallet)  | **Implemented** — localnet + devnet verified     | [`wallet/`](wallet)              |
-| Spot exchange                    | **In progress** — orders match and **trades settle into the ledger**; no market data or trading UI yet. See [the roadmap](#roadmap-building-the-spot-exchange) | [`wallet/`](wallet)              |
+| Spot exchange                    | **In progress** — orders match, trades settle into the ledger, and there is a live order book, tape and trading screen. Not verified end to end in a browser yet. See [the roadmap](#roadmap-building-the-spot-exchange) | [`wallet/`](wallet)              |
 | Derivatives (perps, futures, options) | Planned, after spot                          | —                                |
 
 ---
@@ -626,6 +626,9 @@ triggers, deferred constraints, rollback) are properties of Postgres itself.
 | [0033](wallet/docs/adr/0033-pre-trade-risk-and-step-up.md) | Pre-trade risk, and what a trader must prove |
 | [0034](wallet/docs/adr/0034-settlement-pipeline.md) | The settlement pipeline: one writer, an event key, halt-don't-skip |
 | [0035](wallet/docs/adr/0035-clearing-tier-reconciliation.md) | Reconciling the clearing tier, and what each check cannot see |
+| [0036](wallet/docs/adr/0036-market-data-pipeline.md) | The market-data pipeline: the engine publishes level changes; candles are a function of trades |
+| [0037](wallet/docs/adr/0037-websocket-transport.md) | The WebSocket transport: `Origin`, sessions, limits, and a private channel that is only a hint |
+| [0038](wallet/docs/adr/0038-demo-market-maker.md) | The demo market maker is a user, funded by a real allocation, with no exemption |
 
 ### Runbooks
 
@@ -646,6 +649,7 @@ triggers, deferred constraints, rollback) are properties of Postgres itself.
 | [The matching engine cannot reach Redis](wallet/docs/runbooks/matching-egress-unavailable.md) | Order placement returns `503 egress_unconfirmed` |
 | [A corrupt matching journal](wallet/docs/runbooks/corrupt-matching-journal.md) | The engine refuses to start, or replay disagrees |
 | [A settlement worker has halted](wallet/docs/runbooks/settlement-halted.md) | A market's fills have stopped moving money |
+| [Market data, the socket and the market maker](wallet/docs/runbooks/market-data.md) | A stale book, a halted trade tape, a maker that will not start or quote |
 
 Also: the [threat model](wallet/docs/security/threat-model.md) and
 [dependency exceptions](wallet/docs/security/dependency-exceptions.md).
@@ -683,8 +687,9 @@ flowchart LR
 
 ### Where the spot exchange stands
 
-Phases S1 to S4 are built, in [`wallet/`](wallet). The lists below are the
-original plan; where the design moved, ADRs 0025 to 0035 say how and why.
+Phases S1 to S4 are built, and most of S5, in [`wallet/`](wallet). The lists
+below are the original plan; where the design moved, ADRs 0025 to 0038 say how
+and why.
 
 **Trades now move money.** A signed-in user with a trading balance can place,
 amend and cancel orders through the gateway. The Rust engine matches them. Each
@@ -696,16 +701,34 @@ buy's collar headroom, the unused part of the worst-case fee) comes back in one
 release when the order is finished. Three reconciliation checks and one alarm
 watch the clearing tier, and one of them compares the books with the chain.
 
+**The market can now be seen.** The engine publishes which price levels each
+command changed; the API mirrors the book from that, records a public trade tape
+and one-minute candles, and serves them over REST and a WebSocket. A signed-in
+user gets their own orders and fills on a private channel, and there is a trading
+screen at `/trade/<market>`: order book with depth, price chart, tape, order
+entry, open orders, history and fills, and transfers between wallet and trading.
+
 **What that does not mean:**
 
-- **Nobody can see the book.** There is no market data, no WebSocket feed and no
-  trading screen. Orders are placed through the API. That is S5.
-- **There is no market maker.** A book on devnet is empty unless someone fills
-  it by hand.
+- **The trading screen has not been driven end to end in a browser.** Its logic
+  is unit-tested and every API it calls is integration-tested, including against
+  the real engine, but the Playwright journey S5 calls for — allocate, trade,
+  see the fill, deallocate, against a validator — is not written. Treat the
+  screen as unverified until it is.
+- **The liquidity is synthetic.** With the demo market maker on, every price on
+  the screen was put there by a program quoting around a number it was given —
+  by default, one it made up. The screen says so. The maker is off by default,
+  refused on mainnet-beta, and must be funded by a real deposit and allocation.
+- **Market data is for signed-in users only.** There is no public,
+  unauthenticated feed.
+- **The private feed is a hint, not a record.** A user who never reconnects and
+  never reloads can be looking at an old order list.
+- **Closing a socket cancels nothing.** There is no cancel-on-disconnect.
+- **A halted trade tape needs a person**, as a halted settlement worker does.
 - **There is no halt beyond a market's status flag**, no kill switch and no
   surveillance. That is S6.
 - **Reconciliation runs and alerts; it is not published.** Proof-of-reserves is
-  S6.
+  S6. Check 1 has still never been exercised against a real chain in a test.
 - **A halted settlement worker stops that market's trades from settling until a
   person intervenes.** It stops at an event it cannot settle rather than skip it.
   That is the correct failure, and it [needs a
@@ -770,11 +793,12 @@ watch the clearing tier, and one of them compares the books with the chain.
 
 ### Phase S5 — Market data and trading UI
 
-- [ ] **WebSocket feeds:** level-2 order-book snapshots with sequenced deltas,
+- [x] **WebSocket feeds:** level-2 order-book snapshots with sequenced deltas,
       a public trade tape, and private order/fill updates per user.
-- [ ] **OHLCV candles and 24 h tickers** in a time-series store.
+- [x] **OHLCV candles and 24 h tickers**, in PostgreSQL.
 - [ ] **Trading screen** in `apps/web`: order book, depth chart, price chart,
       order entry, open orders, fills and history, in the Atlas design system.
+      _Built; not yet verified end to end in a browser._
 
 ### Phase S6 — Operations, surveillance and hardening
 

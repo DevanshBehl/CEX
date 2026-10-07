@@ -5,7 +5,7 @@ import {
   type OrderRecord,
   type PrismaClient,
 } from '@wallet/db';
-import { NotFoundError } from '@wallet/errors';
+import { NotFoundError, ValidationError } from '@wallet/errors';
 import {
   isTerminalOrder,
   ledgerAssetKey,
@@ -20,6 +20,8 @@ import {
   type OrderResponse,
   type OrderStatus,
   type OrderView,
+  type SettlementState,
+  type TickerView,
   type WithdrawalResponse,
 } from '@wallet/types';
 import { requireSessionRecord } from '../middleware/guards.js';
@@ -44,6 +46,14 @@ export interface TradingControllerDeps {
   readonly orders: OrderService;
   readonly withdrawals: WithdrawalService;
   readonly clearingAddress: string;
+  /**
+   * What the market view says about settlement and the last day's trading.
+   * Supplied by the market-data controllers; absent in a unit that has none.
+   */
+  readonly marketView?: {
+    settlementState(symbol: string): SettlementState;
+    tickerFor(symbol: string): Promise<TickerView | null>;
+  };
 }
 
 export interface TradingControllers {
@@ -143,6 +153,10 @@ export function createTradingControllers(deps: TradingControllerDeps): TradingCo
             // A market the gateway cannot route to is shown halted: it cannot
             // be traded, whatever its engine last said.
             status: live.ok ? live.market.status : ('halted' as const),
+            // Coarse: live, delayed, halted or disabled. A market whose fills
+            // are not reaching the ledger says so on the screen that trades it.
+            settlement: deps.marketView?.settlementState(entry.symbol) ?? ('disabled' as const),
+            ticker: (await deps.marketView?.tickerFor(entry.symbol)) ?? null,
           };
         }),
       );
@@ -199,9 +213,36 @@ export function createTradingControllers(deps: TradingControllerDeps): TradingCo
     async list(request) {
       requireTradingCluster(request);
       const { userId } = requireSessionRecord(request);
-      const { market } = request.query as { market?: string };
-      const orders = await deps.orders.list(userId, market, 100);
-      return { orders: orders.map(toOrderView) };
+      const query = request.query as {
+        market?: string;
+        status: 'open' | 'all';
+        limit: number;
+        before?: string;
+      };
+      let before: { createdAt: Date; id: string } | undefined;
+      if (query.before !== undefined) {
+        const at = query.before.indexOf('.');
+        const createdAt = new Date(Number(query.before.slice(0, at)));
+        if (at <= 0 || Number.isNaN(createdAt.getTime())) {
+          throw new ValidationError([{ path: 'before', message: 'not a cursor' }]);
+        }
+        before = { createdAt, id: query.before.slice(at + 1) };
+      }
+      const orders = await deps.orders.page(userId, {
+        ...(query.market === undefined ? {} : { symbol: query.market }),
+        limit: query.limit,
+        openOnly: query.status === 'open',
+        ...(before ? { before } : {}),
+      });
+      const last = orders[orders.length - 1];
+      return {
+        orders: orders.map(toOrderView),
+        // A history that cannot return the rest is one that silently ends.
+        nextBefore:
+          orders.length === query.limit && last
+            ? `${String(last.createdAt.getTime())}.${last.id}`
+            : null,
+      };
     },
 
     async get(request) {

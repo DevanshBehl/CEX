@@ -389,6 +389,71 @@ export const envSchema = z
       .regex(/^\d+$/, 'must be a non-negative integer in base units')
       .default('0'),
 
+    // --- Phase S5: market data (ADR-0036), the socket (ADR-0037), the maker (ADR-0038) ---
+    /**
+     * Off by default. On, the API records the public trade tape and candles,
+     * mirrors each market's book, and opens the WebSocket endpoint. Requires
+     * TRADING_MARKET_DATA_START for every market with no stored offset.
+     */
+    TRADING_MARKET_DATA_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    /**
+     * SYMBOL=SEQ:IDX — the last event key the trade tape treats as ALREADY
+     * recorded, for a market with no `market-data` row in engine_offsets.
+     * Never defaulted: a tape that silently began whenever the process first
+     * started has a hole nobody chose (ADR-0036 §4).
+     */
+    TRADING_MARKET_DATA_START: keyValueList,
+    /** This process's name in each stream's `market-data` consumer group. */
+    TRADING_MARKET_DATA_CONSUMER: z.string().min(1).default('market-data-1'),
+    /** Levels per side in a book snapshot. Deeper books are sent truncated. */
+    TRADING_BOOK_MAX_LEVELS: z.coerce.number().int().positive().default(500),
+
+    /** How often an open socket's session is re-checked: the bound on a socket outliving it. */
+    WS_SESSION_RECHECK_SECONDS: z.coerce.number().int().positive().default(30),
+    WS_HEARTBEAT_SECONDS: z.coerce.number().int().positive().default(15),
+    WS_MAX_SOCKETS_PER_USER: z.coerce.number().int().positive().default(5),
+    WS_MAX_SOCKETS_PER_IP: z.coerce.number().int().positive().default(20),
+    WS_MAX_SUBSCRIPTIONS: z.coerce.number().int().positive().default(20),
+    WS_MAX_MESSAGE_BYTES: z.coerce.number().int().positive().default(4096),
+    WS_MAX_MESSAGES_PER_SECOND: z.coerce.number().int().positive().default(20),
+    /** A socket holding more than this unsent is disconnected, never buffered further. */
+    WS_MAX_BUFFERED_BYTES: z.coerce.number().int().positive().default(1048576),
+
+    /**
+     * The DEMO market maker (ADR-0038). Off by default, refused on
+     * mainnet-beta, and it is a USER: funded by a real allocation, trading
+     * through the ordinary gateway path with no exemption.
+     */
+    TRADING_MARKET_MAKER_ENABLED: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((value) => value === 'true'),
+    /** The user it trades as. Must exist; it is never created or credited here. */
+    TRADING_MARKET_MAKER_USER_ID: z.string().default(''),
+    /** SYMBOL=PRICE — where the random walk starts, as a scaled price. */
+    TRADING_MARKET_MAKER_START_PRICE: keyValueList,
+    /** SYMBOL=QTY — base units quoted at each level. */
+    TRADING_MARKET_MAKER_LEVEL_QTY: keyValueList,
+    TRADING_MARKET_MAKER_LEVELS: z.coerce.number().int().positive().default(5),
+    /** Half the distance between the best bid and the best ask, in basis points. */
+    TRADING_MARKET_MAKER_HALF_SPREAD_BPS: z.coerce.number().int().positive().default(10),
+    /** Distance between successive levels on one side, in basis points. */
+    TRADING_MARKET_MAKER_LEVEL_STEP_BPS: z.coerce.number().int().positive().default(10),
+    TRADING_MARKET_MAKER_INTERVAL_MS: z.coerce.number().int().positive().default(3000),
+    /** Quotes are pulled, not left resting, once the reference is older than this. */
+    TRADING_MARKET_MAKER_STALE_MS: z.coerce.number().int().positive().default(15000),
+    /**
+     * `random_walk` is deterministic and offline, and the default. `binance`
+     * reads a public ticker and is never used by a test.
+     */
+    TRADING_MARKET_MAKER_REFERENCE: z.enum(['random_walk', 'binance']).default('random_walk'),
+    TRADING_MARKET_MAKER_SEED: z.coerce.number().int().nonnegative().default(1),
+    /** SYMBOL=TICKER — the exchange's name for each market, for `binance`. */
+    TRADING_MARKET_MAKER_BINANCE_SYMBOLS: keyValueList,
+
     // --- Phase 3: risk policy (ADR-0010) ------------------------------------
     // Base units. Educational-project defaults, chosen so every rule is
     // reachable in testing rather than to model a real institution's appetite.
@@ -809,6 +874,47 @@ export const envSchema = z
       }
     }
 
+    if (env.TRADING_MARKET_DATA_ENABLED && !env.TRADING_ENABLED) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['TRADING_MARKET_DATA_ENABLED'],
+        message: 'requires TRADING_ENABLED: there is no market to show without a gateway',
+      });
+    }
+    if (env.TRADING_MARKET_MAKER_ENABLED) {
+      if (!env.TRADING_MARKET_DATA_ENABLED) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['TRADING_MARKET_MAKER_ENABLED'],
+          message:
+            'requires TRADING_MARKET_DATA_ENABLED: its liquidity must be visible and labelled',
+        });
+      }
+      const clusters = env.SOLANA_CLUSTERS.length > 0 ? env.SOLANA_CLUSTERS : [env.SOLANA_NETWORK];
+      if (clusters.includes('mainnet-beta')) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['TRADING_MARKET_MAKER_ENABLED'],
+          message:
+            'is refused on mainnet-beta: synthetic liquidity quoting an invented price has no ' +
+            'business near a real market (ADR-0038 §4)',
+        });
+      }
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          env.TRADING_MARKET_MAKER_USER_ID.trim(),
+        )
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['TRADING_MARKET_MAKER_USER_ID'],
+          message:
+            'is required: the maker trades as an existing user, funded by a real allocation ' +
+            '(ADR-0038 §3)',
+        });
+      }
+    }
+
     if (env.TRADING_SETTLEMENT_ENABLED && !env.TRADING_ENABLED) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -868,6 +974,67 @@ export const envSchema = z
       const known = new Set(markets.map((m) => m.symbol));
       const starts =
         typeof env.TRADING_SETTLEMENT_START === 'object' ? env.TRADING_SETTLEMENT_START : {};
+      const tapeStarts =
+        typeof env.TRADING_MARKET_DATA_START === 'object' ? env.TRADING_MARKET_DATA_START : {};
+      for (const [symbol, value] of Object.entries(tapeStarts)) {
+        if (!known.has(symbol)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['TRADING_MARKET_DATA_START'],
+            message: `names ${symbol}, which is not in TRADING_MARKETS`,
+          });
+        } else if (!/^\d+:\d+$/.test(value)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['TRADING_MARKET_DATA_START'],
+            message: `${symbol} must be SEQ:IDX, the last event key already recorded`,
+          });
+        }
+      }
+      if (env.TRADING_MARKET_MAKER_ENABLED) {
+        const priced = env.TRADING_MARKET_MAKER_START_PRICE;
+        const sized = env.TRADING_MARKET_MAKER_LEVEL_QTY;
+        for (const [name, map] of [
+          ['TRADING_MARKET_MAKER_START_PRICE', priced],
+          ['TRADING_MARKET_MAKER_LEVEL_QTY', sized],
+        ] as const) {
+          for (const [symbol, value] of Object.entries(typeof map === 'object' ? map : {})) {
+            if (!known.has(symbol)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: [name],
+                message: `names ${symbol}, which is not in TRADING_MARKETS`,
+              });
+            } else if (!/^[1-9]\d*$/.test(value)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                path: [name],
+                message: `${symbol} must be a positive integer`,
+              });
+            }
+          }
+        }
+        // A market it quotes needs both a size and somewhere to start.
+        for (const symbol of Object.keys(typeof sized === 'object' ? sized : {})) {
+          if (env.TRADING_MARKET_MAKER_REFERENCE === 'random_walk' && !(symbol in priced)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['TRADING_MARKET_MAKER_START_PRICE'],
+              message: `needs ${symbol}: the random walk has to start somewhere`,
+            });
+          }
+          if (
+            env.TRADING_MARKET_MAKER_REFERENCE === 'binance' &&
+            !(symbol in env.TRADING_MARKET_MAKER_BINANCE_SYMBOLS)
+          ) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['TRADING_MARKET_MAKER_BINANCE_SYMBOLS'],
+              message: `needs ${symbol}: the exchange's name for that market`,
+            });
+          }
+        }
+      }
       for (const [symbol, value] of Object.entries(starts)) {
         if (!known.has(symbol)) {
           ctx.addIssue({

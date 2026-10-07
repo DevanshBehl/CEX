@@ -142,6 +142,14 @@ still outstanding is released once. That release is the only refund mechanism:
 it returns a market buy's collar over-hold and the unused worst-case fee
 headroom. A release whose outstanding amount is zero posts nothing.
 
+_Amended 2026-10-07 (S5): `PENDING_CANCEL → EXPIRED` is legal too, and
+`Expired` is applied from `PENDING_CANCEL`. An IOC that fills in part expires its
+remainder in the same engine command; until settlement applies that command the
+gateway shows the order `OPEN`, its owner can cancel it, the cancel finds nothing
+in the book, and the order is left `PENDING_CANCEL` when the `Expired` arrives.
+Found by driving the real engine with a generated order flow: the market
+halted._
+
 `OPEN → CANCELLED` and `PARTIALLY_FILLED → CANCELLED` become legal. A `Cancelled`
 is a fact about the book; the gateway can lose the race to move an order to
 `PENDING_CANCEL` first, and refusing to record what the engine did would only

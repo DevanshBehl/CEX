@@ -28,6 +28,7 @@ import {
   createRecoveryCodeRepository,
   createSessionRepository,
   createUserRepository,
+  userChanges,
   type PrismaClient,
 } from '@wallet/db';
 import { createLogger, type Logger } from '@wallet/logger';
@@ -98,6 +99,31 @@ import {
 import { logSecurityEvent } from '@wallet/logger';
 import { createClearingReconciliationService } from './services/clearing-reconciliation.service.js';
 import {
+  createMarketDataControllers,
+  type MarketDataControllers,
+} from './controllers/market-data.controller.js';
+import { createMarketDataRoutes } from './routes/market-data.routes.js';
+import {
+  createMarketFanout,
+  createRedisFanoutSource,
+  type FanoutSource,
+  type MarketFanout,
+} from './services/market-data/fanout.js';
+import { createChangeNotifier, type ChangeNotifier } from './services/market-data/notifier.js';
+import { createMarketMaker, type MarketMaker } from './services/market-maker/market-maker.js';
+import {
+  createBinanceSource,
+  createRandomWalkSource,
+  type ReferencePriceSource,
+} from './services/market-maker/reference-price.js';
+import {
+  createTapeConsumer,
+  MARKET_DATA_CONSUMER,
+  type TapeConsumer,
+} from './services/market-data/tape-consumer.js';
+import { createSocketHub, type SocketHub } from './ws/hub.js';
+import { socketPlugin } from './ws/plugin.js';
+import {
   createRedisEventSource,
   type SettlementEventSource,
 } from './services/settlement/source.js';
@@ -128,6 +154,15 @@ declare module 'fastify' {
        * Tests drive `runOnce()` by hand (ADR-0034).
        */
       readonly settlement: ReadonlyMap<string, SettlementWorker>;
+      /**
+       * Market data (ADR-0036, ADR-0037). Empty maps and a null hub when it is
+       * off. Tests drive each `runOnce()` by hand.
+       */
+      readonly tapes: ReadonlyMap<string, TapeConsumer>;
+      readonly fanouts: ReadonlyMap<string, MarketFanout>;
+      readonly hub: SocketHub | null;
+      /** Null unless enabled AND permitted to start (ADR-0038 §4). */
+      readonly marketMaker: MarketMaker | null;
     } | null;
     shutdown: () => Promise<void>;
   }
@@ -178,6 +213,13 @@ export interface BuildServerOptions {
    */
   readonly settlementSources?: ReadonlyMap<string, SettlementEventSource>;
   readonly startSettlement?: boolean;
+  /** The same, for the trade tape and for the live fan-out. */
+  readonly marketDataSources?: ReadonlyMap<string, SettlementEventSource>;
+  readonly fanoutSources?: ReadonlyMap<string, FanoutSource>;
+  readonly startMarketData?: boolean;
+  /** A reference price a test controls, in place of the configured source. */
+  readonly referencePriceSource?: ReferencePriceSource;
+  readonly startMarketMaker?: boolean;
 }
 
 /**
@@ -514,6 +556,9 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
   // --- Trading (S3) ----------------------------------------------------------
   let trading: FastifyInstance['trading'] = null;
   let tradingControllers: ReturnType<typeof createTradingControllers> | null = null;
+  let marketDataControllers: MarketDataControllers | null = null;
+  let changeNotifier: ChangeNotifier | null = null;
+  let stopUserChanges: (() => void) | null = null;
 
   if (config.trading.enabled) {
     const runtime = defaultRuntime;
@@ -672,7 +717,149 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
       consumer: 'settlement',
     });
 
-    trading = { orders, markets, sweeper, settlement };
+    /*
+     * MARKET DATA (ADR-0036, ADR-0037).
+     *
+     * Two more readers of each market's stream, each with its own position:
+     * the TAPE, durable, in `engine_offsets` under its own consumer name; and
+     * the FAN-OUT, in memory, with no consumer group — every API instance must
+     * see every entry. Neither reads settlement's position, and a halt in
+     * either stops nothing else.
+     */
+    const notifier = createChangeNotifier({ redis, logger });
+    // Repositories publish here AFTER their transaction commits; this carries
+    // it to every instance. User ids only — whoever hears it reads PostgreSQL.
+    stopUserChanges = userChanges.subscribe((userIds) => notifier.usersChanged(userIds));
+    changeNotifier = notifier;
+
+    const tapes = new Map<string, TapeConsumer>();
+    const fanouts = new Map<string, MarketFanout>();
+    let hub: SocketHub | null = null;
+    if (config.trading.marketData.enabled) {
+      for (const entry of markets.entries) {
+        const stream =
+          config.trading.settlement.streams[entry.symbol] ?? `orders:events:${entry.market.id}`;
+        const reemitter = {
+          eventsAfter: (afterSeq: bigint, limit: number) => entry.engine.rawEvents(afterSeq, limit),
+          lastSeq: async () => (await entry.engine.health())?.lastSeq ?? null,
+        };
+        const tape = createTapeConsumer({
+          db,
+          logger,
+          metrics,
+          market: { id: entry.market.id, symbol: entry.symbol },
+          source:
+            options.marketDataSources?.get(entry.symbol) ??
+            createRedisEventSource({
+              redis: redis.duplicate(),
+              stream,
+              group: MARKET_DATA_CONSUMER,
+              consumer: config.trading.marketData.consumer,
+            }),
+          reemitter,
+          ...(config.trading.marketData.start[entry.symbol]
+            ? { startKey: config.trading.marketData.start[entry.symbol] }
+            : {}),
+          onTrade: () => notifier.tapeChanged(entry.market.id),
+        });
+        // As settlement: a market with neither an offset nor a configured
+        // start stops the boot rather than beginning the tape at a guess.
+        await tape.init();
+        tapes.set(entry.symbol, tape);
+
+        fanouts.set(
+          entry.symbol,
+          createMarketFanout({
+            symbol: entry.symbol,
+            source:
+              options.fanoutSources?.get(entry.symbol) ??
+              createRedisFanoutSource({ redis: redis.duplicate(), stream }),
+            authority: { depth: () => entry.engine.depth(), lastSeq: reemitter.lastSeq },
+            logger,
+            metrics,
+            maxLevels: config.trading.marketData.bookMaxLevels,
+          }),
+        );
+      }
+
+      hub = createSocketHub({
+        db,
+        logger,
+        metrics,
+        cluster: runtime.cluster,
+        servedClusters: config.chain.clusters,
+        markets: markets.entries.map((entry) => ({
+          symbol: entry.symbol,
+          marketId: entry.market.id,
+          fanout: fanouts.get(entry.symbol)!,
+        })),
+        limits: config.trading.socket,
+        sessionValid: async (token, userId) => (await sessions.resolve(token))?.userId === userId,
+      });
+      notifier.onUsers((userIds) => hub?.usersChanged(userIds));
+      notifier.onTape((marketId) => hub?.tapeChanged(marketId));
+    }
+    await notifier.start();
+
+    marketDataControllers = createMarketDataControllers({
+      db,
+      cluster: runtime.cluster,
+      markets: markets.entries.map((entry) => ({
+        symbol: entry.symbol,
+        marketId: entry.market.id,
+        fanout: fanouts.get(entry.symbol) ?? null,
+        tape: tapes.get(entry.symbol) ?? null,
+      })),
+      settlement,
+      settlementEnabled: config.trading.settlement.enabled,
+    });
+
+    /*
+     * THE DEMO MARKET MAKER (ADR-0038). A user like any other: it is handed
+     * the same `OrderService` the controllers call, and nothing else that
+     * could move money or reach the engine.
+     *
+     * If it may not start — no such user, nothing configured to quote — the
+     * API carries on without it. A demo device must not take deposits and
+     * withdrawals down with it.
+     */
+    let marketMaker: MarketMaker | null = null;
+    if (config.trading.marketMaker.enabled) {
+      const maker = config.trading.marketMaker;
+      const controllers = marketDataControllers;
+      const candidate = createMarketMaker({
+        db,
+        logger,
+        metrics,
+        cluster: runtime.cluster,
+        orders,
+        markets,
+        source:
+          options.referencePriceSource ??
+          (maker.reference === 'binance'
+            ? createBinanceSource({ symbols: maker.binanceSymbols })
+            : createRandomWalkSource({
+                seed: maker.seed,
+                start: Object.fromEntries(
+                  Object.entries(maker.markets).flatMap(([symbol, quoting]) =>
+                    quoting.startPrice === null ? [] : [[symbol, quoting.startPrice]],
+                  ),
+                ),
+                stepMs: maker.intervalMs,
+              })),
+        userId: maker.userId,
+        quoting: maker.markets,
+        levels: maker.levels,
+        halfSpreadBps: maker.halfSpreadBps,
+        levelStepBps: maker.levelStepBps,
+        intervalMs: maker.intervalMs,
+        staleMs: maker.staleMs,
+        settlementState: (symbol) => controllers.settlementState(symbol),
+      });
+      if (await candidate.init()) marketMaker = candidate;
+    }
+
+    trading = { orders, markets, sweeper, settlement, tapes, fanouts, hub, marketMaker };
     tradingControllers = createTradingControllers({
       db,
       cluster: runtime.cluster,
@@ -682,6 +869,7 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
       orders,
       withdrawals: runtime.withdrawals,
       clearingAddress: config.trading.clearingAddress,
+      marketView: marketDataControllers,
     });
   }
 
@@ -814,6 +1002,15 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
         served: [...config.chain.clusters],
         default: config.chain.defaultCluster,
       },
+      // Asked, not assumed: the trading screen says what this deployment does
+      // — and does not — from here, rather than from copy that goes stale.
+      trading: {
+        enabled: config.trading.enabled,
+        settlement: config.trading.enabled && config.trading.settlement.enabled,
+        marketData: config.trading.enabled && config.trading.marketData.enabled,
+        // Whether the maker is actually running, not whether it was asked for.
+        syntheticLiquidity: trading?.marketMaker != null,
+      },
       /**
        * Every asset on every served cluster, cluster-qualified.
        *
@@ -891,6 +1088,37 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
         withdrawalStepUpGuard: withdrawalStepUpGuard as never,
       }),
     );
+  }
+
+  if (marketDataControllers) {
+    await app.register(
+      createMarketDataRoutes({
+        controllers: marketDataControllers,
+        marketData: config.trading.marketData.enabled,
+        sessionGuard: sessionGuard as never,
+        operatorStepUpGuard: createStepUpGuard(
+          guardDeps,
+          config.withdrawal.stepUpMaxAgeSeconds,
+        ) as never,
+      }),
+    );
+  }
+
+  // The socket exists only where there is market data to put on it: refused
+  // by absence, as the trading routes are (ADR-0037 §1).
+  if (trading?.hub) {
+    await app.register(socketPlugin, {
+      hub: trading.hub,
+      webOrigin: config.http.webOrigin,
+      cookieName: config.session.cookieName,
+      logger,
+      metrics,
+      sessionGuard: sessionGuard as never,
+      // The transport's ceiling. The hub closes at the configured bound first,
+      // with a code a client can act on.
+      maxPayloadBytes: Math.max(64 * 1024, config.trading.socket.maxMessageBytes * 2),
+    });
+    trading.hub.start();
   }
 
   await app.register(
@@ -971,6 +1199,13 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     for (const worker of trading.settlement.values()) worker.start();
   }
 
+  if (trading?.marketMaker && (options.startMarketMaker ?? true)) trading.marketMaker.start();
+
+  if (trading && (options.startMarketData ?? true)) {
+    for (const tape of trading.tapes.values()) tape.start();
+    for (const fanout of trading.fanouts.values()) fanout.start();
+  }
+
   // Tests call `runOnce()` by hand so a valuation is a fixed number rather
   // than whatever the market did during the assertion.
   if ((options.startPricer ?? config.prices.source !== 'none') && config.prices.source !== 'none') {
@@ -1013,8 +1248,17 @@ export async function buildServer(options: BuildServerOptions): Promise<FastifyI
     // Workers stop first so no cycle is mid-transaction when the connection
     // closes.
     if (withdrawalTimer) clearTimeout(withdrawalTimer);
+    // First, while the gateway and the engine are still there to cancel through.
+    await trading?.marketMaker?.stop();
     trading?.sweeper.stop();
     await Promise.all([...(trading?.settlement.values() ?? [])].map((worker) => worker.stop()));
+    // Sockets are told the server is going away BEFORE the readers behind
+    // them stop, so a client reconnects rather than waits on a dead feed.
+    trading?.hub?.stop();
+    stopUserChanges?.();
+    await Promise.all([...(trading?.fanouts.values() ?? [])].map((fanout) => fanout.stop()));
+    await Promise.all([...(trading?.tapes.values() ?? [])].map((tape) => tape.stop()));
+    await changeNotifier?.stop();
     pricer.stop();
     reconciliationWorker.stop();
     await Promise.all([...clusters.values()].map(async (runtime) => runtime.indexer.stop()));

@@ -590,6 +590,86 @@ describe('trading (S3)', () => {
     expect(refusal(two)).toMatch(/one quote asset/);
   });
 
+  // ADR-0036, ADR-0037, ADR-0038.
+  it('defaults market data and the maker off, and parses a tape start key exactly', () => {
+    const off = parseEnv(trading);
+    expect(off.TRADING_MARKET_DATA_ENABLED).toBe(false);
+    expect(off.TRADING_MARKET_MAKER_ENABLED).toBe(false);
+    const on = toApiConfig(
+      parseEnv({
+        ...trading,
+        TRADING_MARKET_DATA_ENABLED: 'true',
+        TRADING_MARKET_DATA_START: 'SOL-USDC=7:2',
+      }),
+    );
+    expect(on.trading.marketData.start['SOL-USDC']).toEqual({ seq: 7n, idx: 2 });
+    expect(on.trading.socket.sessionRecheckMs).toBe(30_000);
+  });
+
+  it('refuses market data without trading, and a malformed or unknown tape start', () => {
+    expect(refusal({ ...valid, TRADING_MARKET_DATA_ENABLED: 'true' })).toMatch(
+      /requires TRADING_ENABLED/,
+    );
+    expect(refusal({ ...trading, TRADING_MARKET_DATA_START: 'SOL-USDC=7' })).toMatch(/SEQ:IDX/);
+    expect(refusal({ ...trading, TRADING_MARKET_DATA_START: 'BTC-USDC=0:0' })).toMatch(
+      /not in TRADING_MARKETS/,
+    );
+    expect(refusal({ ...trading, WS_MAX_SOCKETS_PER_USER: '0' })).toMatch(
+      /WS_MAX_SOCKETS_PER_USER/,
+    );
+  });
+
+  describe('the market maker', () => {
+    const maker = {
+      ...trading,
+      TRADING_MARKET_DATA_ENABLED: 'true',
+      TRADING_MARKET_MAKER_ENABLED: 'true',
+      TRADING_MARKET_MAKER_USER_ID: '01900000-0000-7000-8000-000000000001',
+      TRADING_MARKET_MAKER_LEVEL_QTY: 'SOL-USDC=1000000000',
+      TRADING_MARKET_MAKER_START_PRICE: 'SOL-USDC=150000000',
+    };
+
+    it('parses what it quotes, per market', () => {
+      const config = toApiConfig(parseEnv(maker));
+      expect(config.trading.marketMaker.markets['SOL-USDC']).toEqual({
+        levelQty: 1_000_000_000n,
+        startPrice: 150_000_000n,
+      });
+      expect(config.trading.marketMaker.reference).toBe('random_walk');
+    });
+
+    it('needs market data on, so its liquidity can be labelled', () => {
+      expect(refusal({ ...maker, TRADING_MARKET_DATA_ENABLED: 'false' })).toMatch(
+        /requires TRADING_MARKET_DATA_ENABLED/,
+      );
+    });
+
+    it('needs a user to trade as: it is never created or credited here', () => {
+      expect(refusal({ ...maker, TRADING_MARKET_MAKER_USER_ID: '' })).toMatch(
+        /trades as an existing user/,
+      );
+    });
+
+    it('is refused on mainnet-beta', () => {
+      expect(
+        refusal({
+          ...maker,
+          SOLANA_NETWORK: 'mainnet-beta',
+          SOLANA_RPC_URL: 'https://api.mainnet-beta.solana.com',
+        }),
+      ).toMatch(/refused on mainnet-beta/);
+    });
+
+    it('needs somewhere for the random walk to start, and a name for a real feed', () => {
+      expect(refusal({ ...maker, TRADING_MARKET_MAKER_START_PRICE: '' })).toMatch(
+        /has to start somewhere/,
+      );
+      expect(refusal({ ...maker, TRADING_MARKET_MAKER_REFERENCE: 'binance' })).toMatch(
+        /exchange's name for that market/,
+      );
+    });
+  });
+
   it('refuses a malformed market or caller seed', () => {
     expect(refusal({ ...trading, TRADING_MARKETS: 'sol-usdc:1:1:1:1' })).toMatch(/SYMBOL:TICK/);
     expect(refusal({ ...trading, TRADING_MARKETS: 'SOL-USDC:0:1:1:1' })).toMatch(

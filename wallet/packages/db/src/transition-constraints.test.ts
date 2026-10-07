@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -11,9 +11,21 @@ import { afterEach, describe, expect, it } from 'vitest';
  */
 const SCRIPT = resolve(__dirname, '../scripts/check-transition-constraints.mjs');
 const MIGRATIONS = resolve(__dirname, '../prisma/migrations');
-// The LATEST migration defining `order_transition_is_legal()`: the check reads
-// only that one, so tampering with an earlier definition proves nothing.
-const ORDERS = '20261001110000_settlement/migration.sql';
+/**
+ * The LATEST migration defining `order_transition_is_legal()`: the check reads
+ * only that one, so tampering with an earlier definition proves nothing. Found
+ * rather than named, because every change to the order machine adds another.
+ */
+const ORDERS = `${readdirSync(MIGRATIONS, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => entry.name)
+  .sort()
+  .filter((name) =>
+    readFileSync(join(MIGRATIONS, name, 'migration.sql'), 'utf8').includes(
+      'CREATE OR REPLACE FUNCTION order_transition_is_legal()',
+    ),
+  )
+  .at(-1)!}/migration.sql`;
 
 let dir: string | undefined;
 afterEach(() => {

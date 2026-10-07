@@ -40,6 +40,25 @@ import {
   type ListWithdrawalsResponse,
   type WithdrawalResponse,
   type ListReviewQueueResponse,
+  bookResponseSchema,
+  cancelAllResponseSchema,
+  listCandlesResponseSchema,
+  listFillsResponseSchema,
+  listMarketsResponseSchema,
+  listOrdersResponseSchema,
+  listTradesResponseSchema,
+  listTradingBalancesResponseSchema,
+  orderResponseSchema,
+  type BookResponse,
+  type CancelAllResponse,
+  type CandleInterval,
+  type ListCandlesResponse,
+  type ListFillsResponse,
+  type ListMarketsResponse,
+  type ListOrdersResponse,
+  type ListTradesResponse,
+  type ListTradingBalancesResponse,
+  type OrderResponse,
 } from '@wallet/types';
 import { request } from './client';
 
@@ -238,4 +257,115 @@ export const api = {
       body: { note },
       schema: withdrawalResponseSchema,
     }),
+
+  // --- trading (S3-S5) ---
+  // The cluster is never in a path or a body: it is the request's context
+  // (ADR-0021), set once, in ./cluster.ts.
+  listMarkets: (): Promise<ListMarketsResponse> =>
+    request({ method: 'GET', path: '/markets', schema: listMarketsResponseSchema }),
+
+  listTradingBalances: (): Promise<ListTradingBalancesResponse> =>
+    request({
+      method: 'GET',
+      path: '/trading/balances',
+      schema: listTradingBalancesResponseSchema,
+    }),
+
+  placeOrder: (body: {
+    market: string;
+    side: 'buy' | 'sell';
+    type: 'limit' | 'market';
+    timeInForce: 'GTC' | 'IOC' | 'FOK';
+    price: string | null;
+    qty: string;
+    postOnly: boolean;
+    /** ONE per intent, reused on every retry of it (rule 152). */
+    clientOrderId: string;
+  }): Promise<OrderResponse> =>
+    request({ method: 'POST', path: '/orders', body, schema: orderResponseSchema }),
+
+  listOrders: (query: {
+    market?: string;
+    status?: 'open' | 'all';
+    limit?: number;
+    before?: string;
+  }): Promise<ListOrdersResponse> =>
+    request({
+      method: 'GET',
+      path: `/orders${toQuery(query)}`,
+      schema: listOrdersResponseSchema,
+    }),
+
+  cancelOrder: (id: string): Promise<OrderResponse> =>
+    request({ method: 'DELETE', path: `/orders/${id}`, schema: orderResponseSchema }),
+
+  cancelAllOrders: (market: string): Promise<CancelAllResponse> =>
+    request({
+      method: 'DELETE',
+      path: `/orders${toQuery({ market })}`,
+      schema: cancelAllResponseSchema,
+    }),
+
+  /** Cancel-replace: the response is the REPLACEMENT, a new order. */
+  amendOrder: (
+    id: string,
+    body: { clientOrderId: string; price: string; qty: string },
+  ): Promise<OrderResponse> =>
+    request({ method: 'PATCH', path: `/orders/${id}`, body, schema: orderResponseSchema }),
+
+  listFills: (query: {
+    market?: string;
+    limit?: number;
+    before?: string;
+  }): Promise<ListFillsResponse> =>
+    request({ method: 'GET', path: `/fills${toQuery(query)}`, schema: listFillsResponseSchema }),
+
+  /** Moves funds ON-CHAIN, behind a step-up. The response is the transfer itself. */
+  allocate: (body: {
+    asset: string;
+    amount: string;
+    idempotencyKey: string;
+  }): Promise<WithdrawalResponse> =>
+    request({ method: 'POST', path: '/allocations', body, schema: withdrawalResponseSchema }),
+
+  deallocate: (body: {
+    asset: string;
+    amount: string;
+    idempotencyKey: string;
+  }): Promise<WithdrawalResponse> =>
+    request({ method: 'POST', path: '/deallocations', body, schema: withdrawalResponseSchema }),
+
+  // --- market data (S5) ---
+  getBook: (market: string): Promise<BookResponse> =>
+    request({ method: 'GET', path: `/markets/${market}/book`, schema: bookResponseSchema }),
+
+  listTrades: (
+    market: string,
+    query: { limit?: number; before?: string } = {},
+  ): Promise<ListTradesResponse> =>
+    request({
+      method: 'GET',
+      path: `/markets/${market}/trades${toQuery(query)}`,
+      schema: listTradesResponseSchema,
+    }),
+
+  listCandles: (
+    market: string,
+    query: { interval: CandleInterval; limit?: number },
+  ): Promise<ListCandlesResponse> =>
+    request({
+      method: 'GET',
+      path: `/markets/${market}/candles${toQuery(query)}`,
+      schema: listCandlesResponseSchema,
+    }),
 };
+
+/** `{ a: 1, b: undefined }` -> `?a=1`. Absent values are omitted, never sent as text. */
+function toQuery(query: Record<string, string | number | undefined>): string {
+  const params = new URLSearchParams();
+  for (const [name, value] of Object.entries(query)) {
+    if (value !== undefined) params.set(name, String(value));
+  }
+  const text = params.toString();
+  return text.length > 0 ? `?${text}` : '';
+}

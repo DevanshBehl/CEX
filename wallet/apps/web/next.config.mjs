@@ -3,7 +3,7 @@ const nextConfig = {
   reactStrictMode: true,
   // The API is a separate origin; nothing is proxied, so CORS and the cookie
   // policy are exercised in development exactly as they are in production.
-  transpilePackages: ['@wallet/types'],
+  transpilePackages: ['@wallet/types', '@wallet/orders'],
   poweredByHeader: false,
 
   /**

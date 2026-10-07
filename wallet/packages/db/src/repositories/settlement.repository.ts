@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
-import type { Executor } from '../transaction.js';
+import { userChanges } from '../change-bus.js';
+import { afterCommit, type Executor } from '../transaction.js';
 import { newId } from '../ids.js';
 
 /**
@@ -185,9 +186,10 @@ export function createSettlementRepository(db: Executor): SettlementRepository {
         ON CONFLICT (fill_id) DO NOTHING
         RETURNING id
       `;
-      return rows.length === 0
-        ? { outcome: 'already_settled' }
-        : { outcome: 'inserted', ledgerTransactionId };
+      if (rows.length === 0) return { outcome: 'already_settled' };
+      // Both sides have a new fill and new balances — once this commits.
+      afterCommit(exec(tx), () => userChanges.publish([input.takerUserId, input.makerUserId]));
+      return { outcome: 'inserted', ledgerTransactionId };
     },
 
     async outstandingHold(orderId, tx) {

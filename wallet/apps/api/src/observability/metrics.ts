@@ -245,6 +245,34 @@ export interface WalletMetrics {
   readonly feesAccrued: Counter;
   /** 1 = clean, 0 = drifting, -1 = inconclusive. labels: check, subject */
   readonly reconciliationCheck: Gauge;
+  /** Open WebSocket connections. No labels: a user is not a label. */
+  readonly socketsOpen: Gauge;
+  /** labels: channel */
+  readonly socketSubscriptions: Gauge;
+  /** labels: channel */
+  readonly socketMessages: Counter;
+  /** labels: reason (slow_consumer | limit | session_ended | protocol_error | shutdown) */
+  readonly socketsClosed: Counter;
+  /** labels: reason (origin | session | user_limit | ip_limit) */
+  readonly socketUpgradesRefused: Counter;
+  /** labels: market, cause */
+  readonly bookResyncs: Counter;
+  /**
+   * Engine sequences the live book has not applied. labels: market.
+   * With `marketDataLag`, THE market-data health signal: a reader that is up
+   * and not advancing is worse than one that is down.
+   */
+  readonly fanoutLag: Gauge;
+  /** Engine sequences the persisted tape has not recorded. labels: market */
+  readonly marketDataLag: Gauge;
+  /** labels: market */
+  readonly marketDataHalts: Counter;
+  /** labels: market */
+  readonly tradesRecorded: Counter;
+  /** labels: market, outcome (placed | cancelled | rejected | skipped) */
+  readonly makerQuotes: Counter;
+  /** Milliseconds since the maker's reference price was observed. labels: market */
+  readonly makerReferenceAge: Gauge;
 }
 
 export function createWalletMetrics(registry: Metrics = createMetrics()): WalletMetrics {
@@ -289,6 +317,42 @@ export function createWalletMetrics(registry: Metrics = createMetrics()): Wallet
     reconciliationCheck: registry.gauge(
       'reconciliation_check_result',
       'Last result of each clearing-tier check: 1 clean, 0 drift, -1 inconclusive.',
+    ),
+    socketsOpen: registry.gauge('ws_sockets_open', 'Open WebSocket connections.'),
+    socketSubscriptions: registry.gauge('ws_subscriptions', 'Live subscriptions, by channel.'),
+    socketMessages: registry.counter('ws_messages_sent_total', 'Messages sent, by channel.'),
+    socketsClosed: registry.counter(
+      'ws_sockets_closed_total',
+      'Sockets closed by the server, by reason.',
+    ),
+    socketUpgradesRefused: registry.counter(
+      'ws_upgrades_refused_total',
+      'WebSocket upgrades refused, by reason.',
+    ),
+    bookResyncs: registry.counter(
+      'market_data_book_resyncs_total',
+      'Book mirrors discarded and rebuilt from a snapshot, by market and cause.',
+    ),
+    fanoutLag: registry.gauge(
+      'market_data_fanout_lag_sequences',
+      'Engine sequences the live book has not applied, by market.',
+    ),
+    marketDataLag: registry.gauge(
+      'market_data_offset_lag_sequences',
+      'Engine sequences the persisted trade tape has not recorded, by market.',
+    ),
+    marketDataHalts: registry.counter(
+      'market_data_halts_total',
+      'Trade-tape consumers halted at an event they cannot record, by market.',
+    ),
+    tradesRecorded: registry.counter('market_data_trades_total', 'Trades recorded, by market.'),
+    makerQuotes: registry.counter(
+      'market_maker_quotes_total',
+      'Market-maker quote actions, by market and outcome.',
+    ),
+    makerReferenceAge: registry.gauge(
+      'market_maker_reference_age_ms',
+      'Age of the market maker reference price, by market.',
     ),
   };
 }

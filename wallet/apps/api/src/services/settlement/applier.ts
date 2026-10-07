@@ -91,7 +91,14 @@ export interface SettlementApplier {
 
 /** Orders a `Cancelled` or an `Expired` may finish, besides one already finished. */
 const CANCELLABLE: ReadonlySet<OrderStatus> = new Set(['OPEN', 'PARTIALLY_FILLED', 'PENDING_CANCEL']);
-const EXPIRABLE: ReadonlySet<OrderStatus> = new Set(['PENDING_ENGINE', 'OPEN', 'PARTIALLY_FILLED']);
+// PENDING_CANCEL too: an IOC's remainder expired in the same command that
+// filled part of it, and the owner cancelled it before settlement got there.
+const EXPIRABLE: ReadonlySet<OrderStatus> = new Set([
+  'PENDING_ENGINE',
+  'OPEN',
+  'PARTIALLY_FILLED',
+  'PENDING_CANCEL',
+]);
 
 /**
  * Every order the gateway creates has a UUID id. An id of any other shape —

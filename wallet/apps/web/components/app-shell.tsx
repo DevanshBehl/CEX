@@ -382,6 +382,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               {NAV.map((item) => (
                 <NavLink key={item.href} {...item} active={pathname === item.href} />
               ))}
+              {/* Asked, not assumed: shown only where this deployment trades. */}
+              {capabilities?.trading.enabled === true && (
+                <NavLink
+                  href="/trade"
+                  label="Trade"
+                  icon={ICONS.activity}
+                  active={pathname.startsWith('/trade')}
+                />
+              )}
             </div>
 
             <div className="space-y-0.5">

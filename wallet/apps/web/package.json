@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@simplewebauthn/browser": "13.1.0",
+    "@wallet/orders": "workspace:*",
     "@wallet/types": "workspace:*",
     "next": "15.1.4",
     "react": "19.0.0",

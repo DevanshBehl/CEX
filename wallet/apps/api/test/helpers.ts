@@ -128,6 +128,29 @@ export interface HarnessOptions {
       >;
       readonly start?: ApiConfig['trading']['settlement']['start'];
     };
+    /**
+     * Turn market data on (S5): the trade tape, the live fan-out and the
+     * socket, each reading from a source the test controls. Left stopped; the
+     * test calls `runOnce()`.
+     */
+    readonly marketData?: {
+      readonly tapeSources: ReadonlyMap<
+        string,
+        import('../src/services/settlement/source.js').SettlementEventSource
+      >;
+      readonly fanoutSources: ReadonlyMap<
+        string,
+        import('../src/services/market-data/fanout.js').FanoutSource
+      >;
+      readonly start?: ApiConfig['trading']['marketData']['start'];
+      readonly bookMaxLevels?: number;
+      readonly socket?: Partial<ApiConfig['trading']['socket']>;
+    };
+    /** Ask for the demo market maker at boot, as configuration would (ADR-0038). */
+    readonly marketMaker?: {
+      readonly userId: string;
+      readonly markets: ApiConfig['trading']['marketMaker']['markets'];
+    };
   };
 }
 
@@ -251,6 +274,24 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
             enabled: options.trading.settlement !== undefined,
             start: options.trading.settlement?.start ?? {},
           },
+          marketData: {
+            ...config.trading.marketData,
+            enabled: options.trading.marketData !== undefined,
+            start: options.trading.marketData?.start ?? {},
+            bookMaxLevels:
+              options.trading.marketData?.bookMaxLevels ?? config.trading.marketData.bookMaxLevels,
+          },
+          socket: { ...config.trading.socket, ...options.trading.marketData?.socket },
+          // Never the developer's `.env`: a suite that quoted on its own would
+          // make every book assertion depend on a timer.
+          marketMaker: options.trading.marketMaker
+            ? {
+                ...config.trading.marketMaker,
+                enabled: true,
+                userId: options.trading.marketMaker.userId,
+                markets: options.trading.marketMaker.markets,
+              }
+            : { ...config.trading.marketMaker, enabled: false },
         }
       : config.trading,
     withdrawal: {
@@ -299,6 +340,14 @@ export async function startHarness(options: HarnessOptions = {}): Promise<Harnes
     ...(options.trading?.settlement
       ? { settlementSources: options.trading.settlement.sources, startSettlement: false }
       : {}),
+    ...(options.trading?.marketData
+      ? {
+          marketDataSources: options.trading.marketData.tapeSources,
+          fanoutSources: options.trading.marketData.fanoutSources,
+          startMarketData: false,
+        }
+      : { startMarketData: false }),
+    startMarketMaker: false,
   });
   await app.ready();
 

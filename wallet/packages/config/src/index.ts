@@ -176,6 +176,42 @@ export interface ApiConfig {
     };
     /** Native base units parked at the clearing address by the house (ADR-0035). */
     readonly clearingReserve: string;
+    /** ADR-0036. */
+    readonly marketData: {
+      readonly enabled: boolean;
+      /** SYMBOL -> last key already recorded, used only with no stored offset. */
+      readonly start: Readonly<Record<string, { readonly seq: bigint; readonly idx: number }>>;
+      readonly consumer: string;
+      readonly bookMaxLevels: number;
+    };
+    /** ADR-0037 §§2, 4. */
+    readonly socket: {
+      readonly sessionRecheckMs: number;
+      readonly heartbeatMs: number;
+      readonly maxSocketsPerUser: number;
+      readonly maxSocketsPerIp: number;
+      readonly maxSubscriptions: number;
+      readonly maxMessageBytes: number;
+      readonly maxMessagesPerSecond: number;
+      readonly maxBufferedBytes: number;
+    };
+    /** ADR-0038. */
+    readonly marketMaker: {
+      readonly enabled: boolean;
+      readonly userId: string;
+      /** SYMBOL -> what it quotes there. A market absent here is not quoted. */
+      readonly markets: Readonly<
+        Record<string, { readonly levelQty: bigint; readonly startPrice: bigint | null }>
+      >;
+      readonly levels: number;
+      readonly halfSpreadBps: number;
+      readonly levelStepBps: number;
+      readonly intervalMs: number;
+      readonly staleMs: number;
+      readonly reference: 'random_walk' | 'binance';
+      readonly seed: number;
+      readonly binanceSymbols: Readonly<Record<string, string>>;
+    };
   };
   readonly risk: {
     /**
@@ -576,6 +612,55 @@ export function toApiConfig(env: Env): ApiConfig {
         blockMs: env.TRADING_SETTLEMENT_BLOCK_MS,
       }),
       clearingReserve: env.TRADING_CLEARING_RESERVE,
+      marketData: Object.freeze({
+        enabled: env.TRADING_MARKET_DATA_ENABLED,
+        start: Object.freeze(
+          Object.fromEntries(
+            Object.entries(env.TRADING_MARKET_DATA_START).map(([symbol, value]) => {
+              const [seq, idx] = value.split(':');
+              return [symbol, Object.freeze({ seq: BigInt(seq ?? '0'), idx: Number(idx ?? '0') })];
+            }),
+          ),
+        ),
+        consumer: env.TRADING_MARKET_DATA_CONSUMER,
+        bookMaxLevels: env.TRADING_BOOK_MAX_LEVELS,
+      }),
+      socket: Object.freeze({
+        sessionRecheckMs: env.WS_SESSION_RECHECK_SECONDS * 1_000,
+        heartbeatMs: env.WS_HEARTBEAT_SECONDS * 1_000,
+        maxSocketsPerUser: env.WS_MAX_SOCKETS_PER_USER,
+        maxSocketsPerIp: env.WS_MAX_SOCKETS_PER_IP,
+        maxSubscriptions: env.WS_MAX_SUBSCRIPTIONS,
+        maxMessageBytes: env.WS_MAX_MESSAGE_BYTES,
+        maxMessagesPerSecond: env.WS_MAX_MESSAGES_PER_SECOND,
+        maxBufferedBytes: env.WS_MAX_BUFFERED_BYTES,
+      }),
+      marketMaker: Object.freeze({
+        enabled: env.TRADING_MARKET_MAKER_ENABLED,
+        userId: env.TRADING_MARKET_MAKER_USER_ID.trim(),
+        markets: Object.freeze(
+          Object.fromEntries(
+            Object.entries(env.TRADING_MARKET_MAKER_LEVEL_QTY).map(([symbol, qty]) => [
+              symbol,
+              Object.freeze({
+                levelQty: BigInt(qty),
+                startPrice:
+                  symbol in env.TRADING_MARKET_MAKER_START_PRICE
+                    ? BigInt(env.TRADING_MARKET_MAKER_START_PRICE[symbol]!)
+                    : null,
+              }),
+            ]),
+          ),
+        ),
+        levels: env.TRADING_MARKET_MAKER_LEVELS,
+        halfSpreadBps: env.TRADING_MARKET_MAKER_HALF_SPREAD_BPS,
+        levelStepBps: env.TRADING_MARKET_MAKER_LEVEL_STEP_BPS,
+        intervalMs: env.TRADING_MARKET_MAKER_INTERVAL_MS,
+        staleMs: env.TRADING_MARKET_MAKER_STALE_MS,
+        reference: env.TRADING_MARKET_MAKER_REFERENCE,
+        seed: env.TRADING_MARKET_MAKER_SEED,
+        binanceSymbols: Object.freeze({ ...env.TRADING_MARKET_MAKER_BINANCE_SYMBOLS }),
+      }),
     }),
     risk: Object.freeze({
       assetLimits: Object.freeze(assetLimits),

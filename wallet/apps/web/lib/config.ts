@@ -16,12 +16,19 @@ import { z } from 'zod';
  */
 const publicEnvSchema = z.object({
   NEXT_PUBLIC_API_URL: z.string().url().default('http://localhost:4000'),
+  /**
+   * The market-data socket. Optional: by default it is the API's own origin,
+   * `/ws`, over the matching scheme. Set only when a proxy puts it elsewhere —
+   * and then a content-security policy's `connect-src` must name it too.
+   */
+  NEXT_PUBLIC_WS_URL: z.string().url().optional(),
 });
 
 const parsed = publicEnvSchema.safeParse({
   // Referenced statically, not via a computed key — Next.js can only inline
   // literal `process.env.NEXT_PUBLIC_X` references.
   NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
+  NEXT_PUBLIC_WS_URL: process.env.NEXT_PUBLIC_WS_URL,
 });
 
 if (!parsed.success) {
@@ -30,6 +37,15 @@ if (!parsed.success) {
   );
 }
 
+/** `http://host` -> `ws://host/ws`, `https://host` -> `wss://host/ws`. */
+function socketUrlFor(apiBaseUrl: string): string {
+  const url = new URL(apiBaseUrl);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/ws`;
+  return url.toString();
+}
+
 export const publicConfig = Object.freeze({
   apiBaseUrl: parsed.data.NEXT_PUBLIC_API_URL,
+  socketUrl: parsed.data.NEXT_PUBLIC_WS_URL ?? socketUrlFor(parsed.data.NEXT_PUBLIC_API_URL),
 });

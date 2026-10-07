@@ -117,6 +117,27 @@ export const SECURITY_EVENTS = [
   'reconciliation.negative_trading_balance',
   /** Holds disagree with the engine's book, persisted for a streak. */
   'reconciliation.book_mismatch_persisted',
+  // --- Phase S5: market data, the socket, the market maker (ADR-0036..0038) ---
+  /** A market's persisted trade tape stopped at an event it cannot record. Its KEY only. */
+  'market_data.halted',
+  /** The tape recovered a gap or a lost stream through re-emission. */
+  'market_data.recovered',
+  /** The tape refused to start with neither an offset nor a configured start. */
+  'market_data.start_refused',
+  /** A market's book mirror was discarded and rebuilt from a snapshot. */
+  'market_data.book_resynced',
+  /** A WebSocket upgrade was refused: a foreign origin, no session, or a limit. */
+  'ws.upgrade_refused',
+  /** A socket was closed because its session ended. */
+  'ws.session_ended',
+  /** A socket was closed for exceeding a bound, or for not reading. */
+  'ws.closed_by_server',
+  'market_maker.started',
+  'market_maker.stopped',
+  /** The maker would not start: no such user, or nothing configured to quote. */
+  'market_maker.start_refused',
+  /** The maker pulled its quotes: a stale reference, or a market not settling. */
+  'market_maker.quotes_pulled',
 ] as const;
 
 export type SecurityEvent = (typeof SECURITY_EVENTS)[number];

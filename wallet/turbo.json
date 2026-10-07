@@ -54,7 +54,11 @@
         "RISK_ASSET_LIMITS_*",
         "PRICE_*",
         "SEGREGATED_CUSTODY",
-        "USE_CONFIGURED_SIGNER"
+        "USE_CONFIGURED_SIGNER",
+        "TRADING_*",
+        "CLEARING_*",
+        "WS_*",
+        "MATCHING_*"
       ]
     },
     "dev": {
@@ -91,7 +95,11 @@
         "TOKEN_MINTS_*",
         "RISK_ASSET_LIMITS_*",
         "PRICE_*",
-        "SEGREGATED_CUSTODY"
+        "SEGREGATED_CUSTODY",
+        "TRADING_*",
+        "CLEARING_*",
+        "WS_*",
+        "MATCHING_*"
       ]
     },
     "generate": {

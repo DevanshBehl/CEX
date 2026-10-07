@@ -43,6 +43,9 @@ carries no user, order, amount or price, on purpose.
 SELECT market, seq, idx, updated_at FROM engine_offsets WHERE consumer = 'settlement';
 ```
 
+For a signed-in operator, `GET /operator/trading/pipeline` returns each market's
+offset, lag and — if halted — the key and the reason, without reading a log.
+
 ```bash
 curl -s http://<engine>/v1/health                                  # last_seq
 curl -s "http://<engine>/v1/events?after=<halted seq - 1>&limit=1" # the whole halted sequence

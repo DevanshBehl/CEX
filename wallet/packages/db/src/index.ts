@@ -1,6 +1,12 @@
 export { createPrismaClient, type DbOptions, type PrismaClient } from './client.js';
 export { newId } from './ids.js';
-export { Prisma, withTransaction, type Executor, type TransactionOptions } from './transaction.js';
+export {
+  afterCommit,
+  Prisma,
+  withTransaction,
+  type Executor,
+  type TransactionOptions,
+} from './transaction.js';
 
 export * from './repositories/types.js';
 export {
@@ -122,3 +128,17 @@ export {
   type InsertFillResult,
   type SettlementRepository,
 } from './repositories/settlement.repository.js';
+export {
+  createMarketDataRepository,
+  type CandleRecord,
+  type InsertTradeInput,
+  type MarketDataRepository,
+  type TickerRecord,
+  type TradeRecord,
+} from './repositories/market-data.repository.js';
+export {
+  createUserFillsRepository,
+  type UserFillRecord,
+  type UserFillsRepository,
+} from './repositories/user-fills.repository.js';
+export { userChanges, type UserChangeListener } from './change-bus.js';

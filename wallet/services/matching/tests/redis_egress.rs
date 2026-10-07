@@ -334,3 +334,86 @@ async fn an_unreachable_redis_refuses_the_command_rather_than_dropping_its_event
     // caller's 503 ambiguous rather than a failure to act.
     assert_eq!(service.journal_len().expect("journal"), 1);
 }
+
+/// The LAST entry of each sequence carries `levels` (ADR-0036 §1): the levels
+/// that command changed, as absolute quantities. Earlier entries of the same
+/// sequence do not, so a consumer applies them only once it has every event.
+#[tokio::test]
+async fn the_last_entry_of_each_sequence_carries_its_level_changes() {
+    let url = require_redis!();
+    let stream = "test:events:levels";
+    reset(&url, stream).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config(dir.path(), stream);
+    let sink = RedisSink::connect(&url, 100_000).await.expect("connect");
+    let service = Service::recover(&config, EventSink::Redis(Box::new(sink)))
+        .await
+        .expect("recover");
+
+    for (id, side, qty) in [
+        ("s-1", Side::Sell, 1_000_000),
+        ("s-2", Side::Sell, 1_000_000),
+        ("b-1", Side::Buy, 3_000_000),
+    ] {
+        service
+            .submit(
+                1_700_000_000_000,
+                place(
+                    id,
+                    request(id, side, Some(9_000_000), qty, TimeInForce::GTC),
+                ),
+            )
+            .await
+            .expect("submit");
+    }
+
+    let client = redis::Client::open(url.as_str()).expect("client");
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("connect");
+    let entries: Vec<(String, Vec<(String, String)>)> = redis::cmd("XRANGE")
+        .arg(stream)
+        .arg("-")
+        .arg("+")
+        .query_async(&mut conn)
+        .await
+        .expect("xrange");
+    let levels: Vec<(u64, u32, Option<String>)> = entries
+        .into_iter()
+        .map(|(_, fields)| {
+            let map: std::collections::HashMap<_, _> = fields.into_iter().collect();
+            (
+                map["seq"].parse().expect("seq"),
+                map["idx"].parse().expect("idx"),
+                map.get("levels").cloned(),
+            )
+        })
+        .collect();
+
+    let at = |price: u64, side: &str, qty: u64| {
+        Some(format!(
+            r#"[{{"side":"{side}","price":{price},"qty":"{qty}"}}]"#
+        ))
+    };
+    assert_eq!(
+        levels,
+        vec![
+            (1, 0, at(9_000_000, "sell", 1_000_000)),
+            (2, 0, at(9_000_000, "sell", 2_000_000)),
+            // Two fills and the taker's disposition: only the last has levels.
+            (3, 0, None),
+            (3, 1, None),
+            // The asks emptied; the buy's remainder rests. Asks sort first.
+            (
+                3,
+                2,
+                Some(
+                    r#"[{"side":"sell","price":9000000,"qty":"0"},{"side":"buy","price":9000000,"qty":"1000000"}]"#
+                        .to_string()
+                )
+            ),
+        ]
+    );
+}

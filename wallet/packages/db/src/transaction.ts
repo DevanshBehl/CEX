@@ -25,6 +25,37 @@ export interface TransactionOptions {
   readonly timeoutMs?: number;
 }
 
+/**
+ * Work to do once a transaction has COMMITTED — and only then.
+ *
+ * A notification that a user's order changed must not be sent for a change
+ * that rolled back: it would tell them about a fill that did not happen
+ * (ADR-0037 §7). So a repository registers the notification here, against the
+ * transaction it is writing in, and `withTransaction` runs it after the
+ * commit. A retried attempt starts with an empty list; the failed attempt's
+ * hooks are discarded with it.
+ *
+ * Called with the base client — a statement that was not inside
+ * `withTransaction` and has therefore already committed — the hook runs at
+ * once. Call it AFTER the write it is about.
+ */
+const commitHooks = new WeakMap<object, Array<() => void>>();
+
+export function afterCommit(executor: Executor, hook: () => void): void {
+  const pending = commitHooks.get(executor);
+  if (pending) pending.push(hook);
+  else runHook(hook);
+}
+
+function runHook(hook: () => void): void {
+  try {
+    hook();
+  } catch {
+    // A hook is a notification, never part of the work. The work committed;
+    // nothing a listener throws may make it look as though it did not.
+  }
+}
+
 /** Postgres serialization failure / deadlock — both are safe to retry. */
 const RETRYABLE_PG_CODES = new Set(['40001', '40P01']);
 
@@ -95,9 +126,11 @@ export async function withTransaction<T>(
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const hooks: Array<() => void> = [];
     try {
-      return await client.$transaction(
+      const committed = await client.$transaction(
         async (tx) => {
+          commitHooks.set(tx, hooks);
           const result = await fn(tx);
           // See the note above: without this, a deferred-constraint violation
           // is silently swallowed and reported to the caller as success.
@@ -106,6 +139,8 @@ export async function withTransaction<T>(
         },
         { isolationLevel, timeout },
       );
+      for (const hook of hooks) runHook(hook);
+      return committed;
     } catch (error) {
       lastError = error;
       if (!isRetryable(error) || attempt === maxRetries) throw error;

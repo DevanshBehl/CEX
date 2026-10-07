@@ -23,3 +23,7 @@ allowBuilds:
 # so the transitive dependency is pinned to the last Zod-3-compatible line.
 overrides:
   zod-to-json-schema: 3.24.5
+  # ws <8.21.0 has a high-severity memory-exhaustion DoS in frame handling. The
+  # API now accepts WebSocket connections (ADR-0037), so the copy
+  # @fastify/websocket and the Solana RPC client resolve must be a patched one.
+  'ws@>=8.0.0 <8.21.0': '>=8.21.0'

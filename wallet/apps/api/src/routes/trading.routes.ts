@@ -7,6 +7,7 @@ import {
   errorResponseSchema,
   idParamSchema,
   listMarketsResponseSchema,
+  listOrdersQuerySchema,
   listOrdersResponseSchema,
   listTradingBalancesResponseSchema,
   marketSymbolSchema,
@@ -77,7 +78,7 @@ export function createTradingRoutes(deps: TradingRouteDeps): FastifyPluginAsyncZ
       {
         preValidation: read,
         schema: {
-          querystring: z.object({ market: marketSymbolSchema.optional() }),
+          querystring: listOrdersQuerySchema,
           response: { 200: listOrdersResponseSchema, ...errors },
         },
       },

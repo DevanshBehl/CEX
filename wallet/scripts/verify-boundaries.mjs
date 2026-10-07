@@ -86,6 +86,24 @@ const CASES = [
     expect: /may only be called from apps\/web\/lib\/api/,
   },
   {
+    name: 'a WebSocket outside the socket client',
+    file: 'apps/web/features/trading/__boundary_probe.ts',
+    source: "export const leak = new WebSocket('ws://localhost');\n",
+    expect: /may only be constructed in apps\/web\/lib\/ws/,
+  },
+  {
+    name: 'a WebSocket inside the typed API client',
+    file: 'apps/web/lib/api/__boundary_probe.ts',
+    source: "export const leak = new WebSocket('ws://localhost');\n",
+    expect: /may only be constructed in apps\/web\/lib\/ws/,
+  },
+  {
+    name: 'fetch inside the socket client',
+    file: 'apps/web/lib/ws/__boundary_probe.ts',
+    source: "export const leak = fetch('http://localhost');\n",
+    expect: /may only be called from apps\/web\/lib\/api/,
+  },
+  {
     name: 'a chain SDK outside packages/solana',
     file: 'apps/api/src/__boundary_probe_chain.ts',
     source: "import '@solana/web3.js';\n",

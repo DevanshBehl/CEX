@@ -86,6 +86,16 @@ export interface OrderService {
   amend(input: AmendOrderInput): Promise<OrderRecord>;
   get(userId: string, orderId: string): Promise<OrderRecord>;
   list(userId: string, symbol: string | undefined, limit: number): Promise<OrderRecord[]>;
+  /** One page of a user's orders, newest first, with a cursor. */
+  page(
+    userId: string,
+    options: {
+      readonly symbol?: string;
+      readonly limit: number;
+      readonly openOnly: boolean;
+      readonly before?: { readonly createdAt: Date; readonly id: string };
+    },
+  ): Promise<OrderRecord[]>;
   /**
    * Resolve a PENDING_ENGINE order from what the engine reported about it.
    * Shared with the sweeper, so a placement and its later recovery act the same.
@@ -742,6 +752,20 @@ export function createOrderService(deps: OrderServiceDeps): OrderService {
       const marketId = symbol === undefined ? undefined : deps.markets.get(symbol)?.market.id;
       if (symbol !== undefined && marketId === undefined) throw new NotFoundError('Unknown market');
       return orders.listForUser(userId, marketId, limit);
+    },
+
+    async page(userId, options) {
+      const marketId =
+        options.symbol === undefined ? undefined : deps.markets.get(options.symbol)?.market.id;
+      if (options.symbol !== undefined && marketId === undefined) {
+        throw new NotFoundError('Unknown market');
+      }
+      return orders.pageForUser(userId, {
+        ...(marketId === undefined ? {} : { market: marketId }),
+        limit: options.limit,
+        openOnly: options.openOnly,
+        ...(options.before === undefined ? {} : { before: options.before }),
+      });
     },
 
     resolvePending,

@@ -176,6 +176,37 @@ pub fn fill_id(seq: Seq, index: usize) -> String {
     format!("{seq}:{index}")
 }
 
+/// One price level's total resting quantity AFTER a command (ADR-0036 §1).
+///
+/// An ABSOLUTE value, never a difference: a consumer that applies one twice
+/// has the same book, and one that applied a difference twice would not. A
+/// level that emptied is reported with quantity zero.
+///
+/// This is an output BESIDE the event list. It is not an `Event`, is not
+/// journaled, is not in a golden vector and is not served by re-emission:
+/// replaying the journal re-runs the commands and reproduces it exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LevelChange {
+    pub side: Side,
+    pub price: Price,
+    /// A string, as `GET /v1/book` writes it: a sum of `u64` quantities is not
+    /// itself bounded by `u64`, and no JSON number carries a `u128`.
+    #[serde(serialize_with = "u128_as_string")]
+    pub qty: u128,
+}
+
+fn u128_as_string<S: serde::Serializer>(value: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&value.to_string())
+}
+
+/// What one command produced: its events, and the levels it left changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SequenceOutput {
+    pub seq: Seq,
+    pub events: Vec<Event>,
+    pub levels: Vec<LevelChange>,
+}
+
 /// Each event's `idx`: its position within its command's event list, from 0
 /// (ADR-0034 §1).
 ///

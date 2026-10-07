@@ -389,7 +389,7 @@ async fn book(
     body: Bytes,
 ) -> Result<Json<BookResponse>, ApiError> {
     authenticate(&state, &method, signed_target(&uri), &headers, &body).await?;
-    let snapshot = state.service.book_snapshot().await;
+    let (seq, reference_price, snapshot) = state.service.book_view().await;
     let level = |ladder: &crate::book::Ladder| {
         ladder
             .iter_from_best()
@@ -400,8 +400,8 @@ async fn book(
             .collect::<Vec<_>>()
     };
     Ok(Json(BookResponse {
-        seq: state.service.last_seq().await,
-        reference_price: state.service.reference_price().await,
+        seq,
+        reference_price,
         bids: level(snapshot.bids()),
         asks: level(snapshot.asks()),
     }))

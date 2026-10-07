@@ -166,9 +166,28 @@ export default tseslint.config(
   // ---------------------------------------------------------------------------
   // Rule 159/160/187: fetch lives only in the typed API client.
   // ---------------------------------------------------------------------------
+  //
+  // And the same for the socket (prompt_phase_s5.md rule 138): `WebSocket` is
+  // constructed only in apps/web/lib/ws/, which owns reconnection,
+  // resubscription and schema parsing. Each directory is exempt from exactly
+  // ONE of the two bans, so they are separate blocks — one block listing both
+  // names would have to exempt both directories from both.
+  // ---------------------------------------------------------------------------
   {
-    files: ['apps/web/**/*.ts', 'apps/web/**/*.tsx'],
-    ignores: ['apps/web/lib/api/**', 'apps/web/e2e/**'],
+    files: ['apps/web/lib/api/**/*.ts'],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        {
+          name: 'WebSocket',
+          message:
+            'WebSocket may only be constructed in apps/web/lib/ws/. Subscribe through the socket client (prompt_phase_s5.md rule 138).',
+        },
+      ],
+    },
+  },
+  {
+    files: ['apps/web/lib/ws/**/*.ts'],
     rules: {
       'no-restricted-globals': [
         'error',
@@ -176,6 +195,25 @@ export default tseslint.config(
           name: 'fetch',
           message:
             'fetch may only be called from apps/web/lib/api/. Use the typed API client (prompt_phase1.md rules 159-160).',
+        },
+      ],
+    },
+  },
+  {
+    files: ['apps/web/**/*.ts', 'apps/web/**/*.tsx'],
+    ignores: ['apps/web/lib/api/**', 'apps/web/lib/ws/**', 'apps/web/e2e/**'],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        {
+          name: 'fetch',
+          message:
+            'fetch may only be called from apps/web/lib/api/. Use the typed API client (prompt_phase1.md rules 159-160).',
+        },
+        {
+          name: 'WebSocket',
+          message:
+            'WebSocket may only be constructed in apps/web/lib/ws/. Subscribe through the socket client (prompt_phase_s5.md rule 138).',
         },
       ],
       'no-restricted-imports': [

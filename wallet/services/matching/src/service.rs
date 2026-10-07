@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::config::Config;
-use crate::egress::{Egress, EventRing, EventSink, Watermark};
+use crate::egress::{Egress, EventRing, EventSink, LevelsBySeq, Watermark};
 use crate::error::{MatchingError, Result};
 use crate::journal;
 use crate::lookup::{LookupIndex, LookupOutcome};
@@ -84,12 +84,12 @@ impl Service {
             to_seq = to,
             "republishing events the stream may not have received"
         );
-        let events = self.replay_events_after(from, usize::MAX)?;
+        let (events, levels) = self.replay_outputs_after(from)?;
         if events.is_empty() {
             return Ok(());
         }
         let mut egress = self.egress.lock().await;
-        egress.publish(to, &events).await?;
+        egress.publish(to, &events, &levels).await?;
         egress.watermark.flush()?;
         Ok(())
     }
@@ -112,6 +112,23 @@ impl Service {
 
     pub async fn book_snapshot(&self) -> crate::book::OrderBook {
         self.runtime.lock().await.engine().book().clone()
+    }
+
+    /// The book, the sequence it reflects and its reference price, read under
+    /// ONE lock.
+    ///
+    /// Three separate reads let a command land between them: a book at
+    /// sequence N labelled N+1. A consumer that mirrors the book from a
+    /// snapshot (ADR-0036 §3) would then skip N+1's level changes as already
+    /// applied and hold a wrong book with nothing to tell it so.
+    pub async fn book_view(&self) -> (Seq, Option<crate::types::Price>, crate::book::OrderBook) {
+        let runtime = self.runtime.lock().await;
+        let engine = runtime.engine();
+        (
+            engine.last_seq(),
+            engine.reference_price(),
+            engine.book().clone(),
+        )
     }
 
     /// The price the collar is centred on (ADR-0027): last trade, then mid,
@@ -137,15 +154,15 @@ impl Service {
             _ => None,
         };
 
-        let (seq, events, egress_guard) = {
+        let (seq, events, levels, egress_guard) = {
             let mut runtime = self.runtime.lock().await;
-            let events = runtime.submit(timestamp_ms, command)?;
+            let (events, levels) = runtime.submit_with_levels(timestamp_ms, command)?;
             let seq = runtime.engine().last_seq();
             // Hand-over-hand. Acquired BEFORE the runtime lock is dropped, so
             // the next command cannot overtake this one on the way out.
             let egress = self.egress.lock().await;
             drop(runtime);
-            (seq, events, egress)
+            (seq, events, levels, egress)
         };
 
         // The order reached the journal, so the lookup must be able to find it
@@ -161,7 +178,7 @@ impl Service {
         let mut egress = egress_guard;
         // Re-emission must serve this command even if publishing it fails: it
         // is journaled, so it happened, and it may have matched.
-        egress.ring.record(&events);
+        egress.ring.record_with_levels(&events, &levels);
 
         // A command whose publish failed (a 503) left the watermark behind it.
         // Publishing THIS one now would advance the watermark past it, and its
@@ -171,22 +188,21 @@ impl Service {
         // any events that did get through, and drops them by event key.
         let confirmed = egress.watermark.value();
         if confirmed + 1 < seq {
-            let gap: Vec<Event> = self
-                .events_from(&egress, confirmed)?
-                .into_iter()
-                .filter(|event| event.seq() < seq)
-                .collect();
+            let (gap, gap_levels) = self.outputs_from(&egress, confirmed)?;
+            let gap: Vec<Event> = gap.into_iter().filter(|event| event.seq() < seq).collect();
             if !gap.is_empty() {
                 tracing::warn!(
                     from_seq = confirmed,
                     to_seq = seq - 1,
                     "republishing events an earlier publish did not confirm"
                 );
-                egress.publish(seq - 1, &gap).await?;
+                egress.publish(seq - 1, &gap, &gap_levels).await?;
             }
         }
 
-        egress.publish(seq, &events).await?;
+        egress
+            .publish(seq, &events, &LevelsBySeq::from([(seq, levels)]))
+            .await?;
         Ok(Submitted { seq, events })
     }
 
@@ -201,11 +217,29 @@ impl Service {
     /// the live engine.
     /// Every event after `seq`, from the ring when it reaches back that far
     /// and the journal otherwise. For a caller already holding the egress lock.
-    fn events_from(&self, egress: &Egress, seq: Seq) -> Result<Vec<Event>> {
+    ///
+    /// With each sequence's level changes, so a republished command carries
+    /// them exactly as its first publish would have.
+    fn outputs_from(&self, egress: &Egress, seq: Seq) -> Result<(Vec<Event>, LevelsBySeq)> {
         match egress.ring.since(seq, usize::MAX) {
-            Some(events) => Ok(events),
-            None => self.replay_events_after(seq, usize::MAX),
+            Some(events) => Ok((events, egress.ring.levels_since(seq))),
+            None => self.replay_outputs_after(seq),
         }
+    }
+
+    /// Every event after `seq` and each sequence's level changes, re-derived
+    /// from the journal. Deterministic, so identical to what was first produced.
+    fn replay_outputs_after(&self, seq: Seq) -> Result<(Vec<Event>, LevelsBySeq)> {
+        let path = journal_path(&self.data_dir);
+        let mut events = Vec::new();
+        let mut levels = LevelsBySeq::new();
+        for output in Runtime::replay_with_levels(self.market.clone(), path)? {
+            if output.seq > seq {
+                events.extend(output.events);
+                levels.insert(output.seq, output.levels);
+            }
+        }
+        Ok((events, levels))
     }
 
     pub async fn events_since(&self, seq: Seq, limit: usize) -> Result<Vec<Event>> {
@@ -242,6 +276,16 @@ impl Service {
     pub async fn memory_published(&self) -> Option<Vec<Event>> {
         match &self.egress.lock().await.sink {
             EventSink::Memory(sink) => Some(sink.published().to_vec()),
+            EventSink::Redis(_) => None,
+        }
+    }
+
+    /// For tests: the `levels` an in-memory sink published, by sequence.
+    pub async fn memory_published_levels(
+        &self,
+    ) -> Option<Vec<(Seq, Vec<crate::types::LevelChange>)>> {
+        match &self.egress.lock().await.sink {
+            EventSink::Memory(sink) => Some(sink.published_levels().to_vec()),
             EventSink::Redis(_) => None,
         }
     }

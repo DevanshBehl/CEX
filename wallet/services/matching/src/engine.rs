@@ -98,6 +98,13 @@ impl Engine {
         }
     }
 
+    /// The levels changed since this was last called, with their quantities
+    /// now (ADR-0036 §1). Beside `apply`'s events, never inside them: `apply`
+    /// returns exactly what it always has.
+    pub fn take_level_changes(&mut self) -> Vec<crate::types::LevelChange> {
+        self.book.take_level_changes()
+    }
+
     pub fn apply(&mut self, sequenced: SequencedCommand) -> Vec<Event> {
         let SequencedCommand {
             seq,

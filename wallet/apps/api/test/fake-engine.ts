@@ -57,6 +57,14 @@ export interface FakeEngine extends EngineClient {
   changeStatus(): void;
   /** Journal one command's events exactly as given — for events no honest book emits. */
   journalEvents(events: readonly EngineEvent[]): bigint;
+  /**
+   * What the real engine publishes as `levels` on the last stream entry of a
+   * sequence (ADR-0036 §1): every level the command changed, at its quantity
+   * afterwards. Undefined for a sequence this fake did not journal.
+   */
+  levelsOf(
+    seq: bigint,
+  ): ReadonlyArray<{ side: 'buy' | 'sell'; price: bigint; qty: bigint }> | undefined;
 }
 
 export function createFakeEngine(input: {
@@ -313,6 +321,8 @@ export function createFakeEngine(input: {
       allEvents.push({ kind: 'status_changed', seq });
     },
 
+    levelsOf: () => undefined,
+
     journalEvents(events) {
       seq += 1n;
       for (const event of events) {
@@ -322,6 +332,56 @@ export function createFakeEngine(input: {
       return seq;
     },
   };
+  /*
+   * Level changes, derived the way a test can trust: the fake's own book
+   * before and after each command, diffed. Every method that journals a
+   * sequence is wrapped, so there is no path that advances `seq` without
+   * recording what it did to the book.
+   */
+  const levels = new Map<bigint, Array<{ side: 'buy' | 'sell'; price: bigint; qty: bigint }>>();
+  const aggregated = (): Map<string, bigint> => {
+    const out = new Map<string, bigint>();
+    for (const { remaining, command } of resting.values()) {
+      if (command.price === null) continue;
+      const key = `${command.side}:${command.price.toString()}`;
+      out.set(key, (out.get(key) ?? 0n) + remaining);
+    }
+    return out;
+  };
+  const tracked = <A extends unknown[], R>(method: (...args: A) => R): ((...args: A) => R) => {
+    const record = (before: Map<string, bigint>, startSeq: bigint): void => {
+      if (seq === startSeq) return;
+      const after = aggregated();
+      const changes: Array<{ side: 'buy' | 'sell'; price: bigint; qty: bigint }> = [];
+      for (const key of new Set([...before.keys(), ...after.keys()])) {
+        const now = after.get(key) ?? 0n;
+        if ((before.get(key) ?? 0n) === now) continue;
+        const [side, price] = key.split(':') as ['buy' | 'sell', string];
+        changes.push({ side, price: BigInt(price), qty: now });
+      }
+      levels.set(seq, changes);
+    };
+    return (...args: A): R => {
+      const before = aggregated();
+      const startSeq = seq;
+      const result = method(...args);
+      if (result instanceof Promise) {
+        return result.then((value: unknown) => {
+          record(before, startSeq);
+          return value;
+        }) as R;
+      }
+      record(before, startSeq);
+      return result;
+    };
+  };
+  engine.place = tracked(engine.place.bind(engine));
+  engine.cancel = tracked(engine.cancel.bind(engine));
+  engine.amend = tracked(engine.amend.bind(engine));
+  engine.changeStatus = tracked(engine.changeStatus.bind(engine));
+  engine.journalEvents = tracked(engine.journalEvents.bind(engine));
+  engine.levelsOf = (at) => levels.get(at);
+
   return engine;
 }
 

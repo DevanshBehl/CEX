@@ -53,6 +53,26 @@ export const capabilitiesResponseSchema = z.object({
     /** What a request naming no cluster is answered for. */
     default: clusterSchema,
   }),
+  /**
+   * What the exchange side of this deployment does — coarse, like the rest of
+   * this endpoint, and for the same reason: the interface must ASK rather than
+   * carry copy that goes stale (prompt_phase_s5.md rule 135).
+   */
+  trading: z.object({
+    enabled: z.boolean(),
+    /**
+     * False means fills match and move no balance. The trading screen says so.
+     */
+    settlement: z.boolean(),
+    /** False means no book, tape, chart or socket. */
+    marketData: z.boolean(),
+    /**
+     * True when the book includes quotes from the demo market maker
+     * (ADR-0038): a program quoting around a price it was given — by default,
+     * one it made up. Shown wherever that liquidity is.
+     */
+    syntheticLiquidity: z.boolean(),
+  }),
   assets: z.object({
     /** Ledger asset keys the platform will credit, cluster-qualified. */
     supported: z.array(z.string()),
